@@ -4,11 +4,22 @@
 //! including match navigation and replace-all functionality.
 
 use rust_pad_core::cursor::{char_to_pos, pos_to_char};
-use rust_pad_core::search::SearchEngine;
+use rust_pad_core::document::Document;
+use rust_pad_core::search::{SearchEngine, SearchMatch};
 
 use crate::dialogs::{FindReplaceAction, SearchScope};
 
 use super::App;
+
+/// Navigates a document's cursor to select the given match.
+fn navigate_to_match(doc: &mut Document, mat: &SearchMatch) {
+    let pos = char_to_pos(&doc.buffer, mat.start);
+    doc.cursor.clear_selection();
+    doc.cursor.move_to(pos, &doc.buffer);
+    doc.cursor.start_selection();
+    let end_pos = char_to_pos(&doc.buffer, mat.end);
+    doc.cursor.move_to(end_pos, &doc.buffer);
+}
 
 impl App {
     /// Dispatches a search action to the appropriate handler based on scope.
@@ -52,13 +63,7 @@ impl App {
                 if let Some(idx) = self.find_replace.engine.find_next(cursor_char) {
                     let total = self.find_replace.engine.match_count();
                     self.find_replace.status = format!("{}/{total} matches", idx + 1);
-                    let mat = &self.find_replace.engine.matches[idx];
-                    let pos = char_to_pos(&doc.buffer, mat.start);
-                    doc.cursor.clear_selection();
-                    doc.cursor.move_to(pos, &doc.buffer);
-                    doc.cursor.start_selection();
-                    let end_pos = char_to_pos(&doc.buffer, mat.end);
-                    doc.cursor.move_to(end_pos, &doc.buffer);
+                    navigate_to_match(doc, &self.find_replace.engine.matches[idx].clone());
                 } else {
                     self.find_replace.status = "No matches".to_string();
                 }
@@ -81,13 +86,7 @@ impl App {
                 if let Some(idx) = self.find_replace.engine.find_prev(cursor_char) {
                     let total = self.find_replace.engine.match_count();
                     self.find_replace.status = format!("{}/{total} matches", idx + 1);
-                    let mat = &self.find_replace.engine.matches[idx];
-                    let pos = char_to_pos(&doc.buffer, mat.start);
-                    doc.cursor.clear_selection();
-                    doc.cursor.move_to(pos, &doc.buffer);
-                    doc.cursor.start_selection();
-                    let end_pos = char_to_pos(&doc.buffer, mat.end);
-                    doc.cursor.move_to(end_pos, &doc.buffer);
+                    navigate_to_match(doc, &self.find_replace.engine.matches[idx].clone());
                 } else {
                     self.find_replace.status = "No matches".to_string();
                 }
@@ -182,49 +181,29 @@ impl App {
                     let cursor_char = pos_to_char(&doc.buffer, doc.cursor.position).unwrap_or(0);
 
                     if let Some(idx) = self.find_replace.engine.find_next(cursor_char) {
-                        let mat = &self.find_replace.engine.matches[idx];
+                        let mat = self.find_replace.engine.matches[idx].clone();
                         if mat.start >= cursor_char || tab_count == 1 {
                             let total = self.find_replace.engine.match_count();
                             self.find_replace.status = format!("{}/{total} matches", idx + 1);
-                            let pos = char_to_pos(&doc.buffer, mat.start);
-                            doc.cursor.clear_selection();
-                            doc.cursor.move_to(pos, &doc.buffer);
-                            doc.cursor.start_selection();
-                            let end_pos = char_to_pos(&doc.buffer, mat.end);
-                            doc.cursor.move_to(end_pos, &doc.buffer);
+                            navigate_to_match(doc, &mat);
                             return;
                         }
                     }
                 }
 
                 // Try subsequent tabs
-                let start_tab = self.tabs.active;
-                for offset in 1..=tab_count {
-                    let tab_idx = (start_tab + offset) % tab_count;
-                    let doc = &mut self.tabs.documents[tab_idx];
-                    let mut engine = SearchEngine::new();
-                    if engine
-                        .find_all(&doc.buffer, &self.find_replace.options)
-                        .is_ok()
-                        && engine.match_count() > 0
-                    {
-                        // Navigate to first match in this tab
-                        let mat = &engine.matches[0];
-                        let pos = char_to_pos(&doc.buffer, mat.start);
-                        doc.cursor.clear_selection();
-                        doc.cursor.move_to(pos, &doc.buffer);
-                        doc.cursor.start_selection();
-                        let end_pos = char_to_pos(&doc.buffer, mat.end);
-                        doc.cursor.move_to(end_pos, &doc.buffer);
-
-                        self.tabs.active = tab_idx;
-                        // Update the main engine for the now-active tab
-                        self.find_replace.engine = engine;
-                        let total = self.find_replace.engine.match_count();
-                        self.find_replace.status =
-                            format!("1/{total} matches (tab: {})", doc.title);
-                        return;
-                    }
+                if let Some((tab_idx, engine, match_idx)) = self.find_match_in_other_tabs(true, 0) {
+                    let total = engine.match_count();
+                    let title = self.tabs.documents[tab_idx].title.clone();
+                    navigate_to_match(
+                        &mut self.tabs.documents[tab_idx],
+                        &engine.matches[match_idx].clone(),
+                    );
+                    self.tabs.active = tab_idx;
+                    self.find_replace.engine = engine;
+                    self.find_replace.status =
+                        format!("{}/{total} matches (tab: {title})", match_idx + 1);
+                    return;
                 }
 
                 self.find_replace.status = "No matches in any tab".to_string();
@@ -247,50 +226,32 @@ impl App {
                     let cursor_char = pos_to_char(&doc.buffer, ref_pos).unwrap_or(0);
 
                     if let Some(idx) = self.find_replace.engine.find_prev(cursor_char) {
-                        let mat = &self.find_replace.engine.matches[idx];
+                        let mat = self.find_replace.engine.matches[idx].clone();
                         if mat.start < cursor_char || tab_count == 1 {
                             let total = self.find_replace.engine.match_count();
                             self.find_replace.status = format!("{}/{total} matches", idx + 1);
-                            let pos = char_to_pos(&doc.buffer, mat.start);
-                            doc.cursor.clear_selection();
-                            doc.cursor.move_to(pos, &doc.buffer);
-                            doc.cursor.start_selection();
-                            let end_pos = char_to_pos(&doc.buffer, mat.end);
-                            doc.cursor.move_to(end_pos, &doc.buffer);
+                            navigate_to_match(doc, &mat);
                             return;
                         }
                     }
                 }
 
-                // Try previous tabs
-                let start_tab = self.tabs.active;
-                for offset in 1..=tab_count {
-                    let tab_idx = (start_tab + tab_count - offset) % tab_count;
-                    let doc = &mut self.tabs.documents[tab_idx];
-                    let mut engine = SearchEngine::new();
-                    if engine
-                        .find_all(&doc.buffer, &self.find_replace.options)
-                        .is_ok()
-                        && engine.match_count() > 0
-                    {
-                        // Navigate to last match in this tab
-                        let last = engine.match_count() - 1;
-                        let mat = &engine.matches[last];
-                        let pos = char_to_pos(&doc.buffer, mat.start);
-                        doc.cursor.clear_selection();
-                        doc.cursor.move_to(pos, &doc.buffer);
-                        doc.cursor.start_selection();
-                        let end_pos = char_to_pos(&doc.buffer, mat.end);
-                        doc.cursor.move_to(end_pos, &doc.buffer);
-
-                        self.tabs.active = tab_idx;
-                        self.find_replace.engine = engine;
-                        self.find_replace.engine.current_match = Some(last);
-                        let total = self.find_replace.engine.match_count();
-                        self.find_replace.status =
-                            format!("{}/{total} matches (tab: {})", last + 1, doc.title);
-                        return;
-                    }
+                // Try previous tabs (last match in each tab)
+                if let Some((tab_idx, mut engine, match_idx)) =
+                    self.find_match_in_other_tabs(false, usize::MAX)
+                {
+                    let total = engine.match_count();
+                    let title = self.tabs.documents[tab_idx].title.clone();
+                    navigate_to_match(
+                        &mut self.tabs.documents[tab_idx],
+                        &engine.matches[match_idx].clone(),
+                    );
+                    engine.current_match = Some(match_idx);
+                    self.tabs.active = tab_idx;
+                    self.find_replace.engine = engine;
+                    self.find_replace.status =
+                        format!("{}/{total} matches (tab: {title})", match_idx + 1);
+                    return;
                 }
 
                 self.find_replace.status = "No matches in any tab".to_string();
@@ -358,5 +319,43 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Searches other tabs for a match, returning `(tab_index, engine, match_index)`.
+    ///
+    /// When `forward` is true, iterates tabs forward from the active tab and returns
+    /// the first match (index 0). When false, iterates backward and returns the
+    /// last match. `match_hint` of 0 selects the first match, `usize::MAX` selects
+    /// the last.
+    fn find_match_in_other_tabs(
+        &self,
+        forward: bool,
+        match_hint: usize,
+    ) -> Option<(usize, SearchEngine, usize)> {
+        let tab_count = self.tabs.tab_count();
+        let start_tab = self.tabs.active;
+
+        for offset in 1..=tab_count {
+            let tab_idx = if forward {
+                (start_tab + offset) % tab_count
+            } else {
+                (start_tab + tab_count - offset) % tab_count
+            };
+            let doc = &self.tabs.documents[tab_idx];
+            let mut engine = SearchEngine::new();
+            if engine
+                .find_all(&doc.buffer, &self.find_replace.options)
+                .is_ok()
+                && engine.match_count() > 0
+            {
+                let match_idx = if match_hint == 0 {
+                    0
+                } else {
+                    engine.match_count() - 1
+                };
+                return Some((tab_idx, engine, match_idx));
+            }
+        }
+        None
     }
 }

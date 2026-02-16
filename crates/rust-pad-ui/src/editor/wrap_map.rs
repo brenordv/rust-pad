@@ -103,3 +103,180 @@ impl WrapMap {
         (logical, wrap_row)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_pad_core::document::Document;
+
+    fn doc_from(text: &str) -> Document {
+        let mut doc = Document::new();
+        if !text.is_empty() {
+            doc.insert_text(text);
+        }
+        doc
+    }
+
+    // ── WrapMap::build ─────────────────────────────────────────────
+
+    #[test]
+    fn build_single_short_line() {
+        let doc = doc_from("hello");
+        let wm = WrapMap::build(&doc, 80);
+        assert_eq!(wm.total_visual_lines, 1);
+        assert_eq!(wm.visual_lines_for(0), 1);
+    }
+
+    #[test]
+    fn build_wraps_long_line() {
+        // 20 chars in a 10-char-wide viewport → 2 visual lines
+        let doc = doc_from("abcdefghijklmnopqrst");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.total_visual_lines, 2);
+        assert_eq!(wm.visual_lines_for(0), 2);
+    }
+
+    #[test]
+    fn build_empty_document() {
+        let doc = doc_from("");
+        let wm = WrapMap::build(&doc, 80);
+        assert_eq!(wm.total_visual_lines, 1);
+        assert_eq!(wm.visual_lines_for(0), 1);
+    }
+
+    #[test]
+    fn build_multiple_lines() {
+        // "ab\n" + "1234567890123456789\n" + "end"
+        // line 0: "ab" (2 chars) → 1 visual line
+        // line 1: "1234567890123456789" (19 chars) → ceil(19/10) = 2 visual lines
+        // line 2: "end" (3 chars) → 1 visual line
+        let doc = doc_from("ab\n1234567890123456789\nend");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.visual_lines_for(0), 1);
+        assert_eq!(wm.visual_lines_for(1), 2);
+        assert_eq!(wm.visual_lines_for(2), 1);
+        assert_eq!(wm.total_visual_lines, 4);
+    }
+
+    #[test]
+    fn build_empty_lines() {
+        let doc = doc_from("a\n\nb");
+        let wm = WrapMap::build(&doc, 80);
+        // 3 logical lines, each 1 visual line
+        assert_eq!(wm.total_visual_lines, 3);
+        assert_eq!(wm.visual_lines_for(1), 1); // empty line still gets 1 visual line
+    }
+
+    #[test]
+    fn build_exact_fit() {
+        // Exactly 10 chars in a 10-char viewport → 1 visual line (not 2)
+        let doc = doc_from("1234567890");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.visual_lines_for(0), 1);
+        assert_eq!(wm.total_visual_lines, 1);
+    }
+
+    #[test]
+    fn build_one_over_wraps() {
+        // 11 chars in a 10-char viewport → 2 visual lines
+        let doc = doc_from("12345678901");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.visual_lines_for(0), 2);
+        assert_eq!(wm.total_visual_lines, 2);
+    }
+
+    #[test]
+    fn build_chars_per_visual_line_zero_clamped_to_one() {
+        let doc = doc_from("abc");
+        let wm = WrapMap::build(&doc, 0);
+        // chars_per_visual_line is clamped to 1
+        assert_eq!(wm.chars_per_visual_line, 1);
+        assert_eq!(wm.visual_lines_for(0), 3);
+    }
+
+    // ── logical_to_visual ──────────────────────────────────────────
+
+    #[test]
+    fn logical_to_visual_basic() {
+        // "ab\n" + "1234567890123456789\n" + "xy"
+        // Line 0: "ab" (2 chars) → 1 visual line
+        // Line 1: "1234567890123456789" (19 chars) → ceil(19/10) = 2 visual lines
+        // Line 2: "xy" (2 chars) → 1 visual line
+        let doc = doc_from("ab\n1234567890123456789\nxy");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.logical_to_visual(0), 0);
+        assert_eq!(wm.logical_to_visual(1), 1);
+        assert_eq!(wm.logical_to_visual(2), 3);
+    }
+
+    #[test]
+    fn logical_to_visual_out_of_bounds() {
+        let doc = doc_from("abc");
+        let wm = WrapMap::build(&doc, 80);
+        assert_eq!(wm.logical_to_visual(999), wm.total_visual_lines);
+    }
+
+    // ── visual_to_logical ──────────────────────────────────────────
+
+    #[test]
+    fn visual_to_logical_no_wrap() {
+        let doc = doc_from("a\nb\nc");
+        let wm = WrapMap::build(&doc, 80);
+        assert_eq!(wm.visual_to_logical(0), (0, 0));
+        assert_eq!(wm.visual_to_logical(1), (1, 0));
+        assert_eq!(wm.visual_to_logical(2), (2, 0));
+    }
+
+    #[test]
+    fn visual_to_logical_with_wrap() {
+        let doc = doc_from("abcdefghijklmnopqrst\nxy");
+        let wm = WrapMap::build(&doc, 10);
+        // Line 0: 20 chars → 2 visual lines (visual 0 and 1)
+        // Line 1: 2 chars → visual line 2
+        assert_eq!(wm.visual_to_logical(0), (0, 0));
+        assert_eq!(wm.visual_to_logical(1), (0, 1));
+        assert_eq!(wm.visual_to_logical(2), (1, 0));
+    }
+
+    // ── position_to_visual_line ────────────────────────────────────
+
+    #[test]
+    fn position_to_visual_line_no_wrap() {
+        let doc = doc_from("abc\ndef");
+        let wm = WrapMap::build(&doc, 80);
+        assert_eq!(wm.position_to_visual_line(0, 2), 0);
+        assert_eq!(wm.position_to_visual_line(1, 0), 1);
+    }
+
+    #[test]
+    fn position_to_visual_line_with_wrap() {
+        let doc = doc_from("12345678901234567890");
+        let wm = WrapMap::build(&doc, 10);
+        // Col 0-9 → visual line 0, col 10-19 → visual line 1
+        assert_eq!(wm.position_to_visual_line(0, 0), 0);
+        assert_eq!(wm.position_to_visual_line(0, 9), 0);
+        assert_eq!(wm.position_to_visual_line(0, 10), 1);
+        assert_eq!(wm.position_to_visual_line(0, 19), 1);
+    }
+
+    // ── position_to_visual_col ─────────────────────────────────────
+
+    #[test]
+    fn position_to_visual_col_basic() {
+        let doc = doc_from("12345678901234567890");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.position_to_visual_col(0), 0);
+        assert_eq!(wm.position_to_visual_col(5), 5);
+        assert_eq!(wm.position_to_visual_col(10), 0); // wraps
+        assert_eq!(wm.position_to_visual_col(15), 5);
+    }
+
+    // ── visual_lines_for out of bounds ─────────────────────────────
+
+    #[test]
+    fn visual_lines_for_out_of_bounds() {
+        let doc = doc_from("abc");
+        let wm = WrapMap::build(&doc, 80);
+        assert_eq!(wm.visual_lines_for(999), 1); // default
+    }
+}

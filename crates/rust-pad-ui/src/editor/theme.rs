@@ -121,3 +121,121 @@ impl EditorTheme {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Default / dark ─────────────────────────────────────────────
+
+    #[test]
+    fn default_is_dark() {
+        let def = EditorTheme::default();
+        let dark = EditorTheme::dark();
+        assert_eq!(def.bg_color, dark.bg_color);
+        assert_eq!(def.text_color, dark.text_color);
+        assert_eq!(def.font_size, dark.font_size);
+    }
+
+    #[test]
+    fn dark_has_expected_font_size() {
+        let theme = EditorTheme::dark();
+        assert!((theme.font_size - 14.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dark_bg_is_dark() {
+        let theme = EditorTheme::dark();
+        // Dark theme bg should be dark (low RGB values)
+        assert_eq!(theme.bg_color, Color32::from_rgb(30, 30, 30));
+    }
+
+    #[test]
+    fn dark_text_is_light() {
+        let theme = EditorTheme::dark();
+        assert_eq!(theme.text_color, Color32::from_rgb(212, 212, 212));
+    }
+
+    // ── Light theme ────────────────────────────────────────────────
+
+    #[test]
+    fn light_bg_is_white() {
+        let theme = EditorTheme::light();
+        assert_eq!(theme.bg_color, Color32::from_rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn light_text_is_dark() {
+        let theme = EditorTheme::light();
+        assert_eq!(theme.text_color, Color32::from_rgb(30, 30, 30));
+    }
+
+    #[test]
+    fn light_has_expected_font_size() {
+        let theme = EditorTheme::light();
+        assert!((theme.font_size - 14.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dark_and_light_differ() {
+        let dark = EditorTheme::dark();
+        let light = EditorTheme::light();
+        assert_ne!(dark.bg_color, light.bg_color);
+        assert_ne!(dark.text_color, light.text_color);
+        assert_ne!(dark.cursor_color, light.cursor_color);
+    }
+
+    // ── from_config ────────────────────────────────────────────────
+
+    #[test]
+    fn from_config_uses_provided_font_size() {
+        let config = EditorColors::default();
+        let theme = EditorTheme::from_config(&config, 20.0);
+        assert!((theme.font_size - 20.0).abs() < f32::EPSILON);
+        assert_eq!(theme.font_id, FontId::monospace(20.0));
+    }
+
+    #[test]
+    fn from_config_uses_config_colors() {
+        let mut config = EditorColors::default();
+        config.bg_color = HexColor::rgb(100, 100, 100);
+        let theme = EditorTheme::from_config(&config, 14.0);
+        assert_eq!(theme.bg_color, Color32::from_rgb(100, 100, 100));
+    }
+
+    #[test]
+    fn from_config_default_matches_dark() {
+        let config = EditorColors::default();
+        let from_cfg = EditorTheme::from_config(&config, 14.0);
+        let dark = EditorTheme::dark();
+        // The default EditorColors should produce colors matching the dark theme
+        assert_eq!(from_cfg.bg_color, dark.bg_color);
+        assert_eq!(from_cfg.text_color, dark.text_color);
+        assert_eq!(from_cfg.cursor_color, dark.cursor_color);
+    }
+
+    #[test]
+    fn from_config_show_change_tracking_defaults_false() {
+        let config = EditorColors::default();
+        let theme = EditorTheme::from_config(&config, 14.0);
+        assert!(!theme.show_change_tracking);
+    }
+
+    #[test]
+    fn from_config_gutter_width_is_50() {
+        let config = EditorColors::default();
+        let theme = EditorTheme::from_config(&config, 14.0);
+        assert!((theme.gutter_width - 50.0).abs() < f32::EPSILON);
+    }
+
+    // ── Clone ──────────────────────────────────────────────────────
+
+    #[test]
+    fn theme_clone_produces_equal_copy() {
+        let theme = EditorTheme::dark();
+        let cloned = theme.clone();
+        assert_eq!(theme.bg_color, cloned.bg_color);
+        assert_eq!(theme.text_color, cloned.text_color);
+        assert_eq!(theme.font_size, cloned.font_size);
+    }
+}

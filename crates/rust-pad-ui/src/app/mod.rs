@@ -1569,4 +1569,305 @@ mod tests {
         // by checking the struct has the scope field
         assert_eq!(dialog.scope, SearchScope::CurrentTab);
     }
+
+    // -- FindNext / FindPrev in current tab --
+
+    #[test]
+    fn test_find_next_current_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("foo bar foo baz foo");
+        app.tabs.active_doc_mut().cursor.position = Position::new(0, 0);
+        set_find_text(&mut app, "foo");
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::FindNext);
+        // Should find first "foo" and status should mention match number
+        assert!(app.find_replace.status.contains("matches"));
+        // Cursor should be selecting the match
+        assert!(app.tabs.active_doc().cursor.selection_anchor.is_some());
+    }
+
+    #[test]
+    fn test_find_next_current_tab_no_matches() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "xyz");
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::FindNext);
+        assert!(app.find_replace.status.contains("No matches"));
+    }
+
+    #[test]
+    fn test_find_prev_current_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("foo bar foo");
+        // Place cursor at the end
+        app.tabs.active_doc_mut().cursor.position = Position::new(0, 11);
+        set_find_text(&mut app, "foo");
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::FindPrev);
+        assert!(app.find_replace.status.contains("matches"));
+    }
+
+    #[test]
+    fn test_find_prev_uses_selection_start() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("foo bar foo");
+        // Select the second "foo" (chars 8-11)
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.selection_anchor = Some(Position::new(0, 8));
+        doc.cursor.position = Position::new(0, 11);
+        set_find_text(&mut app, "foo");
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::FindPrev);
+        // Should find the first "foo" (before the current selection)
+        assert!(app.find_replace.status.contains("1/2 matches"));
+    }
+
+    // -- Replace / ReplaceAll in current tab --
+
+    #[test]
+    fn test_replace_current_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "hello");
+        app.find_replace.replace_text = "hi".to_string();
+        app.find_replace.scope = SearchScope::CurrentTab;
+        // First search to populate matches
+        app.handle_search_action(FindReplaceAction::Search);
+        // Navigate to first match
+        app.handle_search_action(FindReplaceAction::FindNext);
+        // Replace
+        app.handle_search_action(FindReplaceAction::Replace);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "hi world");
+        assert!(app.tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_replace_no_match() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "xyz");
+        app.find_replace.replace_text = "abc".to_string();
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::Replace);
+        assert!(app.find_replace.status.contains("No match"));
+    }
+
+    #[test]
+    fn test_replace_all_current_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("foo bar foo baz foo");
+        set_find_text(&mut app, "foo");
+        app.find_replace.replace_text = "X".to_string();
+        app.find_replace.scope = SearchScope::CurrentTab;
+        // Search first to populate matches in the engine
+        app.handle_search_action(FindReplaceAction::Search);
+        app.handle_search_action(FindReplaceAction::ReplaceAll);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "X bar X baz X");
+        assert!(app.find_replace.status.contains("3 occurrences"));
+    }
+
+    #[test]
+    fn test_search_empty_query() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "");
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::Search);
+        // Empty query should show 0 matches (not an error)
+        assert_eq!(app.find_replace.engine.match_count(), 0);
+    }
+
+    // -- Replace in all tabs --
+
+    #[test]
+    fn test_replace_current_tab_in_all_tabs_mode() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "hello");
+        app.find_replace.replace_text = "hi".to_string();
+        app.find_replace.scope = SearchScope::AllTabs;
+        // Search first, then FindNext to select the match, then Replace
+        app.handle_search_action(FindReplaceAction::Search);
+        app.handle_search_action(FindReplaceAction::FindNext);
+        app.handle_search_action(FindReplaceAction::Replace);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "hi world");
+    }
+
+    // -- File ops tests --
+
+    #[test]
+    fn test_new_tab_creates_tab() {
+        let mut app = test_app();
+        assert_eq!(app.tabs.tab_count(), 1);
+        app.new_tab();
+        assert_eq!(app.tabs.tab_count(), 2);
+    }
+
+    #[test]
+    fn test_new_tab_has_session_id() {
+        let mut app = test_app();
+        app.new_tab();
+        // The last document should have a session_id
+        let last = app.tabs.documents.last().unwrap();
+        assert!(last.session_id.is_some());
+    }
+
+    #[test]
+    fn test_request_close_tab_out_of_bounds() {
+        let mut app = test_app();
+        assert_eq!(app.tabs.tab_count(), 1);
+        // Closing out-of-bounds index should do nothing
+        app.request_close_tab(999);
+        assert_eq!(app.tabs.tab_count(), 1);
+    }
+
+    #[test]
+    fn test_auto_save_skips_unmodified() {
+        let mut app = test_app();
+        // Doc is unmodified and has no file_path — auto_save should be a no-op
+        assert!(!app.tabs.active_doc().modified);
+        app.auto_save_all(); // Should not panic
+    }
+
+    #[test]
+    fn test_auto_save_skips_no_filepath() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("unsaved content");
+        app.tabs.active_doc_mut().modified = true;
+        // No file_path, so auto_save should skip
+        app.auto_save_all();
+        // Doc should still be modified (wasn't saved)
+        assert!(app.tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_check_live_monitored_skips_non_monitored() {
+        let mut app = test_app();
+        assert!(!app.tabs.active_doc().live_monitoring);
+        // Should be a no-op, no crash
+        app.check_live_monitored_files();
+    }
+
+    #[test]
+    fn test_cleanup_session_for_tab_no_session() {
+        let app = test_app();
+        // No session_id and no session_store — should not panic
+        app.cleanup_session_for_tab(0);
+    }
+
+    // -- Clipboard tests --
+
+    #[test]
+    fn test_copy_no_selection_noop() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        // No selection
+        app.tabs.active_doc_mut().cursor.position = Position::new(0, 3);
+        // clipboard is None in test_app, so this just exercises the code path
+        app.copy();
+        // Buffer unchanged
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "hello");
+    }
+
+    #[test]
+    fn test_paste_no_clipboard_noop() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        // clipboard is None in test_app
+        app.paste();
+        // Nothing happens since we have no clipboard
+        // The text after the cursor insertion from insert_text won't be affected
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "hello");
+    }
+
+    #[test]
+    fn test_cut_multi_cursor_deletes_selections() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("aabbcc");
+        // Select "aa"
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.position = Position::new(0, 2);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        // Select "cc"
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.position = Position::new(0, 6);
+        sc.selection_anchor = Some(Position::new(0, 4));
+        doc.secondary_cursors.push(sc);
+
+        app.cut();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "bb");
+    }
+
+    #[test]
+    fn test_copy_multi_cursor_no_selection_noop() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.position = Position::new(0, 3);
+        app.tabs.active_doc_mut().secondary_cursors.push(sc);
+        // No selections on any cursor
+        app.copy();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "hello");
+    }
+
+    // -- FindNext/FindPrev all tabs edge cases --
+
+    #[test]
+    fn test_find_next_all_tabs_single_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("foo bar foo");
+        app.tabs.active_doc_mut().cursor.position = Position::new(0, 0);
+        set_find_text(&mut app, "foo");
+        app.find_replace.scope = SearchScope::AllTabs;
+        app.handle_search_action(FindReplaceAction::FindNext);
+        // With single tab, should find in current tab
+        assert!(app.find_replace.status.contains("matches"));
+        assert_eq!(app.tabs.active, 0);
+    }
+
+    #[test]
+    fn test_find_prev_all_tabs_no_matches() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        app.tabs.new_tab();
+        app.tabs.active_doc_mut().insert_text("world");
+        set_find_text(&mut app, "xyz");
+        app.find_replace.scope = SearchScope::AllTabs;
+        app.handle_search_action(FindReplaceAction::FindPrev);
+        assert!(app.find_replace.status.contains("No matches"));
+    }
+
+    #[test]
+    fn test_replace_all_tabs_no_matches() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "xyz");
+        app.find_replace.replace_text = "abc".to_string();
+        app.find_replace.scope = SearchScope::AllTabs;
+        app.handle_search_action(FindReplaceAction::ReplaceAll);
+        assert!(app.find_replace.status.contains("0 occurrences"));
+    }
+
+    #[test]
+    fn test_search_invalid_regex_current_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "[invalid(");
+        app.find_replace.options.use_regex = true;
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::Search);
+        assert!(app.find_replace.status.starts_with("Error:"));
+    }
+
+    #[test]
+    fn test_search_invalid_regex_all_tabs() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "[invalid(");
+        app.find_replace.options.use_regex = true;
+        app.find_replace.scope = SearchScope::AllTabs;
+        app.handle_search_action(FindReplaceAction::Search);
+        assert!(app.find_replace.status.starts_with("Error:"));
+    }
 }

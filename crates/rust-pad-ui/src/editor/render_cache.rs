@@ -96,3 +96,171 @@ pub(crate) fn hash_str(s: &str) -> u64 {
     }
     hash
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── hash_str ───────────────────────────────────────────────────
+
+    #[test]
+    fn hash_str_deterministic() {
+        let h1 = hash_str("hello world");
+        let h2 = hash_str("hello world");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn hash_str_different_strings() {
+        assert_ne!(hash_str("abc"), hash_str("def"));
+    }
+
+    #[test]
+    fn hash_str_empty() {
+        // Should not panic, returns the FNV offset basis
+        let h = hash_str("");
+        assert_eq!(h, 0xcbf29ce484222325);
+    }
+
+    #[test]
+    fn hash_str_single_char_differs() {
+        assert_ne!(hash_str("a"), hash_str("b"));
+    }
+
+    #[test]
+    fn hash_str_similar_strings_differ() {
+        // Near-identical strings should produce different hashes
+        assert_ne!(hash_str("hello world"), hash_str("hello worle"));
+    }
+
+    #[test]
+    fn hash_str_unicode() {
+        let h1 = hash_str("café");
+        let h2 = hash_str("café");
+        assert_eq!(h1, h2);
+        assert_ne!(hash_str("café"), hash_str("cafe"));
+    }
+
+    // ── RenderCache ────────────────────────────────────────────────
+
+    #[test]
+    fn cache_new_is_empty() {
+        let cache = RenderCache::new();
+        assert!(cache.get(0, 123).is_none());
+    }
+
+    /// Creates a test galley using egui's font system.
+    fn test_galley() -> Arc<Galley> {
+        let ctx = egui::Context::default();
+        // Must call run() once to initialize fonts
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        ctx.fonts_mut(|fonts| {
+            let job = egui::text::LayoutJob::simple_singleline(
+                "test".to_string(),
+                egui::FontId::monospace(14.0),
+                egui::Color32::WHITE,
+            );
+            fonts.layout_job(job)
+        })
+    }
+
+    #[test]
+    fn cache_validate_version_change_clears() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        cache.insert(0, 42, test_galley());
+        assert!(cache.get(0, 42).is_some());
+
+        // Same version → preserved
+        cache.validate(1, 14.0);
+        assert!(cache.get(0, 42).is_some());
+
+        // Different version → cleared
+        cache.validate(2, 14.0);
+        assert!(cache.get(0, 42).is_none());
+    }
+
+    #[test]
+    fn cache_validate_font_size_change_clears() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        cache.insert(0, 42, test_galley());
+        assert!(cache.get(0, 42).is_some());
+
+        // Different font size → cleared
+        cache.validate(1, 16.0);
+        assert!(cache.get(0, 42).is_none());
+    }
+
+    #[test]
+    fn cache_get_mismatched_hash() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        cache.insert(0, 42, test_galley());
+
+        // Correct line, wrong hash
+        assert!(cache.get(0, 99).is_none());
+        // Wrong line, correct hash
+        assert!(cache.get(1, 42).is_none());
+        // Correct line and hash
+        assert!(cache.get(0, 42).is_some());
+    }
+
+    #[test]
+    fn cache_insert_and_get() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        cache.insert(5, 100, test_galley());
+
+        assert!(cache.get(5, 100).is_some());
+        assert!(cache.get(5, 101).is_none());
+    }
+
+    #[test]
+    fn cache_insert_overwrites_same_line() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        cache.insert(0, 42, test_galley());
+        cache.insert(0, 99, test_galley());
+
+        assert!(cache.get(0, 42).is_none());
+        assert!(cache.get(0, 99).is_some());
+    }
+
+    // ── get_render_cache ───────────────────────────────────────────
+
+    #[test]
+    fn get_render_cache_creates_new_when_none() {
+        let mut slot: Option<Box<dyn std::any::Any + Send>> = None;
+        let cache = get_render_cache(&mut slot);
+        assert!(cache.get(0, 0).is_none()); // fresh cache is empty
+    }
+
+    #[test]
+    fn get_render_cache_reuses_existing() {
+        let mut slot: Option<Box<dyn std::any::Any + Send>> = None;
+
+        {
+            let cache = get_render_cache(&mut slot);
+            cache.validate(1, 14.0);
+            cache.insert(5, 100, test_galley());
+        }
+
+        {
+            let cache = get_render_cache(&mut slot);
+            assert!(cache.get(5, 100).is_some());
+        }
+    }
+
+    #[test]
+    fn get_render_cache_replaces_wrong_type() {
+        let mut slot: Option<Box<dyn std::any::Any + Send>> = Some(Box::new(42u32));
+        let cache = get_render_cache(&mut slot);
+        assert!(cache.get(0, 0).is_none());
+    }
+}

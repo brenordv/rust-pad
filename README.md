@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="rust-pad logo" width="128" />
+  <img src="assets/logo.png" alt="rust-pad logo" width="256" />
 </p>
 <h1 align="center">rust-pad</h1>
 <p align="center">
@@ -7,6 +7,26 @@
 </p>
 
 ---
+[![Release](https://github.com/brenordv/rust-pad/actions/workflows/release.yml/badge.svg)](https://github.com/brenordv/rust-pad/actions/workflows/release.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=bugs)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Technical Debt](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=sqale_index)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=code_smells)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=coverage)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Duplicated Lines (%)](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=duplicated_lines_density)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=ncloc)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+---
+
+## Motivation
+I absolutely love Notepad++, so whenever I consider moving away from Windows, I end up looking for a way to run it on Linux. 
+Since I prefer native applications, I decided to take the longer route and write my own text editor in Rust. 
+This isn’t a port of Notepad++ and it doesn’t include all of its features—nor am I trying to compete with it. 
+Instead, my goal is to build a cross-platform Notepad-like editor with a few neat features, keeping it as simple, 
+stable, and fast as possible.
 
 ## Features
 
@@ -61,70 +81,70 @@
 
 ### File Operations
 
-| Shortcut | Action |
-|---|---|
-| Ctrl+N | New tab |
-| Ctrl+O | Open file |
-| Ctrl+S | Save |
-| Ctrl+Shift+S | Save As |
-| Ctrl+W | Close tab |
+| Shortcut     | Action    |
+|--------------|-----------|
+| Ctrl+N       | New tab   |
+| Ctrl+O       | Open file |
+| Ctrl+S       | Save      |
+| Ctrl+Shift+S | Save As   |
+| Ctrl+W       | Close tab |
 
 ### Editing
 
-| Shortcut | Action |
-|---|---|
-| Ctrl+Z | Undo |
-| Ctrl+Y | Redo |
-| Ctrl+X | Cut |
-| Ctrl+C | Copy |
-| Ctrl+V | Paste |
-| Ctrl+A | Select all |
-| Ctrl+D | Delete current line |
-| Tab | Increase indent |
-| Shift+Tab | Decrease indent |
+| Shortcut  | Action              |
+|-----------|---------------------|
+| Ctrl+Z    | Undo                |
+| Ctrl+Y    | Redo                |
+| Ctrl+X    | Cut                 |
+| Ctrl+C    | Copy                |
+| Ctrl+V    | Paste               |
+| Ctrl+A    | Select all          |
+| Ctrl+D    | Delete current line |
+| Tab       | Increase indent     |
+| Shift+Tab | Decrease indent     |
 
 ### Navigation & Search
 
-| Shortcut | Action |
-|---|---|
-| Ctrl+F | Open Find/Replace |
-| Ctrl+H | Open Find/Replace |
-| Ctrl+G | Go to Line |
-| Ctrl+F2 | Toggle bookmark |
-| F2 | Next bookmark |
+| Shortcut | Action            |
+|----------|-------------------|
+| Ctrl+F   | Open Find/Replace |
+| Ctrl+H   | Open Find/Replace |
+| Ctrl+G   | Go to Line        |
+| Ctrl+F2  | Toggle bookmark   |
+| F2       | Next bookmark     |
 | Shift+F2 | Previous bookmark |
 
 ### Multi-Cursor
 
-| Shortcut | Action |
-|---|---|
-| Ctrl+Click | Add cursor at click position |
-| Alt+Shift+Up | Add cursor above |
-| Alt+Shift+Down | Add cursor below |
-| Alt+Shift+Period | Select next occurrence |
-| Escape | Clear secondary cursors |
+| Shortcut         | Action                       |
+|------------------|------------------------------|
+| Ctrl+Click       | Add cursor at click position |
+| Alt+Shift+Up     | Add cursor above             |
+| Alt+Shift+Down   | Add cursor below             |
+| Alt+Shift+Period | Select next occurrence       |
+| Escape           | Clear secondary cursors      |
 
 ### Line Movement
 
-| Shortcut | Action |
-|---|---|
-| Alt+Up | Move line up |
+| Shortcut | Action         |
+|----------|----------------|
+| Alt+Up   | Move line up   |
 | Alt+Down | Move line down |
 
 ### Tabs
 
-| Shortcut | Action |
-|---|---|
-| Ctrl+Tab | Next tab |
+| Shortcut       | Action       |
+|----------------|--------------|
+| Ctrl+Tab       | Next tab     |
 | Ctrl+Shift+Tab | Previous tab |
 
 ### Zoom
 
-| Shortcut | Action |
-|---|---|
-| Ctrl++ | Zoom in |
-| Ctrl+- | Zoom out |
-| Ctrl+0 | Reset zoom |
+| Shortcut | Action     |
+|----------|------------|
+| Ctrl++   | Zoom in    |
+| Ctrl+-   | Zoom out   |
+| Ctrl+0   | Reset zoom |
 
 ---
 
@@ -134,24 +154,24 @@ rust-pad stores its configuration in a `rust-pad.json` file located next to the 
 
 ### Configuration Fields
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `current_theme` | string | `"System"` | Active theme name. `"System"` follows OS dark/light preference. Can be `"Dark"`, `"Light"`, or any custom theme name. |
-| `current_zoom_level` | float | `1.0` | Current zoom multiplier (0.5 to `max_zoom_level`). |
-| `max_zoom_level` | float | `15.0` | Maximum allowed zoom level (minimum 1.0). |
-| `word_wrap` | bool | `false` | Whether long lines wrap at the view edge. |
-| `show_special_chars` | bool | `false` | Show whitespace and line-ending markers. |
-| `show_line_numbers` | bool | `true` | Display the line number gutter. |
-| `restore_open_files` | bool | `true` | Reopen files from the previous session on startup. |
-| `show_full_path_in_title` | bool | `true` | Show the full file path in the window title bar. |
-| `font_size` | float | `16.0` | Base font size in points (6.0 to 72.0). |
-| `default_extension` | string | `""` | Default file extension for new untitled tabs (e.g. `"txt"`, `"md"`). Empty means none. |
-| `remember_last_folder` | bool | `true` | Remember the last folder used in open/save dialogs. |
-| `default_work_folder` | string | `""` | Default starting folder for file dialogs. Empty uses the user's home directory. |
-| `last_used_folder` | string | `""` | Persisted last folder from open/save dialogs (managed automatically). |
-| `auto_save_enabled` | bool | `false` | Enable periodic auto-save for file-backed documents. |
-| `auto_save_interval_secs` | int | `30` | Seconds between auto-saves (minimum 5). |
-| `themes` | array | (built-in Dark, Light, Wacky) | Array of theme definitions. See below. |
+| Field                     | Type   | Default                       | Description                                                                                                           |
+|---------------------------|--------|-------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `current_theme`           | string | `"System"`                    | Active theme name. `"System"` follows OS dark/light preference. Can be `"Dark"`, `"Light"`, or any custom theme name. |
+| `current_zoom_level`      | float  | `1.0`                         | Current zoom multiplier (0.5 to `max_zoom_level`).                                                                    |
+| `max_zoom_level`          | float  | `15.0`                        | Maximum allowed zoom level (minimum 1.0). Note: Values over 15 will start to degrade performance.                     |
+| `word_wrap`               | bool   | `false`                       | Whether long lines wrap at the view edge.                                                                             |
+| `show_special_chars`      | bool   | `false`                       | Show whitespace and line-ending markers.                                                                              |
+| `show_line_numbers`       | bool   | `true`                        | Display the line number gutter.                                                                                       |
+| `restore_open_files`      | bool   | `true`                        | Reopen files from the previous session on startup.                                                                    |
+| `show_full_path_in_title` | bool   | `true`                        | Show the full file path in the window title bar.                                                                      |
+| `font_size`               | float  | `16.0`                        | Base font size in points (6.0 to 72.0).                                                                               |
+| `default_extension`       | string | `""`                          | Default file extension for new untitled tabs (e.g. `"txt"`, `"md"`). Empty means none.                                |
+| `remember_last_folder`    | bool   | `true`                        | Remember the last folder used in open/save dialogs.                                                                   |
+| `default_work_folder`     | string | `""`                          | Default starting folder for file dialogs. Empty uses the user's home directory.                                       |
+| `last_used_folder`        | string | `""`                          | Persisted last folder from open/save dialogs (managed automatically).                                                 |
+| `auto_save_enabled`       | bool   | `false`                       | Enable periodic auto-save for file-backed documents.                                                                  |
+| `auto_save_interval_secs` | int    | `30`                          | Seconds between auto-saves (minimum 5).                                                                               |
+| `themes`                  | array  | (built-in Dark, Light, Wacky) | Array of theme definitions. See below.                                                                                |
 
 ### Custom Themes
 
@@ -163,15 +183,15 @@ Each theme includes a `syntax_theme` field that controls the color scheme used f
 
 The value must be one of the theme names bundled with [syntect](https://github.com/trishume/syntect). The default themes are:
 
-| Value | Style |
-|---|---|
-| `"base16-eighties.dark"` | Warm, muted dark palette (default for Dark theme) |
-| `"base16-ocean.dark"` | Cool blue-tinted dark palette |
-| `"base16-mocha.dark"` | Soft brown-tinted dark palette |
-| `"base16-ocean.light"` | Cool blue-tinted light palette |
-| `"InspiredGitHub"` | Light palette based on GitHub's code rendering (default for Light theme) |
-| `"Solarized (dark)"` | Ethan Schoonover's Solarized dark |
-| `"Solarized (light)"` | Ethan Schoonover's Solarized light |
+| Value                    | Style                                                                    |
+|--------------------------|--------------------------------------------------------------------------|
+| `"base16-eighties.dark"` | Warm, muted dark palette (default for Dark theme)                        |
+| `"base16-ocean.dark"`    | Cool blue-tinted dark palette                                            |
+| `"base16-mocha.dark"`    | Soft brown-tinted dark palette                                           |
+| `"base16-ocean.light"`   | Cool blue-tinted light palette                                           |
+| `"InspiredGitHub"`       | Light palette based on GitHub's code rendering (default for Light theme) |
+| `"Solarized (dark)"`     | Ethan Schoonover's Solarized dark                                        |
+| `"Solarized (light)"`    | Ethan Schoonover's Solarized light                                       |
 
 You can also load custom `.tmTheme` files (TextMate/Sublime Text theme format) by placing them alongside the executable. See the [syntect documentation](https://docs.rs/syntect/latest/syntect/highlighting/struct.ThemeSet.html) for details on loading additional themes.
 

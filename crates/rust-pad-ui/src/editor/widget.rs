@@ -42,6 +42,24 @@ pub(crate) const SCROLLBAR_MIN_THUMB: f32 = 20.0;
 /// Left padding inside the text area so content doesn't touch the gutter edge.
 const TEXT_LEFT_PADDING: f32 = 6.0;
 
+/// Per-segment rendering parameters shared between wrapped and non-wrapped paths.
+struct LineSegmentInfo<'a> {
+    /// Y position of this line/segment on screen.
+    line_y: f32,
+    /// The visible text content (full line for non-wrapped, segment for wrapped).
+    content: &'a str,
+    /// Document char offset where this segment starts.
+    segment_char_start: usize,
+    /// Document char offset where this segment ends.
+    segment_char_end: usize,
+    /// Whether the logical line ends with a newline.
+    line_has_newline: bool,
+    /// Horizontal scroll offset (0.0 for wrapped mode).
+    scroll_x: f32,
+    /// When `Some(idx)`, enables galley caching for this line index.
+    cache_line_idx: Option<usize>,
+}
+
 /// The custom editor widget that renders a Document.
 pub struct EditorWidget<'a> {
     pub doc: &'a mut Document,
@@ -255,17 +273,13 @@ impl<'a> EditorWidget<'a> {
                 if text_area.contains(pos) || gutter_rect.contains(pos) {
                     self.doc.clear_secondary_cursors();
                     if pos.x >= text_area.min.x {
-                        let click_pos = if let Some(ref wm) = wrap_map {
-                            self.screen_to_position_wrapped(
-                                pos,
-                                text_area,
-                                line_height,
-                                char_width,
-                                wm,
-                            )
-                        } else {
-                            self.screen_to_position(pos, text_area, line_height, char_width)
-                        };
+                        let click_pos = self.screen_to_position(
+                            pos,
+                            text_area,
+                            line_height,
+                            char_width,
+                            wrap_map.as_ref(),
+                        );
                         if response.drag_started() && ui.input(|i| i.modifiers.shift) {
                             self.doc.cursor.start_selection();
                         } else if response.clicked() {
@@ -284,11 +298,13 @@ impl<'a> EditorWidget<'a> {
             if let Some(pos) = response.interact_pointer_pos() {
                 if pos.x >= text_area.min.x && pos.x <= text_area.max.x {
                     self.doc.cursor.start_selection();
-                    let drag_pos = if let Some(ref wm) = wrap_map {
-                        self.screen_to_position_wrapped(pos, text_area, line_height, char_width, wm)
-                    } else {
-                        self.screen_to_position(pos, text_area, line_height, char_width)
-                    };
+                    let drag_pos = self.screen_to_position(
+                        pos,
+                        text_area,
+                        line_height,
+                        char_width,
+                        wrap_map.as_ref(),
+                    );
                     self.doc.cursor.move_to(drag_pos, &self.doc.buffer);
                 }
             }
@@ -334,11 +350,12 @@ impl<'a> EditorWidget<'a> {
             self.doc.cursor.position != cursor_pos_before || self.doc.scroll_to_cursor;
         self.doc.scroll_to_cursor = false;
         if cursor_moved {
-            if let Some(ref wm) = wrap_map {
-                self.ensure_cursor_visible_wrapped(visible_lines, wm);
-            } else {
-                self.ensure_cursor_visible(visible_lines, text_area.width(), char_width);
-            }
+            self.ensure_cursor_visible(
+                visible_lines,
+                text_area.width(),
+                char_width,
+                wrap_map.as_ref(),
+            );
         }
 
         // ── Render with up-to-date state ────────────────────────
@@ -396,7 +413,7 @@ impl<'a> EditorWidget<'a> {
                 &cursor_lines,
                 wm,
             );
-            self.render_cursors_wrapped(
+            self.render_cursors(
                 ui,
                 &painter,
                 &response,
@@ -405,7 +422,7 @@ impl<'a> EditorWidget<'a> {
                 char_width,
                 first_visual,
                 last_visual,
-                wm,
+                Some(wm),
             );
         } else {
             // ── Normal (non-wrapped) rendering path ──────────────
@@ -435,6 +452,7 @@ impl<'a> EditorWidget<'a> {
                 char_width,
                 first_visible_line,
                 last_visible_line,
+                None,
             );
         }
 
@@ -601,6 +619,345 @@ impl<'a> EditorWidget<'a> {
         ranges
     }
 
+    /// Renders a single line segment: occurrence/selection highlights, text, and special chars.
+    ///
+    /// Shared between the wrapped and non-wrapped rendering paths.
+    #[allow(clippy::too_many_arguments)]
+    fn render_line_segment(
+        &mut self,
+        ui: &mut Ui,
+        painter: &egui::Painter,
+        font_id: &FontId,
+        line_height: f32,
+        char_width: f32,
+        text_area: &Rect,
+        info: &LineSegmentInfo<'_>,
+        all_selection_ranges: &[(usize, usize)],
+        occurrence_ranges: &[(usize, usize)],
+    ) {
+        let badge_char_width = char_width * 0.7;
+        let has_badges = self.show_special_chars && Self::line_has_badges(info.content);
+        let x_positions = if has_badges {
+            Some(Self::compute_x_positions(
+                info.content,
+                char_width,
+                badge_char_width,
+            ))
+        } else {
+            None
+        };
+
+        self.render_occurrence_highlights(
+            painter,
+            line_height,
+            char_width,
+            text_area,
+            info,
+            occurrence_ranges,
+            x_positions.as_deref(),
+        );
+
+        self.render_selection_highlights(
+            painter,
+            line_height,
+            char_width,
+            badge_char_width,
+            text_area,
+            info,
+            all_selection_ranges,
+            x_positions.as_deref(),
+        );
+
+        let render_content = info.content.replace('\t', " ");
+
+        if has_badges {
+            self.render_text_with_badges(
+                painter,
+                font_id,
+                line_height,
+                char_width,
+                text_area,
+                info,
+                x_positions.as_deref().unwrap_or_default(),
+                &render_content,
+            );
+        } else {
+            let text_x = text_area.min.x - info.scroll_x;
+            let text_pos = Pos2::new(text_x, info.line_y + line_height * 0.15);
+            self.render_highlighted_text(
+                ui,
+                painter,
+                font_id,
+                text_pos,
+                &render_content,
+                info.cache_line_idx,
+            );
+        }
+
+        if self.show_special_chars {
+            let eol = if info.line_has_newline {
+                Some(self.doc.line_ending)
+            } else {
+                None
+            };
+            self.render_special_chars_overlay(
+                painter,
+                font_id,
+                info.line_y,
+                line_height,
+                char_width,
+                text_area,
+                info.content,
+                info.scroll_x,
+                eol,
+                x_positions.as_deref(),
+            );
+        }
+    }
+
+    /// Draws occurrence-highlight rectangles for search matches within a segment.
+    #[allow(clippy::too_many_arguments)]
+    fn render_occurrence_highlights(
+        &self,
+        painter: &egui::Painter,
+        line_height: f32,
+        char_width: f32,
+        text_area: &Rect,
+        info: &LineSegmentInfo<'_>,
+        occurrence_ranges: &[(usize, usize)],
+        x_positions: Option<&[f32]>,
+    ) {
+        let seg_len = info.segment_char_end - info.segment_char_start;
+        for &(occ_start, occ_end) in occurrence_ranges {
+            if occ_start < info.segment_char_end && occ_end > info.segment_char_start {
+                let col_start = occ_start.saturating_sub(info.segment_char_start);
+                let col_end = occ_end.saturating_sub(info.segment_char_start).min(seg_len);
+                let x_start = text_area.min.x + Self::col_to_x(x_positions, col_start, char_width)
+                    - info.scroll_x;
+                let x_end = text_area.min.x + Self::col_to_x(x_positions, col_end, char_width)
+                    - info.scroll_x;
+                let occ_rect = Rect::from_min_max(
+                    Pos2::new(x_start.max(text_area.min.x), info.line_y),
+                    Pos2::new(x_end.min(text_area.max.x), info.line_y + line_height),
+                );
+                painter.rect_filled(occ_rect, 0.0, self.theme.occurrence_highlight_color);
+            }
+        }
+    }
+
+    /// Draws selection-highlight rectangles for all cursors within a segment.
+    #[allow(clippy::too_many_arguments)]
+    fn render_selection_highlights(
+        &self,
+        painter: &egui::Painter,
+        line_height: f32,
+        char_width: f32,
+        badge_char_width: f32,
+        text_area: &Rect,
+        info: &LineSegmentInfo<'_>,
+        all_selection_ranges: &[(usize, usize)],
+        x_positions: Option<&[f32]>,
+    ) {
+        let seg_len = info.segment_char_end - info.segment_char_start;
+        for &(sel_start, sel_end) in all_selection_ranges {
+            if sel_start < info.segment_char_end + 1 && sel_end > info.segment_char_start {
+                let sel_col_start = sel_start.saturating_sub(info.segment_char_start);
+                let sel_col_end = if sel_end < info.segment_char_end {
+                    sel_end - info.segment_char_start
+                } else {
+                    seg_len + 1
+                };
+
+                let sel_x_start = text_area.min.x
+                    + Self::col_to_x(x_positions, sel_col_start, char_width)
+                    - info.scroll_x;
+                let mut sel_x_end = text_area.min.x
+                    + Self::col_to_x(x_positions, sel_col_end, char_width)
+                    - info.scroll_x;
+
+                if self.show_special_chars
+                    && sel_end > info.segment_char_end
+                    && info.line_has_newline
+                {
+                    let text_end_x = text_area.min.x
+                        + Self::col_to_x(x_positions, seg_len, char_width)
+                        - info.scroll_x;
+                    let eol_w = Self::eol_badges_width(self.doc.line_ending, badge_char_width);
+                    sel_x_end = sel_x_end.max(text_end_x + eol_w);
+                }
+
+                let sel_rect = Rect::from_min_max(
+                    Pos2::new(sel_x_start.max(text_area.min.x), info.line_y),
+                    Pos2::new(sel_x_end.min(text_area.max.x), info.line_y + line_height),
+                );
+                painter.rect_filled(sel_rect, 0.0, self.theme.selection_color);
+            }
+        }
+    }
+
+    /// Renders text character-by-character when badge-aware x-positions are needed.
+    #[allow(clippy::too_many_arguments)]
+    fn render_text_with_badges(
+        &self,
+        painter: &egui::Painter,
+        font_id: &FontId,
+        line_height: f32,
+        char_width: f32,
+        text_area: &Rect,
+        info: &LineSegmentInfo<'_>,
+        x_positions: &[f32],
+        render_content: &str,
+    ) {
+        let char_colors = self.extract_char_colors(render_content, font_id);
+        let text_y = info.line_y + line_height * 0.15;
+        for (i, ch) in info.content.chars().enumerate() {
+            let x = text_area.min.x + x_positions[i] - info.scroll_x;
+            if x + char_width < text_area.min.x || x > text_area.max.x {
+                continue;
+            }
+            if matches!(ch, '\t' | '\u{00A0}' | '\u{200B}' | '\u{200C}' | '\u{200D}') {
+                continue;
+            }
+            let color = char_colors.get(i).copied().unwrap_or(self.theme.text_color);
+            let ch_str = String::from(ch);
+            painter.text(
+                Pos2::new(x, text_y),
+                egui::Align2::LEFT_TOP,
+                &ch_str,
+                font_id.clone(),
+                color,
+            );
+        }
+    }
+
+    /// Renders text with syntax highlighting and optional galley caching.
+    ///
+    /// Uses early returns to flatten the nested highlighter/cache logic.
+    fn render_highlighted_text(
+        &mut self,
+        ui: &mut Ui,
+        painter: &egui::Painter,
+        font_id: &FontId,
+        text_pos: Pos2,
+        render_content: &str,
+        cache_line_idx: Option<usize>,
+    ) {
+        let text_color = self.theme.text_color;
+
+        let Some(highlighter) = &self.highlighter else {
+            painter.text(
+                text_pos,
+                egui::Align2::LEFT_TOP,
+                render_content,
+                font_id.clone(),
+                text_color,
+            );
+            return;
+        };
+
+        // Try galley cache for non-wrapped lines.
+        let content_hash = hash_str(render_content);
+        if let Some(line_idx) = cache_line_idx {
+            let cached = {
+                let cache = get_render_cache(&mut self.doc.render_cache);
+                cache.get(line_idx, content_hash)
+            };
+            if let Some(galley) = cached {
+                painter.galley(text_pos, galley, Color32::WHITE);
+                return;
+            }
+        }
+
+        // Highlight the line.
+        let syntax = highlighter.detect_syntax(self.syntax_path().as_deref());
+        let Some(mut hl) = highlighter.create_highlighter(syntax) else {
+            painter.text(
+                text_pos,
+                egui::Align2::LEFT_TOP,
+                render_content,
+                font_id.clone(),
+                text_color,
+            );
+            return;
+        };
+
+        let line_with_nl = format!("{render_content}\n");
+        let job = highlighter.highlight_line(&line_with_nl, syntax, &mut hl, font_id);
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+
+        // Store in cache when applicable.
+        if let Some(line_idx) = cache_line_idx {
+            let cache = get_render_cache(&mut self.doc.render_cache);
+            cache.insert(line_idx, content_hash, galley.clone());
+        }
+
+        painter.galley(text_pos, galley, Color32::WHITE);
+    }
+
+    /// Renders the gutter for a line: current-line highlight, change tracking, line number.
+    #[allow(clippy::too_many_arguments)]
+    fn render_gutter_for_line(
+        &self,
+        painter: &egui::Painter,
+        gutter_painter: &egui::Painter,
+        font_id: &FontId,
+        line_height: f32,
+        text_area: &Rect,
+        gutter_rect: &Rect,
+        logical_line: usize,
+        line_y: f32,
+        cursor_lines: &[usize],
+        show_line_number: bool,
+        show_change_tracking: bool,
+    ) {
+        // Current line highlight
+        if cursor_lines.contains(&logical_line) {
+            let highlight_rect = Rect::from_min_size(
+                Pos2::new(text_area.min.x, line_y),
+                Vec2::new(text_area.width(), line_height),
+            );
+            painter.rect_filled(highlight_rect, 0.0, self.theme.current_line_highlight);
+        }
+
+        // Change tracking indicator
+        if self.show_line_numbers
+            && show_change_tracking
+            && self.theme.show_change_tracking
+            && logical_line < self.doc.line_changes.len()
+        {
+            use rust_pad_core::document::LineChangeState;
+            let indicator_color = match self.doc.line_changes[logical_line] {
+                LineChangeState::Modified => Some(self.theme.modified_line_color),
+                LineChangeState::Saved => Some(self.theme.saved_line_color),
+                LineChangeState::Unchanged => None,
+            };
+            if let Some(color) = indicator_color {
+                let indicator_rect = Rect::from_min_size(
+                    Pos2::new(gutter_rect.max.x - 3.0, line_y),
+                    Vec2::new(3.0, line_height),
+                );
+                gutter_painter.rect_filled(indicator_rect, 0.0, color);
+            }
+        }
+
+        // Line number
+        if self.show_line_numbers && show_line_number {
+            let line_num_text = format!("{}", logical_line + 1);
+            let line_num_color = if cursor_lines.contains(&logical_line) {
+                self.theme.text_color
+            } else {
+                self.theme.line_number_color
+            };
+            gutter_painter.text(
+                Pos2::new(gutter_rect.max.x - 8.0, line_y + line_height * 0.15),
+                egui::Align2::RIGHT_TOP,
+                &line_num_text,
+                font_id.clone(),
+                line_num_color,
+            );
+        }
+    }
+
     /// Renders visible lines: backgrounds, line numbers, selections, and text.
     #[allow(clippy::too_many_arguments)]
     fn render_lines(
@@ -621,6 +978,7 @@ impl<'a> EditorWidget<'a> {
         // Clip text and selection rendering to the text area so horizontally
         // scrolled content never bleeds over the gutter / line numbers.
         let text_painter = painter.with_clip_rect(*text_area);
+        let scroll_x = self.doc.scroll_x;
 
         for line_idx in first_visible..last_visible {
             let y_offset = (line_idx as f32 - self.doc.scroll_y) * line_height;
@@ -630,53 +988,20 @@ impl<'a> EditorWidget<'a> {
                 continue;
             }
 
-            // Current line highlight (for all cursor lines)
-            if cursor_lines.contains(&line_idx) {
-                let highlight_rect = Rect::from_min_size(
-                    Pos2::new(text_area.min.x, line_y),
-                    Vec2::new(text_area.width(), line_height),
-                );
-                text_painter.rect_filled(highlight_rect, 0.0, self.theme.current_line_highlight);
-            }
+            self.render_gutter_for_line(
+                &text_painter,
+                painter,
+                font_id,
+                line_height,
+                text_area,
+                gutter_rect,
+                line_idx,
+                line_y,
+                cursor_lines,
+                true,
+                true,
+            );
 
-            // Change tracking indicator (hidden by default, enable via theme)
-            if self.show_line_numbers
-                && self.theme.show_change_tracking
-                && line_idx < self.doc.line_changes.len()
-            {
-                use rust_pad_core::document::LineChangeState;
-                let indicator_color = match self.doc.line_changes[line_idx] {
-                    LineChangeState::Modified => Some(self.theme.modified_line_color),
-                    LineChangeState::Saved => Some(self.theme.saved_line_color),
-                    LineChangeState::Unchanged => None,
-                };
-                if let Some(color) = indicator_color {
-                    let indicator_rect = Rect::from_min_size(
-                        Pos2::new(gutter_rect.max.x - 3.0, line_y),
-                        Vec2::new(3.0, line_height),
-                    );
-                    painter.rect_filled(indicator_rect, 0.0, color);
-                }
-            }
-
-            // Line number
-            if self.show_line_numbers {
-                let line_num_text = format!("{}", line_idx + 1);
-                let line_num_color = if cursor_lines.contains(&line_idx) {
-                    self.theme.text_color
-                } else {
-                    self.theme.line_number_color
-                };
-                painter.text(
-                    Pos2::new(gutter_rect.max.x - 8.0, line_y + line_height * 0.15),
-                    egui::Align2::RIGHT_TOP,
-                    &line_num_text,
-                    font_id.clone(),
-                    line_num_color,
-                );
-            }
-
-            // Line text
             let line_content = self
                 .doc
                 .buffer
@@ -684,195 +1009,41 @@ impl<'a> EditorWidget<'a> {
                 .map(line_content_string)
                 .unwrap_or_default();
 
-            // Precompute badge-aware x positions when needed
-            let badge_char_width = char_width * 0.7;
-            let has_badges = self.show_special_chars && Self::line_has_badges(&line_content);
-            let x_positions = if has_badges {
-                Some(Self::compute_x_positions(
-                    &line_content,
-                    char_width,
-                    badge_char_width,
-                ))
-            } else {
-                None
-            };
-
-            // Char range for this line
             let line_start_char = self.doc.buffer.line_to_char(line_idx).unwrap_or(0);
             let line_char_len = self.doc.buffer.line_len_chars(line_idx).unwrap_or(0);
-            let line_end_char = line_start_char + line_char_len;
             let line_has_newline = self
                 .doc
                 .buffer
                 .line(line_idx)
-                .map(|l| {
-                    let n = l.len_chars();
-                    n > 0 && l.char(n - 1) == '\n'
-                })
+                .map(rope_slice_ends_with_newline)
                 .unwrap_or(false);
 
-            // Render occurrence highlights (drawn first so selections paint on top)
-            for &(occ_start, occ_end) in occurrence_ranges {
-                if occ_start < line_end_char && occ_end > line_start_char {
-                    let col_start = occ_start.saturating_sub(line_start_char);
-                    let col_end = occ_end.saturating_sub(line_start_char).min(line_char_len);
-                    let x_start = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), col_start, char_width)
-                        - self.doc.scroll_x;
-                    let x_end = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), col_end, char_width)
-                        - self.doc.scroll_x;
-                    let occ_rect = Rect::from_min_max(
-                        Pos2::new(x_start.max(text_area.min.x), line_y),
-                        Pos2::new(x_end.min(text_area.max.x), line_y + line_height),
-                    );
-                    text_painter.rect_filled(occ_rect, 0.0, self.theme.occurrence_highlight_color);
-                }
-            }
+            let info = LineSegmentInfo {
+                line_y,
+                content: &line_content,
+                segment_char_start: line_start_char,
+                segment_char_end: line_start_char + line_char_len,
+                line_has_newline,
+                scroll_x,
+                cache_line_idx: Some(line_idx),
+            };
 
-            // Render selection highlights for all cursors on this line
-            for &(sel_start, sel_end) in all_selection_ranges {
-                if sel_start < line_end_char + 1 && sel_end > line_start_char {
-                    let sel_col_start = sel_start.saturating_sub(line_start_char);
-                    let sel_col_end = if sel_end < line_end_char {
-                        sel_end - line_start_char
-                    } else {
-                        line_char_len + 1
-                    };
-
-                    let sel_x_start = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), sel_col_start, char_width)
-                        - self.doc.scroll_x;
-                    let mut sel_x_end = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), sel_col_end, char_width)
-                        - self.doc.scroll_x;
-
-                    // When special chars are shown and the selection includes
-                    // the newline, extend to cover the full line-ending badges.
-                    if self.show_special_chars && sel_end > line_end_char && line_has_newline {
-                        let text_end_x = text_area.min.x
-                            + Self::col_to_x(x_positions.as_deref(), line_char_len, char_width)
-                            - self.doc.scroll_x;
-                        let eol_w = Self::eol_badges_width(self.doc.line_ending, badge_char_width);
-                        sel_x_end = sel_x_end.max(text_end_x + eol_w);
-                    }
-
-                    let sel_rect = Rect::from_min_max(
-                        Pos2::new(sel_x_start.max(text_area.min.x), line_y),
-                        Pos2::new(sel_x_end.min(text_area.max.x), line_y + line_height),
-                    );
-                    text_painter.rect_filled(sel_rect, 0.0, self.theme.selection_color);
-                }
-            }
-
-            // Replace tabs with spaces for rendering so the galley matches
-            // the monospace grid (egui expands tabs to tabstops otherwise).
-            // Tabs are visualized by the special-chars overlay.
-            let render_content = line_content.replace('\t', " ");
-
-            // Render text
-            if has_badges {
-                // Character-by-character rendering for lines with badge characters
-                // so that text after badges is shifted right to avoid overlap.
-                let char_colors = self.extract_char_colors(&render_content, font_id);
-                let text_y = line_y + line_height * 0.15;
-                let xp = x_positions.as_ref().unwrap();
-                for (i, ch) in line_content.chars().enumerate() {
-                    let x = text_area.min.x + xp[i] - self.doc.scroll_x;
-                    if x + char_width < text_area.min.x || x > text_area.max.x {
-                        continue;
-                    }
-                    // Skip badge and tab characters — they are drawn by the overlay
-                    if matches!(ch, '\t' | '\u{00A0}' | '\u{200B}' | '\u{200C}' | '\u{200D}') {
-                        continue;
-                    }
-                    let color = char_colors.get(i).copied().unwrap_or(self.theme.text_color);
-                    let ch_str = String::from(ch);
-                    text_painter.text(
-                        Pos2::new(x, text_y),
-                        egui::Align2::LEFT_TOP,
-                        &ch_str,
-                        font_id.clone(),
-                        color,
-                    );
-                }
-            } else {
-                // Standard rendering via galley or plain text
-                let text_x = text_area.min.x - self.doc.scroll_x;
-                let text_pos = Pos2::new(text_x, line_y + line_height * 0.15);
-
-                if let Some(highlighter) = &self.highlighter {
-                    let content_hash = hash_str(&render_content);
-                    // Check galley cache first
-                    let cached = {
-                        let cache = get_render_cache(&mut self.doc.render_cache);
-                        cache.get(line_idx, content_hash)
-                    };
-                    if let Some(galley) = cached {
-                        text_painter.galley(text_pos, galley, Color32::WHITE);
-                    } else {
-                        let syntax = highlighter.detect_syntax(self.syntax_path().as_deref());
-                        if let Some(mut hl) = highlighter.create_highlighter(syntax) {
-                            let line_with_nl = format!("{render_content}\n");
-                            let job =
-                                highlighter.highlight_line(&line_with_nl, syntax, &mut hl, font_id);
-                            let galley = ui.fonts_mut(|f| f.layout_job(job));
-                            {
-                                let cache = get_render_cache(&mut self.doc.render_cache);
-                                cache.insert(line_idx, content_hash, galley.clone());
-                            }
-                            text_painter.galley(text_pos, galley, Color32::WHITE);
-                        } else {
-                            text_painter.text(
-                                text_pos,
-                                egui::Align2::LEFT_TOP,
-                                &render_content,
-                                font_id.clone(),
-                                self.theme.text_color,
-                            );
-                        }
-                    }
-                } else {
-                    text_painter.text(
-                        text_pos,
-                        egui::Align2::LEFT_TOP,
-                        &render_content,
-                        font_id.clone(),
-                        self.theme.text_color,
-                    );
-                }
-            }
-
-            // Special characters overlay
-            if self.show_special_chars {
-                let eol = if self
-                    .doc
-                    .buffer
-                    .line(line_idx)
-                    .map(rope_slice_ends_with_newline)
-                    .unwrap_or(false)
-                {
-                    Some(self.doc.line_ending)
-                } else {
-                    None
-                };
-                self.render_special_chars_overlay(
-                    &text_painter,
-                    font_id,
-                    line_y,
-                    line_height,
-                    char_width,
-                    text_area,
-                    &line_content,
-                    self.doc.scroll_x,
-                    eol,
-                    x_positions.as_deref(),
-                );
-            }
+            self.render_line_segment(
+                ui,
+                &text_painter,
+                font_id,
+                line_height,
+                char_width,
+                text_area,
+                &info,
+                all_selection_ranges,
+                occurrence_ranges,
+            );
         }
     }
 
     /// Renders all cursors (primary + secondary) with blink and activity reset.
+    /// When `wrap_map` is provided, uses wrapped visual coordinates.
     #[allow(clippy::too_many_arguments)]
     fn render_cursors(
         &self,
@@ -884,6 +1055,7 @@ impl<'a> EditorWidget<'a> {
         char_width: f32,
         first_visible: usize,
         last_visible: usize,
+        wrap_map: Option<&WrapMap>,
     ) {
         let cursor_visible = {
             let time = ui.input(|i| i.time);
@@ -914,28 +1086,43 @@ impl<'a> EditorWidget<'a> {
             .collect();
 
             for (cursor_line, cursor_col, is_primary) in all_cursors {
-                if cursor_line >= first_visible && cursor_line < last_visible {
-                    let y_offset = (cursor_line as f32 - self.doc.scroll_y) * line_height;
-                    let cursor_x = if self.show_special_chars {
-                        let lc = self
-                            .doc
-                            .buffer
-                            .line(cursor_line)
-                            .map(line_content_string)
-                            .unwrap_or_default();
-                        if Self::line_has_badges(&lc) {
-                            let bcw = char_width * 0.7;
-                            let xp = Self::compute_x_positions(&lc, char_width, bcw);
-                            text_area.min.x + Self::col_to_x(Some(&xp), cursor_col, char_width)
-                                - self.doc.scroll_x
-                        } else {
-                            text_area.min.x + cursor_col as f32 * char_width - self.doc.scroll_x
-                        }
-                    } else {
-                        text_area.min.x + cursor_col as f32 * char_width - self.doc.scroll_x
-                    };
-                    let cursor_y = text_area.min.y + y_offset;
+                let (visual_line, cursor_x) = if let Some(wm) = wrap_map {
+                    let vl = wm.position_to_visual_line(cursor_line, cursor_col);
+                    let vc = wm.position_to_visual_col(cursor_col);
 
+                    // Badge-aware x for the wrap segment
+                    let lc = self
+                        .doc
+                        .buffer
+                        .line(cursor_line)
+                        .map(line_content_string)
+                        .unwrap_or_default();
+                    let lchars: Vec<char> = lc.chars().collect();
+                    let ws = (vl - wm.logical_to_visual(cursor_line)) * wm.chars_per_visual_line;
+                    let we = (ws + wm.chars_per_visual_line).min(lchars.len());
+                    let seg: String = lchars[ws..we].iter().collect();
+                    let x = text_area.min.x + self.col_to_x_badge_aware(&seg, vc, char_width);
+                    (vl, x)
+                } else {
+                    let lc = self
+                        .doc
+                        .buffer
+                        .line(cursor_line)
+                        .map(line_content_string)
+                        .unwrap_or_default();
+                    let x = text_area.min.x
+                        + self.col_to_x_badge_aware(&lc, cursor_col, char_width)
+                        - self.doc.scroll_x;
+                    (cursor_line, x)
+                };
+
+                if visual_line >= first_visible
+                    && visual_line < last_visible
+                    && cursor_x >= text_area.min.x
+                    && cursor_x <= text_area.max.x
+                {
+                    let y_offset = (visual_line as f32 - self.doc.scroll_y) * line_height;
+                    let cursor_y = text_area.min.y + y_offset;
                     let color = if is_primary {
                         self.theme.cursor_color
                     } else {
@@ -984,54 +1171,25 @@ impl<'a> EditorWidget<'a> {
                 continue;
             }
 
-            let col_start = wrap_row * wm.chars_per_visual_line;
+            let is_first_row = wrap_row == 0;
 
-            // Current line highlight
-            if cursor_lines.contains(&logical_line) {
-                let highlight_rect = Rect::from_min_size(
-                    Pos2::new(text_area.min.x, line_y),
-                    Vec2::new(text_area.width(), line_height),
-                );
-                painter.rect_filled(highlight_rect, 0.0, self.theme.current_line_highlight);
-            }
+            // Clip text rendering to the text area so the current-line highlight
+            // doesn't bleed into the gutter (matches the non-wrapped path).
+            let text_painter = painter.with_clip_rect(*text_area);
 
-            // Change tracking indicator (only on first wrap row)
-            if self.show_line_numbers
-                && wrap_row == 0
-                && self.theme.show_change_tracking
-                && logical_line < self.doc.line_changes.len()
-            {
-                use rust_pad_core::document::LineChangeState;
-                let indicator_color = match self.doc.line_changes[logical_line] {
-                    LineChangeState::Modified => Some(self.theme.modified_line_color),
-                    LineChangeState::Saved => Some(self.theme.saved_line_color),
-                    LineChangeState::Unchanged => None,
-                };
-                if let Some(color) = indicator_color {
-                    let indicator_rect = Rect::from_min_size(
-                        Pos2::new(gutter_rect.max.x - 3.0, line_y),
-                        Vec2::new(3.0, line_height),
-                    );
-                    painter.rect_filled(indicator_rect, 0.0, color);
-                }
-            }
-
-            // Line number (only on first wrap row of each logical line)
-            if self.show_line_numbers && wrap_row == 0 {
-                let line_num_text = format!("{}", logical_line + 1);
-                let line_num_color = if cursor_lines.contains(&logical_line) {
-                    self.theme.text_color
-                } else {
-                    self.theme.line_number_color
-                };
-                painter.text(
-                    Pos2::new(gutter_rect.max.x - 8.0, line_y + line_height * 0.15),
-                    egui::Align2::RIGHT_TOP,
-                    &line_num_text,
-                    font_id.clone(),
-                    line_num_color,
-                );
-            }
+            self.render_gutter_for_line(
+                &text_painter,
+                painter,
+                font_id,
+                line_height,
+                text_area,
+                gutter_rect,
+                logical_line,
+                line_y,
+                cursor_lines,
+                is_first_row,
+                is_first_row,
+            );
 
             // Extract the portion of this logical line for this wrap row
             let line_content = self
@@ -1042,8 +1200,8 @@ impl<'a> EditorWidget<'a> {
                 .unwrap_or_default();
 
             let total_chars = line_content.chars().count();
+            let col_start = wrap_row * wm.chars_per_visual_line;
             let col_end = (col_start + wm.chars_per_visual_line).min(total_chars);
-            // Extract the segment by char boundaries without intermediate Vec<char>
             let byte_start = line_content
                 .char_indices()
                 .nth(col_start)
@@ -1056,290 +1214,84 @@ impl<'a> EditorWidget<'a> {
                 .unwrap_or(line_content.len());
             let segment = &line_content[byte_start..byte_end];
 
-            // Precompute badge-aware x positions when needed
-            let badge_char_width = char_width * 0.7;
-            let has_badges = self.show_special_chars && Self::line_has_badges(segment);
-            let x_positions = if has_badges {
-                Some(Self::compute_x_positions(
-                    segment,
-                    char_width,
-                    badge_char_width,
-                ))
-            } else {
-                None
-            };
-
-            // Char range for this visual line segment
             let line_start_char = self.doc.buffer.line_to_char(logical_line).unwrap_or(0);
-            let segment_char_start = line_start_char + col_start;
-            let segment_char_end = line_start_char + col_end;
             let is_last_segment = col_end == total_chars;
             let line_has_newline = is_last_segment
                 && self
                     .doc
                     .buffer
                     .line(logical_line)
-                    .map(|l| {
-                        let n = l.len_chars();
-                        n > 0 && l.char(n - 1) == '\n'
-                    })
-                    .unwrap_or(false);
-
-            // Occurrence highlights (drawn first so selections paint on top)
-            for &(occ_start, occ_end) in occurrence_ranges {
-                if occ_start < segment_char_end && occ_end > segment_char_start {
-                    let occ_col_start = occ_start.saturating_sub(segment_char_start);
-                    let occ_col_end = occ_end
-                        .saturating_sub(segment_char_start)
-                        .min(col_end - col_start);
-                    let x_start = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), occ_col_start, char_width);
-                    let x_end = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), occ_col_end, char_width);
-                    let occ_rect = Rect::from_min_max(
-                        Pos2::new(x_start.max(text_area.min.x), line_y),
-                        Pos2::new(x_end.min(text_area.max.x), line_y + line_height),
-                    );
-                    painter.rect_filled(occ_rect, 0.0, self.theme.occurrence_highlight_color);
-                }
-            }
-
-            // Selection highlights for this visual line
-            for &(sel_start, sel_end) in all_selection_ranges {
-                if sel_start < segment_char_end + 1 && sel_end > segment_char_start {
-                    let sel_col_start = sel_start.saturating_sub(segment_char_start);
-                    let sel_col_end = if sel_end < segment_char_end {
-                        sel_end - segment_char_start
-                    } else {
-                        (col_end - col_start) + 1
-                    };
-
-                    let sel_x_start = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), sel_col_start, char_width);
-                    let mut sel_x_end = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), sel_col_end, char_width);
-
-                    // When special chars are shown and the selection includes
-                    // the newline on the last segment, extend to cover badges.
-                    if self.show_special_chars && sel_end > segment_char_end && line_has_newline {
-                        let seg_len = col_end - col_start;
-                        let text_end_x = text_area.min.x
-                            + Self::col_to_x(x_positions.as_deref(), seg_len, char_width);
-                        let eol_w = Self::eol_badges_width(self.doc.line_ending, badge_char_width);
-                        sel_x_end = sel_x_end.max(text_end_x + eol_w);
-                    }
-
-                    let sel_rect = Rect::from_min_max(
-                        Pos2::new(sel_x_start.max(text_area.min.x), line_y),
-                        Pos2::new(sel_x_end.min(text_area.max.x), line_y + line_height),
-                    );
-                    painter.rect_filled(sel_rect, 0.0, self.theme.selection_color);
-                }
-            }
-
-            // Replace tabs with spaces for rendering (see render_lines comment).
-            let render_segment = segment.replace('\t', " ");
-
-            // Render text segment
-            if has_badges {
-                // Character-by-character rendering for segments with badge characters
-                let char_colors = self.extract_char_colors(&render_segment, font_id);
-                let text_y = line_y + line_height * 0.15;
-                let xp = x_positions.as_ref().unwrap();
-                for (i, ch) in segment.chars().enumerate() {
-                    let x = text_area.min.x + xp[i];
-                    if x + char_width < text_area.min.x || x > text_area.max.x {
-                        continue;
-                    }
-                    if matches!(ch, '\t' | '\u{00A0}' | '\u{200B}' | '\u{200C}' | '\u{200D}') {
-                        continue;
-                    }
-                    let color = char_colors.get(i).copied().unwrap_or(self.theme.text_color);
-                    let ch_str = String::from(ch);
-                    painter.text(
-                        Pos2::new(x, text_y),
-                        egui::Align2::LEFT_TOP,
-                        &ch_str,
-                        font_id.clone(),
-                        color,
-                    );
-                }
-            } else {
-                // Standard rendering (with syntax highlighting on first wrap row only)
-                let text_pos = Pos2::new(text_area.min.x, line_y + line_height * 0.15);
-
-                if wrap_row == 0 && col_end <= wm.chars_per_visual_line {
-                    if let Some(highlighter) = &self.highlighter {
-                        let syntax = highlighter.detect_syntax(self.syntax_path().as_deref());
-                        if let Some(mut hl) = highlighter.create_highlighter(syntax) {
-                            let line_with_nl = format!("{render_segment}\n");
-                            let job =
-                                highlighter.highlight_line(&line_with_nl, syntax, &mut hl, font_id);
-                            let galley = ui.fonts_mut(|f| f.layout_job(job));
-                            painter.galley(text_pos, galley, Color32::WHITE);
-                        } else {
-                            painter.text(
-                                text_pos,
-                                egui::Align2::LEFT_TOP,
-                                &render_segment,
-                                font_id.clone(),
-                                self.theme.text_color,
-                            );
-                        }
-                    } else {
-                        painter.text(
-                            text_pos,
-                            egui::Align2::LEFT_TOP,
-                            &render_segment,
-                            font_id.clone(),
-                            self.theme.text_color,
-                        );
-                    }
-                } else {
-                    painter.text(
-                        text_pos,
-                        egui::Align2::LEFT_TOP,
-                        &render_segment,
-                        font_id.clone(),
-                        self.theme.text_color,
-                    );
-                }
-            }
-
-            // Special characters overlay
-            if self.show_special_chars {
-                let total_vlines = wm.visual_lines_for(logical_line);
-                let is_last_segment = wrap_row + 1 >= total_vlines;
-                let line_has_newline = self
-                    .doc
-                    .buffer
-                    .line(logical_line)
                     .map(rope_slice_ends_with_newline)
                     .unwrap_or(false);
-                let eol = if is_last_segment && line_has_newline {
-                    Some(self.doc.line_ending)
-                } else {
-                    None
-                };
-                self.render_special_chars_overlay(
-                    painter,
-                    font_id,
-                    line_y,
-                    line_height,
-                    char_width,
-                    text_area,
-                    segment,
-                    0.0,
-                    eol,
-                    x_positions.as_deref(),
-                );
-            }
+
+            // Wrapped mode doesn't use galley caching
+            let cache_line_idx = None;
+
+            let info = LineSegmentInfo {
+                line_y,
+                content: segment,
+                segment_char_start: line_start_char + col_start,
+                segment_char_end: line_start_char + col_end,
+                line_has_newline,
+                scroll_x: 0.0,
+                cache_line_idx,
+            };
+
+            self.render_line_segment(
+                ui,
+                painter,
+                font_id,
+                line_height,
+                char_width,
+                text_area,
+                &info,
+                all_selection_ranges,
+                occurrence_ranges,
+            );
         }
     }
 
-    /// Renders all cursors in word-wrap mode.
-    #[allow(clippy::too_many_arguments)]
-    fn render_cursors_wrapped(
-        &self,
-        ui: &Ui,
-        painter: &egui::Painter,
-        response: &Response,
-        text_area: &Rect,
-        line_height: f32,
-        char_width: f32,
-        first_visual: usize,
-        last_visual: usize,
-        wm: &WrapMap,
-    ) {
-        let cursor_visible = {
-            let time = ui.input(|i| i.time);
-            let since_activity = time - self.doc.cursor_activity_time;
-            if since_activity < 0.5 {
-                true
-            } else {
-                ((time * 2.0) as u64).is_multiple_of(2)
-            }
-        };
-        if cursor_visible && response.has_focus() {
-            let secondary_cursor_color = Color32::from_rgb(200, 200, 200);
-
-            let all_cursors: Vec<(usize, usize, bool)> = std::iter::once((
-                self.doc.cursor.position.line,
-                self.doc.cursor.position.col,
-                true,
-            ))
-            .chain(
-                self.doc
-                    .secondary_cursors
-                    .iter()
-                    .map(|sc| (sc.position.line, sc.position.col, false)),
-            )
-            .collect();
-
-            for (cursor_line, cursor_col, is_primary) in all_cursors {
-                let visual_line = wm.position_to_visual_line(cursor_line, cursor_col);
-                let visual_col = wm.position_to_visual_col(cursor_col);
-
-                if visual_line >= first_visual && visual_line < last_visual {
-                    let y_offset = (visual_line as f32 - self.doc.scroll_y) * line_height;
-                    let cursor_x = if self.show_special_chars {
-                        let lc = self
-                            .doc
-                            .buffer
-                            .line(cursor_line)
-                            .map(line_content_string)
-                            .unwrap_or_default();
-                        let lchars: Vec<char> = lc.chars().collect();
-                        let wrap_start = (visual_line - wm.logical_to_visual(cursor_line))
-                            * wm.chars_per_visual_line;
-                        let wrap_end = (wrap_start + wm.chars_per_visual_line).min(lchars.len());
-                        let seg: String = lchars[wrap_start..wrap_end].iter().collect();
-                        if Self::line_has_badges(&seg) {
-                            let bcw = char_width * 0.7;
-                            let xp = Self::compute_x_positions(&seg, char_width, bcw);
-                            text_area.min.x + Self::col_to_x(Some(&xp), visual_col, char_width)
-                        } else {
-                            text_area.min.x + visual_col as f32 * char_width
-                        }
-                    } else {
-                        text_area.min.x + visual_col as f32 * char_width
-                    };
-                    let cursor_y = text_area.min.y + y_offset;
-
-                    if cursor_x >= text_area.min.x && cursor_x <= text_area.max.x {
-                        let color = if is_primary {
-                            self.theme.cursor_color
-                        } else {
-                            secondary_cursor_color
-                        };
-                        painter.line_segment(
-                            [
-                                Pos2::new(cursor_x, cursor_y),
-                                Pos2::new(cursor_x, cursor_y + line_height),
-                            ],
-                            Stroke::new(2.0, color),
-                        );
-                    }
-                }
-            }
+    /// Resolves a relative x position to a column index, accounting for
+    /// special-char badges when enabled.
+    fn x_to_col_badge_aware(&self, segment: &str, relative_x: f32, char_width: f32) -> usize {
+        if self.show_special_chars && Self::line_has_badges(segment) {
+            let bcw = char_width * 0.7;
+            let xp = Self::compute_x_positions(segment, char_width, bcw);
+            Self::x_to_col(&xp, relative_x)
+        } else {
+            (relative_x / char_width).round().max(0.0) as usize
         }
     }
 
-    /// Converts screen coordinates to a document position in word-wrap mode.
-    fn screen_to_position_wrapped(
+    /// Resolves a column index to an x offset, accounting for special-char
+    /// badges when enabled.
+    fn col_to_x_badge_aware(&self, line_content: &str, col: usize, char_width: f32) -> f32 {
+        if self.show_special_chars && Self::line_has_badges(line_content) {
+            let bcw = char_width * 0.7;
+            let xp = Self::compute_x_positions(line_content, char_width, bcw);
+            Self::col_to_x(Some(&xp), col, char_width)
+        } else {
+            col as f32 * char_width
+        }
+    }
+
+    /// Converts screen position to document position.
+    /// When a `WrapMap` is provided, uses wrapped coordinates.
+    fn screen_to_position(
         &self,
         screen_pos: Pos2,
         text_area: Rect,
         line_height: f32,
         char_width: f32,
-        wm: &WrapMap,
+        wrap_map: Option<&WrapMap>,
     ) -> Position {
         let relative_y = screen_pos.y - text_area.min.y;
-        let visual_line = ((relative_y / line_height) + self.doc.scroll_y) as usize;
-        let (logical_line, wrap_row) = wm.visual_to_logical(visual_line);
 
-        let relative_x = screen_pos.x - text_area.min.x;
-        let visual_col = if self.show_special_chars {
+        if let Some(wm) = wrap_map {
+            let visual_line = ((relative_y / line_height) + self.doc.scroll_y) as usize;
+            let (logical_line, wrap_row) = wm.visual_to_logical(visual_line);
+            let relative_x = screen_pos.x - text_area.min.x;
+
             let lc = self
                 .doc
                 .buffer
@@ -1350,107 +1302,65 @@ impl<'a> EditorWidget<'a> {
             let cs = wrap_row * wm.chars_per_visual_line;
             let ce = (cs + wm.chars_per_visual_line).min(lchars.len());
             let seg: String = lchars[cs..ce].iter().collect();
-            if Self::line_has_badges(&seg) {
-                let bcw = char_width * 0.7;
-                let xp = Self::compute_x_positions(&seg, char_width, bcw);
-                Self::x_to_col(&xp, relative_x)
-            } else {
-                (relative_x / char_width).round().max(0.0) as usize
-            }
+            let visual_col = self.x_to_col_badge_aware(&seg, relative_x, char_width);
+            let logical_col = wrap_row * wm.chars_per_visual_line + visual_col;
+            Position::new(logical_line, logical_col)
         } else {
-            (relative_x / char_width).round().max(0.0) as usize
-        };
-        let logical_col = wrap_row * wm.chars_per_visual_line + visual_col;
-
-        Position::new(logical_line, logical_col)
-    }
-
-    /// Ensures the cursor is visible in word-wrap mode.
-    fn ensure_cursor_visible_wrapped(&mut self, visible_lines: usize, wm: &WrapMap) {
-        let cursor_visual = wm
-            .position_to_visual_line(self.doc.cursor.position.line, self.doc.cursor.position.col)
-            as f32;
-        let margin = 2.0;
-
-        if cursor_visual < self.doc.scroll_y + margin {
-            self.doc.scroll_y = (cursor_visual - margin).max(0.0);
-        }
-        if cursor_visual >= self.doc.scroll_y + visible_lines as f32 - margin {
-            self.doc.scroll_y = cursor_visual - visible_lines as f32 + margin + 1.0;
-        }
-
-        // No horizontal scrolling in wrap mode
-        self.doc.scroll_x = 0.0;
-    }
-
-    /// Converts screen position to document position.
-    fn screen_to_position(
-        &self,
-        screen_pos: Pos2,
-        text_area: Rect,
-        line_height: f32,
-        char_width: f32,
-    ) -> Position {
-        let relative_y = screen_pos.y - text_area.min.y;
-        let line = ((relative_y / line_height) + self.doc.scroll_y) as usize;
-        let relative_x = screen_pos.x - text_area.min.x + self.doc.scroll_x;
-        let col = if self.show_special_chars {
+            let line = ((relative_y / line_height) + self.doc.scroll_y) as usize;
+            let relative_x = screen_pos.x - text_area.min.x + self.doc.scroll_x;
             let lc = self
                 .doc
                 .buffer
                 .line(line)
                 .map(line_content_string)
                 .unwrap_or_default();
-            if Self::line_has_badges(&lc) {
-                let bcw = char_width * 0.7;
-                let xp = Self::compute_x_positions(&lc, char_width, bcw);
-                Self::x_to_col(&xp, relative_x)
-            } else {
-                (relative_x / char_width).round().max(0.0) as usize
-            }
-        } else {
-            (relative_x / char_width).round().max(0.0) as usize
-        };
-        Position::new(line, col)
+            let col = self.x_to_col_badge_aware(&lc, relative_x, char_width);
+            Position::new(line, col)
+        }
     }
 
     /// Ensures the cursor is visible by adjusting scroll.
-    fn ensure_cursor_visible(&mut self, visible_lines: usize, text_width: f32, char_width: f32) {
-        let cursor_line = self.doc.cursor.position.line as f32;
+    /// When a `WrapMap` is provided, uses wrapped visual coordinates.
+    fn ensure_cursor_visible(
+        &mut self,
+        visible_lines: usize,
+        text_width: f32,
+        char_width: f32,
+        wrap_map: Option<&WrapMap>,
+    ) {
         let margin = 2.0;
 
-        // Vertical scroll
-        if cursor_line < self.doc.scroll_y + margin {
-            self.doc.scroll_y = (cursor_line - margin).max(0.0);
+        // Vertical scroll — in wrap mode use the visual line, otherwise use the logical line.
+        let cursor_visual_y = wrap_map.map_or(self.doc.cursor.position.line as f32, |wm| {
+            wm.position_to_visual_line(self.doc.cursor.position.line, self.doc.cursor.position.col)
+                as f32
+        });
+
+        if cursor_visual_y < self.doc.scroll_y + margin {
+            self.doc.scroll_y = (cursor_visual_y - margin).max(0.0);
         }
-        if cursor_line >= self.doc.scroll_y + visible_lines as f32 - margin {
-            self.doc.scroll_y = cursor_line - visible_lines as f32 + margin + 1.0;
+        if cursor_visual_y >= self.doc.scroll_y + visible_lines as f32 - margin {
+            self.doc.scroll_y = cursor_visual_y - visible_lines as f32 + margin + 1.0;
         }
 
-        // Horizontal scroll
-        let cursor_x = if self.show_special_chars {
+        // Horizontal scroll — only in non-wrap mode.
+        if wrap_map.is_some() {
+            self.doc.scroll_x = 0.0;
+        } else {
             let lc = self
                 .doc
                 .buffer
                 .line(self.doc.cursor.position.line)
                 .map(line_content_string)
                 .unwrap_or_default();
-            if Self::line_has_badges(&lc) {
-                let bcw = char_width * 0.7;
-                let xp = Self::compute_x_positions(&lc, char_width, bcw);
-                Self::col_to_x(Some(&xp), self.doc.cursor.position.col, char_width)
-            } else {
-                self.doc.cursor.position.col as f32 * char_width
+            let cursor_x = self.col_to_x_badge_aware(&lc, self.doc.cursor.position.col, char_width);
+            let scroll_margin = char_width * 4.0;
+            if cursor_x < self.doc.scroll_x + scroll_margin {
+                self.doc.scroll_x = (cursor_x - scroll_margin).max(0.0);
             }
-        } else {
-            self.doc.cursor.position.col as f32 * char_width
-        };
-        let scroll_margin = char_width * 4.0;
-        if cursor_x < self.doc.scroll_x + scroll_margin {
-            self.doc.scroll_x = (cursor_x - scroll_margin).max(0.0);
-        }
-        if cursor_x > self.doc.scroll_x + text_width - scroll_margin {
-            self.doc.scroll_x = cursor_x - text_width + scroll_margin;
+            if cursor_x > self.doc.scroll_x + text_width - scroll_margin {
+                self.doc.scroll_x = cursor_x - text_width + scroll_margin;
+            }
         }
     }
 
@@ -1483,5 +1393,385 @@ impl<'a> EditorWidget<'a> {
         .max(3);
         let digit_width = self.measure_char_width(ui, font_id);
         (digits as f32 + 2.0) * digit_width + 8.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── line_content_string ─────────────────────────────────────────
+
+    #[test]
+    fn line_content_string_strips_trailing_newline() {
+        let rope = ropey::Rope::from_str("hello\nworld\n");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "hello");
+    }
+
+    #[test]
+    fn line_content_string_preserves_line_without_newline() {
+        let rope = ropey::Rope::from_str("hello");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "hello");
+    }
+
+    #[test]
+    fn line_content_string_empty_line_with_newline() {
+        let rope = ropey::Rope::from_str("\n");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "");
+    }
+
+    #[test]
+    fn line_content_string_empty_rope() {
+        let rope = ropey::Rope::from_str("");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "");
+    }
+
+    #[test]
+    fn line_content_string_preserves_internal_whitespace() {
+        let rope = ropey::Rope::from_str("  hello  world  \n");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "  hello  world  ");
+    }
+
+    #[test]
+    fn line_content_string_unicode() {
+        let rope = ropey::Rope::from_str("こんにちは\n");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "こんにちは");
+    }
+
+    // ── rope_slice_ends_with_newline ────────────────────────────────
+
+    #[test]
+    fn rope_slice_ends_with_newline_true() {
+        let rope = ropey::Rope::from_str("hello\n");
+        assert!(rope_slice_ends_with_newline(rope.line(0)));
+    }
+
+    #[test]
+    fn rope_slice_ends_with_newline_false() {
+        let rope = ropey::Rope::from_str("hello");
+        assert!(!rope_slice_ends_with_newline(rope.line(0)));
+    }
+
+    #[test]
+    fn rope_slice_ends_with_newline_empty() {
+        let rope = ropey::Rope::from_str("");
+        assert!(!rope_slice_ends_with_newline(rope.line(0)));
+    }
+
+    #[test]
+    fn rope_slice_ends_with_newline_only_newline() {
+        let rope = ropey::Rope::from_str("\n");
+        assert!(rope_slice_ends_with_newline(rope.line(0)));
+    }
+
+    #[test]
+    fn rope_slice_ends_with_newline_middle_line() {
+        let rope = ropey::Rope::from_str("a\nb\nc");
+        assert!(rope_slice_ends_with_newline(rope.line(0))); // "a\n"
+        assert!(rope_slice_ends_with_newline(rope.line(1))); // "b\n"
+        assert!(!rope_slice_ends_with_newline(rope.line(2))); // "c"
+    }
+
+    // ── LineSegmentInfo construction ────────────────────────────────
+
+    #[test]
+    fn line_segment_info_basic_construction() {
+        let content = "hello world";
+        let info = LineSegmentInfo {
+            line_y: 10.0,
+            content,
+            segment_char_start: 0,
+            segment_char_end: 11,
+            line_has_newline: true,
+            scroll_x: 5.0,
+            cache_line_idx: Some(0),
+        };
+        assert_eq!(info.content, "hello world");
+        assert_eq!(info.segment_char_end - info.segment_char_start, 11);
+        assert!(info.line_has_newline);
+    }
+
+    #[test]
+    fn line_segment_info_wrapped_segment() {
+        let content = "world";
+        let info = LineSegmentInfo {
+            line_y: 30.0,
+            content,
+            segment_char_start: 6,
+            segment_char_end: 11,
+            line_has_newline: false,
+            scroll_x: 0.0,
+            cache_line_idx: None,
+        };
+        assert_eq!(info.segment_char_end - info.segment_char_start, 5);
+        assert!(!info.line_has_newline);
+        assert!(info.cache_line_idx.is_none());
+    }
+
+    // ── syntax_path ────────────────────────────────────────────────
+
+    #[test]
+    fn syntax_path_with_file_path() {
+        let mut doc = Document::default();
+        doc.file_path = Some(std::path::PathBuf::from("/tmp/test.rs"));
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let result = widget.syntax_path();
+        assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test.rs")));
+    }
+
+    #[test]
+    fn syntax_path_with_titled_extension() {
+        let mut doc = Document::default();
+        doc.title = "Untitled.py".to_string();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let result = widget.syntax_path();
+        assert_eq!(result, Some(std::path::PathBuf::from("Untitled.py")));
+    }
+
+    #[test]
+    fn syntax_path_without_extension() {
+        let mut doc = Document::default();
+        doc.title = "Untitled".to_string();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        assert!(widget.syntax_path().is_none());
+    }
+
+    #[test]
+    fn syntax_path_file_path_takes_priority() {
+        let mut doc = Document::default();
+        doc.file_path = Some(std::path::PathBuf::from("/tmp/test.rs"));
+        doc.title = "something.py".to_string();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let result = widget.syntax_path();
+        assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test.rs")));
+    }
+
+    // ── ensure_cursor_visible ──────────────────────────────────────
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_down() {
+        let mut doc = Document::default();
+        doc.buffer = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into();
+        doc.cursor.position = Position::new(9, 0);
+        doc.scroll_y = 0.0;
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(5, 100.0, 10.0, None);
+        assert!(widget.doc.scroll_y > 0.0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_up() {
+        let mut doc = Document::default();
+        doc.buffer = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into();
+        doc.cursor.position = Position::new(0, 0);
+        doc.scroll_y = 5.0;
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(5, 100.0, 10.0, None);
+        assert!(widget.doc.scroll_y < 5.0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_horizontal_scroll_right() {
+        let mut doc = Document::default();
+        doc.buffer = "abcdefghijklmnopqrstuvwxyz".into();
+        doc.cursor.position = Position::new(0, 25);
+        doc.scroll_x = 0.0;
+        let theme = EditorTheme::default();
+        let char_width = 10.0;
+        let text_width = 100.0; // only 10 chars visible
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(10, text_width, char_width, None);
+        assert!(widget.doc.scroll_x > 0.0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_horizontal_scroll_left() {
+        let mut doc = Document::default();
+        doc.buffer = "abcdefghijklmnopqrstuvwxyz".into();
+        doc.cursor.position = Position::new(0, 0);
+        doc.scroll_x = 100.0;
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(10, 200.0, 10.0, None);
+        assert!(widget.doc.scroll_x < 100.0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_wrap_mode_resets_scroll_x() {
+        let mut doc = Document::default();
+        doc.buffer = "hello world".into();
+        doc.scroll_x = 50.0;
+        let theme = EditorTheme::default();
+        let wm = WrapMap::build(&doc, 5);
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(10, 200.0, 10.0, Some(&wm));
+        assert!((widget.doc.scroll_x - 0.0).abs() < f32::EPSILON);
+    }
+
+    // ── x_to_col_badge_aware ───────────────────────────────────────
+
+    #[test]
+    fn x_to_col_normal_text() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let col = widget.x_to_col_badge_aware("hello", 25.0, 10.0);
+        // 25.0 / 10.0 = 2.5 → rounds to 3
+        assert_eq!(col, 3);
+    }
+
+    #[test]
+    fn x_to_col_at_start() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let col = widget.x_to_col_badge_aware("hello", 0.0, 10.0);
+        assert_eq!(col, 0);
+    }
+
+    #[test]
+    fn x_to_col_beyond_end() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let col = widget.x_to_col_badge_aware("hi", 100.0, 10.0);
+        // Returns unclamped column (cursor clamping happens at a higher level)
+        assert_eq!(col, 10);
+    }
+
+    #[test]
+    fn x_to_col_negative() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let col = widget.x_to_col_badge_aware("hello", -5.0, 10.0);
+        assert_eq!(col, 0);
+    }
+
+    // ── col_to_x_badge_aware ───────────────────────────────────────
+
+    #[test]
+    fn col_to_x_normal_text() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let x = widget.col_to_x_badge_aware("hello", 3, 10.0);
+        assert!((x - 30.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn col_to_x_at_zero() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let x = widget.col_to_x_badge_aware("hello", 0, 10.0);
+        assert!((x - 0.0).abs() < f32::EPSILON);
+    }
+
+    // ── EditorWidget construction ──────────────────────────────────
+
+    #[test]
+    fn editor_widget_defaults() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.5, None);
+        assert!((widget.zoom_level - 1.5).abs() < f32::EPSILON);
+        assert!(widget.highlighter.is_none());
+        assert!(!widget.word_wrap);
+        assert!(!widget.show_special_chars);
+        assert!(!widget.dialog_open);
+        assert!((widget.zoom_request - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn editor_widget_with_settings() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, 2.0, None);
+        widget.word_wrap = true;
+        widget.show_special_chars = true;
+        widget.show_line_numbers = true;
+        widget.dialog_open = true;
+        assert!(widget.word_wrap);
+        assert!(widget.show_special_chars);
+        assert!(widget.show_line_numbers);
+        assert!(widget.dialog_open);
+    }
+
+    // ── screen_to_position (non-wrapped) ───────────────────────────
+
+    #[test]
+    fn screen_to_position_basic() {
+        let mut doc = Document::default();
+        doc.buffer = "hello\nworld\n".into();
+        doc.scroll_y = 0.0;
+        doc.scroll_x = 0.0;
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+        let char_width = 10.0;
+        let line_height = 20.0;
+
+        let pos = widget.screen_to_position(
+            Pos2::new(50.0, 5.0),
+            text_area,
+            line_height,
+            char_width,
+            None,
+        );
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.col, 0);
+    }
+
+    #[test]
+    fn screen_to_position_second_line() {
+        let mut doc = Document::default();
+        doc.buffer = "hello\nworld\n".into();
+        doc.scroll_y = 0.0;
+        doc.scroll_x = 0.0;
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+        let char_width = 10.0;
+        let line_height = 20.0;
+
+        let pos = widget.screen_to_position(
+            Pos2::new(80.0, 25.0),
+            text_area,
+            line_height,
+            char_width,
+            None,
+        );
+        assert_eq!(pos.line, 1);
+        assert_eq!(pos.col, 3); // (80 - 50) / 10 = 3
+    }
+
+    #[test]
+    fn screen_to_position_far_below_returns_large_line() {
+        let mut doc = Document::default();
+        doc.buffer = "hello\n".into();
+        doc.scroll_y = 0.0;
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+
+        // screen_to_position doesn't clamp — cursor clamping happens elsewhere
+        let pos = widget.screen_to_position(Pos2::new(50.0, 500.0), text_area, 20.0, 10.0, None);
+        assert!(pos.line > 1);
     }
 }
