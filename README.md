@@ -1,11 +1,9 @@
 <p align="center">
   <img src="assets/logo.png" alt="rust-pad logo" width="128" />
 </p>
-
 <h1 align="center">rust-pad</h1>
-
 <p align="center">
-  A cross-platform Notepad++ alternative built in Rust with egui.
+  A cross-platform notepad application built using Rust, and inspired on Notepad++
 </p>
 
 ---
@@ -361,4 +359,4 @@ The following features are planned for future releases, inspired by Notepad++ fu
 
 ## License
 
-MIT
+This project is licensed under the [GNU General Public License v3.0](LICENSE.md).

@@ -5,8 +5,11 @@ members = ["crates/rust-pad", "crates/rust-pad-core", "crates/rust-pad-ui", "cra
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
-license = "MIT"
+license = "GPL-3.0-only"
 authors = ["Breno RdV"]
+description = "Cross-platform notepad application inspired on Notepad++"
+repository = "https://github.com/brenordv/rust-pad"
+
 
 [workspace.dependencies]
 anyhow = "1.0.101"
