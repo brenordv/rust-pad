@@ -58,8 +58,27 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
 
-      - name: Generate coverage report
-        run: cargo tarpaulin --workspace --out xml --output-dir .
+      - name: Generate coverage report (LCOV)
+        run: cargo tarpaulin --workspace --out lcov --output-dir .
+
+      - name: Convert LCOV to SonarQube generic coverage format
+        run: |
+          awk '
+          BEGIN { print "<coverage version=\"1\">" }
+          /^SF:/ {
+            filepath = substr($0, 4)
+            # Strip absolute prefix to make paths relative to repo root
+            sub(/^\/home\/runner\/work\/[^/]+\/[^/]+\//, "", filepath)
+            print "  <file path=\"" filepath "\">"
+          }
+          /^DA:/ {
+            split(substr($0, 4), parts, ",")
+            covered = (parts[2] + 0 > 0) ? "true" : "false"
+            print "    <lineToCover lineNumber=\"" parts[1] "\" covered=\"" covered "\"/>"
+          }
+          /^end_of_record/ { print "  </file>" }
+          END { print "</coverage>" }
+          ' lcov.info > sonar-coverage.xml
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v6
