@@ -1848,4 +1848,26 @@ mod tests {
         app.handle_search_action(FindReplaceAction::ReplaceAll);
         assert!(app.find_replace.status.contains("0 occurrences"));
     }
+
+    #[test]
+    fn test_search_invalid_regex_current_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "[invalid(");
+        app.find_replace.options.use_regex = true;
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::Search);
+        assert!(app.find_replace.status.starts_with("Error:"));
+    }
+
+    #[test]
+    fn test_search_invalid_regex_all_tabs() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        set_find_text(&mut app, "[invalid(");
+        app.find_replace.options.use_regex = true;
+        app.find_replace.scope = SearchScope::AllTabs;
+        app.handle_search_action(FindReplaceAction::Search);
+        assert!(app.find_replace.status.starts_with("Error:"));
+    }
 }

@@ -457,3 +457,581 @@ fn test_special_chars_toggle() {
     harness.run();
     assert!(!harness.state().show_special_chars);
 }
+
+// ── Rendering code-path coverage ─────────────────────────────────────
+
+#[test]
+fn test_render_with_selection_highlights() {
+    let mut harness = create_harness();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("hello world foo bar");
+
+    // Set up a selection spanning "world"
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(0, 6));
+    doc.cursor.position = Position::new(0, 11);
+    harness.run();
+
+    // Selection should be active after render
+    assert!(harness
+        .state()
+        .tabs
+        .active_doc()
+        .cursor
+        .selection_anchor
+        .is_some());
+}
+
+#[test]
+fn test_render_with_multiline_selection() {
+    let mut harness = create_harness();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("line one\nline two\nline three");
+
+    // Select across lines (triggers selection highlight on multiple lines)
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(0, 3));
+    doc.cursor.position = Position::new(2, 5);
+    harness.run();
+
+    let sel = harness
+        .state()
+        .tabs
+        .active_doc()
+        .cursor
+        .selection()
+        .expect("should have selection");
+    assert_eq!(sel.start().line, 0);
+    assert_eq!(sel.end().line, 2);
+}
+
+#[test]
+fn test_render_with_occurrence_highlights() {
+    let mut harness = create_harness();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("foo bar foo baz foo");
+
+    // Select "foo" to trigger occurrence highlight-all
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(0, 3);
+    harness.run();
+
+    // Text should still be intact, occurrences are rendered as background rects
+    assert_eq!(
+        harness.state().tabs.active_doc().buffer.to_string(),
+        "foo bar foo baz foo"
+    );
+}
+
+#[test]
+fn test_render_with_syntax_highlighting() {
+    let mut harness = create_harness();
+    // Set title with .rs extension to trigger Rust syntax highlighting
+    harness.state_mut().tabs.active_doc_mut().title = "test.rs".to_string();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("fn main() {\n    let x = 42;\n    println!(\"hello\");\n}\n");
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 5);
+}
+
+#[test]
+fn test_render_syntax_highlight_python() {
+    let mut harness = create_harness();
+    harness.state_mut().tabs.active_doc_mut().title = "script.py".to_string();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("def hello():\n    print('world')\n");
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 3);
+}
+
+#[test]
+fn test_render_word_wrap_with_long_lines() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text(&"abcdefghij".repeat(50)); // 500 chars on one line
+    harness.run();
+
+    assert!(harness.state().word_wrap);
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 1);
+}
+
+#[test]
+fn test_render_word_wrap_multiline() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("first line that is quite long\nsecond line also lengthy\nthird line\n");
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 4);
+}
+
+#[test]
+fn test_render_word_wrap_with_selection() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("hello world this is a long line that should wrap around the editor area\n");
+
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(0, 20);
+    harness.run();
+
+    assert!(harness
+        .state()
+        .tabs
+        .active_doc()
+        .cursor
+        .selection_anchor
+        .is_some());
+}
+
+#[test]
+fn test_render_word_wrap_with_occurrence_highlights() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("word word word word word word word word word word word word word word word");
+
+    // Select "word" to trigger occurrence highlighting
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(0, 4);
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 1);
+}
+
+#[test]
+fn test_render_special_chars_with_tabs() {
+    let mut harness = create_harness();
+    harness.state_mut().show_special_chars = true;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("col1\tcol2\tcol3\n");
+    harness.run();
+
+    assert!(harness
+        .state()
+        .tabs
+        .active_doc()
+        .buffer
+        .to_string()
+        .contains('\t'));
+}
+
+#[test]
+fn test_render_special_chars_with_nbsp_badges() {
+    let mut harness = create_harness();
+    harness.state_mut().show_special_chars = true;
+    // Insert text with NBSP and ZWSP characters that render as badges
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("hello\u{00A0}world\u{200B}test\u{200C}end\u{200D}!");
+    harness.run();
+
+    let text = harness.state().tabs.active_doc().buffer.to_string();
+    assert!(text.contains('\u{00A0}'));
+    assert!(text.contains('\u{200B}'));
+}
+
+#[test]
+fn test_render_special_chars_with_selection_over_eol() {
+    let mut harness = create_harness();
+    harness.state_mut().show_special_chars = true;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("line1\nline2\nline3\n");
+
+    // Selection spanning across line ending (triggers EOL badge selection extension)
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(1, 3);
+    harness.run();
+
+    let sel = harness
+        .state()
+        .tabs
+        .active_doc()
+        .cursor
+        .selection()
+        .expect("should have selection");
+    assert_eq!(sel.start().line, 0);
+    assert_eq!(sel.end().line, 1);
+}
+
+#[test]
+fn test_render_no_line_numbers() {
+    let mut harness = create_harness();
+    harness.state_mut().show_line_numbers = false;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("line1\nline2\nline3");
+    harness.run();
+
+    assert!(!harness.state().show_line_numbers);
+}
+
+#[test]
+fn test_render_syntax_highlight_with_selection() {
+    let mut harness = create_harness();
+    harness.state_mut().tabs.active_doc_mut().title = "test.rs".to_string();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("fn main() {\n    let x = 42;\n}\n");
+
+    // Select "let x = 42" across the highlighted code
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(1, 4));
+    doc.cursor.position = Position::new(1, 15);
+    harness.run();
+
+    assert!(harness
+        .state()
+        .tabs
+        .active_doc()
+        .cursor
+        .selection_anchor
+        .is_some());
+}
+
+#[test]
+fn test_render_word_wrap_with_syntax_highlight() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    harness.state_mut().tabs.active_doc_mut().title = "test.rs".to_string();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("fn very_long_function_name(param1: &str, param2: i32, param3: f64, param4: bool) -> Result<String, Error> {\n    println!(\"hello\");\n}\n");
+    harness.run();
+
+    assert!(harness.state().word_wrap);
+}
+
+#[test]
+fn test_render_word_wrap_with_special_chars() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    harness.state_mut().show_special_chars = true;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("a b c d e f g h i j k l m n o p q r s t u v w x y z\n");
+    harness.run();
+
+    assert!(harness.state().word_wrap);
+    assert!(harness.state().show_special_chars);
+}
+
+#[test]
+fn test_render_large_document() {
+    let mut harness = create_harness();
+    let mut text = String::new();
+    for i in 0..100 {
+        text.push_str(&format!("Line {i}: some content here\n"));
+    }
+    harness.state_mut().tabs.active_doc_mut().insert_text(&text);
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 101);
+}
+
+#[test]
+fn test_render_with_scrolled_position() {
+    let mut harness = create_harness();
+    let mut text = String::new();
+    for i in 0..100 {
+        text.push_str(&format!("Line {i}\n"));
+    }
+    harness.state_mut().tabs.active_doc_mut().insert_text(&text);
+
+    // Move cursor to line 50 to force vertical scroll
+    harness.state_mut().tabs.active_doc_mut().cursor.position = Position::new(50, 0);
+    harness.run();
+
+    // Scroll should have adjusted
+    assert!(harness.state().tabs.active_doc().scroll_y > 0.0);
+}
+
+#[test]
+fn test_render_with_horizontal_scroll() {
+    let mut harness = create_harness();
+    // Very long line to trigger horizontal scroll
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text(&"x".repeat(500));
+
+    // Move cursor to the end of the long line
+    harness.state_mut().tabs.active_doc_mut().cursor.position = Position::new(0, 500);
+    harness.run();
+
+    // Horizontal scroll should be non-zero
+    assert!(harness.state().tabs.active_doc().scroll_x > 0.0);
+}
+
+#[test]
+fn test_render_word_wrap_no_horizontal_scroll() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text(&"y".repeat(300));
+
+    harness.state_mut().tabs.active_doc_mut().cursor.position = Position::new(0, 300);
+    harness.run();
+
+    // In word wrap mode, horizontal scroll should be 0
+    assert!((harness.state().tabs.active_doc().scroll_x - 0.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_render_badges_with_selection() {
+    let mut harness = create_harness();
+    harness.state_mut().show_special_chars = true;
+    // Text with badge characters and a selection spanning across them
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("abc\u{00A0}def\u{200B}ghi");
+
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(0, 2));
+    doc.cursor.position = Position::new(0, 8);
+    harness.run();
+
+    assert!(harness
+        .state()
+        .tabs
+        .active_doc()
+        .cursor
+        .selection_anchor
+        .is_some());
+}
+
+#[test]
+fn test_render_multiple_frames_with_content_change() {
+    let mut harness = create_harness();
+    harness.state_mut().tabs.active_doc_mut().title = "test.rs".to_string();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("fn foo() {}");
+    harness.run();
+
+    // Modify content between frames (invalidates galley cache)
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("\nfn bar() {}");
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 2);
+}
+
+#[test]
+fn test_render_cached_galley_reuse() {
+    let mut harness = create_harness();
+    harness.state_mut().tabs.active_doc_mut().title = "test.rs".to_string();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("let x = 42;\n");
+
+    // Render twice without changing content — second render should use cached galley
+    harness.run();
+    harness.run();
+
+    assert_eq!(
+        harness.state().tabs.active_doc().buffer.to_string(),
+        "let x = 42;\n"
+    );
+}
+
+#[test]
+fn test_render_modified_document_change_tracking() {
+    let mut harness = create_harness();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("line1\nline2\nline3\n");
+    // Mark as saved to establish baseline
+    harness.state_mut().tabs.active_doc_mut().modified = false;
+    harness.run();
+
+    // Now modify line 2 — this should trigger change tracking markers in the gutter
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.position = Position::new(1, 5);
+    doc.insert_text(" modified");
+    harness.run();
+
+    assert!(harness.state().tabs.active_doc().modified);
+}
+
+#[test]
+fn test_render_word_wrap_with_scrolled_position() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    let mut text = String::new();
+    for i in 0..50 {
+        text.push_str(&format!("This is line number {i} with some extra content to cause wrapping in the editor widget\n"));
+    }
+    harness.state_mut().tabs.active_doc_mut().insert_text(&text);
+
+    // Move cursor to a line that requires vertical scroll in wrap mode
+    harness.state_mut().tabs.active_doc_mut().cursor.position = Position::new(40, 0);
+    harness.run();
+
+    assert!(harness.state().tabs.active_doc().scroll_y > 0.0);
+}
+
+#[test]
+fn test_render_word_wrap_first_and_continuation_rows() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    // Insert a line that will wrap multiple times
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text(&"ABCDE ".repeat(100));
+    harness.run();
+
+    // The single logical line should still be 1 line
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 1);
+}
+
+#[test]
+fn test_render_plain_text_no_extension() {
+    let mut harness = create_harness();
+    // Title without extension — still uses syntax highlighter but detects plain text
+    harness.state_mut().tabs.active_doc_mut().title = "Untitled".to_string();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("Just plain text with no syntax highlighting rules.\nSecond line.\n");
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 3);
+}
+
+#[test]
+fn test_render_with_all_features_combined() {
+    let mut harness = create_harness();
+    harness.state_mut().show_special_chars = true;
+    harness.state_mut().show_line_numbers = true;
+    harness.state_mut().tabs.active_doc_mut().title = "test.rs".to_string();
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("fn test() {\n    let x\u{00A0}= 42;\n    println!(\"{x}\");\n}\n");
+
+    // Set up a selection and render
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(1, 8));
+    doc.cursor.position = Position::new(1, 14);
+    harness.run();
+
+    assert!(harness.state().show_special_chars);
+    assert!(harness.state().show_line_numbers);
+}
+
+#[test]
+fn test_render_word_wrap_with_all_features() {
+    let mut harness = create_harness();
+    harness.state_mut().word_wrap = true;
+    harness.state_mut().show_special_chars = true;
+    harness.state_mut().show_line_numbers = true;
+    harness.state_mut().tabs.active_doc_mut().title = "long.rs".to_string();
+    harness.state_mut().tabs.active_doc_mut().insert_text(
+        "fn very_long_function() { let result = some_computation(param1, param2, param3, param4, param5); result }\n\
+         fn another() { let x = 1; let y = 2; let z = x + y; println!(\"{z}\"); }\n"
+    );
+
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.cursor.selection_anchor = Some(Position::new(0, 10));
+    doc.cursor.position = Position::new(0, 30);
+    harness.run();
+
+    assert!(harness.state().word_wrap);
+}
+
+#[test]
+fn test_render_empty_document_with_line_numbers() {
+    let mut harness = create_harness();
+    harness.state_mut().show_line_numbers = true;
+    // Empty document — gutter should show line 1
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 1);
+}
+
+#[test]
+fn test_render_document_with_many_lines_for_gutter_width() {
+    let mut harness = create_harness();
+    harness.state_mut().show_line_numbers = true;
+    // 1000+ lines to test multi-digit gutter width computation
+    let mut text = String::new();
+    for i in 0..1001 {
+        text.push_str(&format!("{i}\n"));
+    }
+    harness.state_mut().tabs.active_doc_mut().insert_text(&text);
+    harness.run();
+
+    assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 1002);
+}
