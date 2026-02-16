@@ -3,8 +3,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Supported text encodings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextEncoding {
+    #[default]
     Utf8,
     Utf8Bom,
     Utf16Le,
@@ -12,12 +13,6 @@ pub enum TextEncoding {
     Ascii,
     /// A named encoding from `encoding_rs` (e.g., "windows-1252").
     Legacy(&'static str),
-}
-
-impl Default for TextEncoding {
-    fn default() -> Self {
-        Self::Utf8
-    }
 }
 
 impl std::fmt::Display for TextEncoding {
