@@ -27,7 +27,6 @@ fn thumb_color(
 ///
 /// `scroll` is the mutable scroll position for this axis.
 /// `axis` extracts the relevant coordinate (x or y) from a pointer position.
-/// `track_start` is the track origin for this axis.
 #[allow(clippy::too_many_arguments)]
 fn handle_axis_scroll(
     scroll: &mut f32,
@@ -38,8 +37,8 @@ fn handle_axis_scroll(
     thumb_travel: f32,
     max_scroll: f32,
     axis: fn(Pos2) -> f32,
-    track_start: f32,
 ) {
+    let track_start = axis(track_rect.min);
     let compute = |pos: Pos2| -> f32 {
         let relative = axis(pos) - track_start - thumb_size * 0.5;
         (relative / thumb_travel.max(1.0)).clamp(0.0, 1.0) * max_scroll
@@ -121,7 +120,6 @@ impl<'a> EditorWidget<'a> {
             thumb_travel,
             max_scroll,
             |p| p.y,
-            track_rect.min.y,
         );
     }
 
@@ -183,7 +181,6 @@ impl<'a> EditorWidget<'a> {
             thumb_travel,
             max_scroll,
             |p| p.x,
-            track_rect.min.x,
         );
     }
 }
