@@ -32,10 +32,9 @@ impl App {
 
     /// Handles search/replace within the active tab only.
     pub(crate) fn handle_search_current_tab(&mut self, action: FindReplaceAction) {
-        let doc = self.tabs.active_doc_mut();
-
         match action {
             FindReplaceAction::Search => {
+                let doc = self.tabs.active_doc_mut();
                 if let Err(e) = self.find_replace.engine.find_all_versioned(
                     &doc.buffer,
                     &self.find_replace.options,
@@ -52,7 +51,7 @@ impl App {
                 }
             }
             FindReplaceAction::FindNext => {
-                // Ensure search is up to date
+                let doc = self.tabs.active_doc_mut();
                 let _ = self.find_replace.engine.find_all_versioned(
                     &doc.buffer,
                     &self.find_replace.options,
@@ -69,6 +68,7 @@ impl App {
                 }
             }
             FindReplaceAction::FindPrev => {
+                let doc = self.tabs.active_doc_mut();
                 let _ = self.find_replace.engine.find_all_versioned(
                     &doc.buffer,
                     &self.find_replace.options,
@@ -91,30 +91,11 @@ impl App {
                     self.find_replace.status = "No matches".to_string();
                 }
             }
-            FindReplaceAction::Replace => {
-                let replacement = self.find_replace.replace_text.clone();
-                let options = self.find_replace.options.clone();
-                match self.find_replace.engine.replace_current(
-                    &mut doc.buffer,
-                    &replacement,
-                    &options,
-                ) {
-                    Ok(true) => {
-                        doc.modified = true;
-                        let count = self.find_replace.engine.match_count();
-                        self.find_replace.status = format!("Replaced. {count} matches remaining");
-                    }
-                    Ok(false) => {
-                        self.find_replace.status = "No match to replace".to_string();
-                    }
-                    Err(e) => {
-                        self.find_replace.status = format!("Error: {e}");
-                    }
-                }
-            }
+            FindReplaceAction::Replace => self.handle_replace_current(),
             FindReplaceAction::ReplaceAll => {
                 let replacement = self.find_replace.replace_text.clone();
                 let options = self.find_replace.options.clone();
+                let doc = self.tabs.active_doc_mut();
                 match self
                     .find_replace
                     .engine
@@ -256,29 +237,7 @@ impl App {
 
                 self.find_replace.status = "No matches in any tab".to_string();
             }
-            FindReplaceAction::Replace => {
-                // Replace in the active tab only (same as current-tab mode)
-                let doc = self.tabs.active_doc_mut();
-                let replacement = self.find_replace.replace_text.clone();
-                let options = self.find_replace.options.clone();
-                match self.find_replace.engine.replace_current(
-                    &mut doc.buffer,
-                    &replacement,
-                    &options,
-                ) {
-                    Ok(true) => {
-                        doc.modified = true;
-                        let count = self.find_replace.engine.match_count();
-                        self.find_replace.status = format!("Replaced. {count} matches remaining");
-                    }
-                    Ok(false) => {
-                        self.find_replace.status = "No match to replace".to_string();
-                    }
-                    Err(e) => {
-                        self.find_replace.status = format!("Error: {e}");
-                    }
-                }
-            }
+            FindReplaceAction::Replace => self.handle_replace_current(),
             FindReplaceAction::ReplaceAll => {
                 // Replace in all tabs
                 let replacement = self.find_replace.replace_text.clone();
@@ -317,6 +276,30 @@ impl App {
                     self.find_replace.status =
                         format!("Replaced {total_replaced} occurrences across all tabs");
                 }
+            }
+        }
+    }
+
+    /// Replaces the current match in the active tab.
+    fn handle_replace_current(&mut self) {
+        let doc = self.tabs.active_doc_mut();
+        let replacement = self.find_replace.replace_text.clone();
+        let options = self.find_replace.options.clone();
+        match self
+            .find_replace
+            .engine
+            .replace_current(&mut doc.buffer, &replacement, &options)
+        {
+            Ok(true) => {
+                doc.modified = true;
+                let count = self.find_replace.engine.match_count();
+                self.find_replace.status = format!("Replaced. {count} matches remaining");
+            }
+            Ok(false) => {
+                self.find_replace.status = "No match to replace".to_string();
+            }
+            Err(e) => {
+                self.find_replace.status = format!("Error: {e}");
             }
         }
     }

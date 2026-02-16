@@ -1,5 +1,5 @@
 /// Dialogs for Find/Replace, Go To Line, etc.
-use egui::{Context, Key, Window};
+use egui::{Context, Key, Ui, Window};
 use rust_pad_core::search::{SearchEngine, SearchOptions};
 
 /// State for the Find/Replace dialog.
@@ -46,6 +46,18 @@ impl FindReplaceDialog {
         self.visible = false;
     }
 
+    /// Builds a key string from the current search parameters for change detection.
+    fn options_key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{:?}",
+            self.find_text,
+            self.options.case_sensitive,
+            self.options.whole_word,
+            self.options.use_regex,
+            self.scope,
+        )
+    }
+
     /// Shows the Find/Replace dialog. Returns an action to perform, if any.
     pub fn show(&mut self, ctx: &Context) -> Option<FindReplaceAction> {
         if !self.visible {
@@ -62,73 +74,12 @@ impl FindReplaceDialog {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
-
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label("Find:      ");
-                    let find_response = ui.text_edit_singleline(&mut self.find_text);
-
-                    // Search on text change
-                    if find_response.changed() {
-                        action = Some(FindReplaceAction::Search);
-                    }
-
-                    // Enter in find field = find next
-                    if find_response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        action = Some(FindReplaceAction::FindNext);
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label("Replace:");
-                    ui.text_edit_singleline(&mut self.replace_text);
-                });
-
+                Self::show_find_input(ui, &mut self.find_text, &mut action);
+                Self::show_replace_input(ui, &mut self.replace_text);
                 ui.add_space(4.0);
-
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    ui.checkbox(&mut self.options.case_sensitive, "Case sensitive");
-                    ui.checkbox(&mut self.options.whole_word, "Whole word");
-                    ui.checkbox(&mut self.options.use_regex, "Regex");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    ui.label("Scope:");
-                    if ui
-                        .radio(self.scope == SearchScope::CurrentTab, "Current tab")
-                        .clicked()
-                    {
-                        self.scope = SearchScope::CurrentTab;
-                    }
-                    if ui
-                        .radio(self.scope == SearchScope::AllTabs, "All tabs")
-                        .clicked()
-                    {
-                        self.scope = SearchScope::AllTabs;
-                    }
-                });
-
+                Self::show_search_options(ui, &mut self.options, &mut self.scope);
                 ui.add_space(4.0);
-
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if ui.button("  Find Next  ").clicked() {
-                        action = Some(FindReplaceAction::FindNext);
-                    }
-                    if ui.button("  Find Prev  ").clicked() {
-                        action = Some(FindReplaceAction::FindPrev);
-                    }
-                    if ui.button("  Replace  ").clicked() {
-                        action = Some(FindReplaceAction::Replace);
-                    }
-                    if ui.button("  Replace All  ").clicked() {
-                        action = Some(FindReplaceAction::ReplaceAll);
-                    }
-                });
-
+                Self::show_action_buttons(ui, &mut action);
                 if !self.status.is_empty() {
                     ui.add_space(4.0);
                     ui.label(&self.status);
@@ -139,28 +90,93 @@ impl FindReplaceDialog {
             self.visible = false;
         }
 
-        // Sync the query text into options every frame
         self.options.query = self.find_text.clone();
+        self.detect_parameter_change(&mut action);
+        action
+    }
 
-        // Detect when search parameters change (checkboxes toggled, etc.)
-        // and trigger a re-search so the match count stays up to date.
-        let current_key = format!(
-            "{}:{}:{}:{}:{:?}",
-            self.find_text,
-            self.options.case_sensitive,
-            self.options.whole_word,
-            self.options.use_regex,
-            self.scope,
-        );
+    /// Renders the find text input field.
+    fn show_find_input(
+        ui: &mut Ui,
+        find_text: &mut String,
+        action: &mut Option<FindReplaceAction>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label("Find:      ");
+            let find_response = ui.text_edit_singleline(find_text);
+            if find_response.changed() {
+                *action = Some(FindReplaceAction::Search);
+            }
+            if find_response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                *action = Some(FindReplaceAction::FindNext);
+            }
+        });
+    }
+
+    /// Renders the replace text input field.
+    fn show_replace_input(ui: &mut Ui, replace_text: &mut String) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label("Replace:");
+            ui.text_edit_singleline(replace_text);
+        });
+    }
+
+    /// Renders search option checkboxes and scope radio buttons.
+    fn show_search_options(ui: &mut Ui, options: &mut SearchOptions, scope: &mut SearchScope) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.checkbox(&mut options.case_sensitive, "Case sensitive");
+            ui.checkbox(&mut options.whole_word, "Whole word");
+            ui.checkbox(&mut options.use_regex, "Regex");
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.label("Scope:");
+            if ui
+                .radio(*scope == SearchScope::CurrentTab, "Current tab")
+                .clicked()
+            {
+                *scope = SearchScope::CurrentTab;
+            }
+            if ui
+                .radio(*scope == SearchScope::AllTabs, "All tabs")
+                .clicked()
+            {
+                *scope = SearchScope::AllTabs;
+            }
+        });
+    }
+
+    /// Renders the Find Next / Find Prev / Replace / Replace All buttons.
+    fn show_action_buttons(ui: &mut Ui, action: &mut Option<FindReplaceAction>) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if ui.button("  Find Next  ").clicked() {
+                *action = Some(FindReplaceAction::FindNext);
+            }
+            if ui.button("  Find Prev  ").clicked() {
+                *action = Some(FindReplaceAction::FindPrev);
+            }
+            if ui.button("  Replace  ").clicked() {
+                *action = Some(FindReplaceAction::Replace);
+            }
+            if ui.button("  Replace All  ").clicked() {
+                *action = Some(FindReplaceAction::ReplaceAll);
+            }
+        });
+    }
+
+    /// Detects parameter changes and triggers a re-search if needed.
+    fn detect_parameter_change(&mut self, action: &mut Option<FindReplaceAction>) {
+        let current_key = self.options_key();
         if current_key != self.prev_options_key {
             self.prev_options_key = current_key;
-            // Trigger re-search when parameters change (including text cleared)
             if action.is_none() {
-                action = Some(FindReplaceAction::Search);
+                *action = Some(FindReplaceAction::Search);
             }
         }
-
-        action
     }
 }
 
@@ -261,6 +277,19 @@ impl GoToLineDialog {
         self.focus_requested = true;
     }
 
+    /// Attempts to navigate: parses input, stores result, and closes the dialog.
+    fn try_navigate(
+        line_text: &str,
+        total_lines: usize,
+        result: &mut Option<GoToTarget>,
+        visible: &mut bool,
+    ) {
+        if let Some(target) = parse_goto_input(line_text, total_lines) {
+            *result = Some(target);
+            *visible = false;
+        }
+    }
+
     /// Shows the Go To Line dialog. Returns a target position if confirmed.
     pub fn show(&mut self, ctx: &Context, total_lines: usize) -> Option<GoToTarget> {
         if !self.visible {
@@ -277,34 +306,34 @@ impl GoToLineDialog {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
-
                 ui.label(format!("Line[:Column] (1-{total_lines}):"));
-
                 ui.add_space(4.0);
-                let response = ui.text_edit_singleline(&mut self.line_text);
 
-                // Auto-focus the text field when the dialog first opens
+                let response = ui.text_edit_singleline(&mut self.line_text);
                 if self.focus_requested {
                     self.focus_requested = false;
                     response.request_focus();
                 }
 
                 if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    if let Some(target) = parse_goto_input(&self.line_text, total_lines) {
-                        result = Some(target);
-                        self.visible = false;
-                    }
+                    Self::try_navigate(
+                        &self.line_text,
+                        total_lines,
+                        &mut result,
+                        &mut self.visible,
+                    );
                 }
 
                 ui.add_space(4.0);
-
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     if ui.button("    Go    ").clicked() {
-                        if let Some(target) = parse_goto_input(&self.line_text, total_lines) {
-                            result = Some(target);
-                            self.visible = false;
-                        }
+                        Self::try_navigate(
+                            &self.line_text,
+                            total_lines,
+                            &mut result,
+                            &mut self.visible,
+                        );
                     }
                     if ui.button("  Cancel  ").clicked() {
                         self.visible = false;

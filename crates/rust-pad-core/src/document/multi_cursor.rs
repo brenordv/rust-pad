@@ -8,32 +8,25 @@ use crate::cursor::{char_to_pos, pos_to_char};
 use super::Document;
 
 impl Document {
-    /// Inserts text at all cursor positions (primary + secondary).
-    pub fn insert_text_multi(&mut self, text: &str) {
-        if self.secondary_cursors.is_empty() {
-            self.insert_text(text);
-            return;
-        }
-
-        // Collect all cursor char indices with their source
-        let mut cursor_indices: Vec<(usize, usize, bool)> = Vec::new(); // (char_idx, index, is_primary)
-
+    /// Collects char indices for the primary and all secondary cursors.
+    ///
+    /// Returns `(char_idx, source_index, is_primary)` tuples (unsorted).
+    fn collect_cursor_indices(&self) -> Vec<(usize, usize, bool)> {
+        let mut indices = Vec::with_capacity(1 + self.secondary_cursors.len());
         if let Ok(idx) = self.cursor.to_char_index(&self.buffer) {
-            cursor_indices.push((idx, 0, true));
+            indices.push((idx, 0, true));
         }
         for (i, sc) in self.secondary_cursors.iter().enumerate() {
             if let Ok(idx) = sc.to_char_index(&self.buffer) {
-                cursor_indices.push((idx, i, false));
+                indices.push((idx, i, false));
             }
         }
+        indices
+    }
 
-        // Sort descending by char index so edits don't shift earlier positions
-        cursor_indices.sort_by(|a, b| b.0.cmp(&a.0));
-
-        let insert_len = text.chars().count();
-
-        // Delete selections first (in reverse order), then insert
-        for &(_, idx, is_primary) in &cursor_indices {
+    /// Deletes selections at the given cursor positions (must be sorted descending).
+    fn delete_selections_at_cursors(&mut self, indices: &[(usize, usize, bool)]) {
+        for &(_, idx, is_primary) in indices {
             let cursor = if is_primary {
                 &self.cursor
             } else {
@@ -45,24 +38,78 @@ impl Document {
                 }
             }
         }
+    }
 
-        // Recalculate positions after deletions and insert in reverse order
-        let mut cursor_indices2: Vec<(usize, usize, bool)> = Vec::new();
-        if let Ok(idx) = pos_to_char(
-            &self.buffer,
-            self.cursor
-                .selection_anchor
-                .unwrap_or(self.cursor.position)
-                .min(self.cursor.position),
-        ) {
-            cursor_indices2.push((idx, 0, true));
+    /// Updates a single cursor's position (primary or secondary).
+    fn set_cursor_position(
+        &mut self,
+        src_idx: usize,
+        is_primary: bool,
+        new_pos: crate::cursor::Position,
+        clear_selection: bool,
+    ) {
+        let cursor = if is_primary {
+            &mut self.cursor
+        } else {
+            &mut self.secondary_cursors[src_idx]
+        };
+        cursor.position = new_pos;
+        if clear_selection {
+            cursor.clear_selection();
+        }
+        cursor.desired_col = None;
+    }
+
+    /// Collects cursor positions using the minimum of anchor and position.
+    ///
+    /// Used after selection deletion to find where inserts should happen.
+    fn collect_min_selection_positions(&self) -> Vec<(usize, usize, bool)> {
+        let mut indices = Vec::with_capacity(1 + self.secondary_cursors.len());
+        let primary_pos = self
+            .cursor
+            .selection_anchor
+            .unwrap_or(self.cursor.position)
+            .min(self.cursor.position);
+        if let Ok(idx) = pos_to_char(&self.buffer, primary_pos) {
+            indices.push((idx, 0, true));
         }
         for (i, sc) in self.secondary_cursors.iter().enumerate() {
             let pos = sc.selection_anchor.unwrap_or(sc.position).min(sc.position);
             if let Ok(idx) = pos_to_char(&self.buffer, pos) {
-                cursor_indices2.push((idx, i, false));
+                indices.push((idx, i, false));
             }
         }
+        indices
+    }
+
+    /// Finalizes a multi-cursor edit: merges overlapping cursors, syncs changes.
+    fn finalize_multi_edit(&mut self, scroll_to_cursor: bool) {
+        self.merge_overlapping_cursors();
+        self.sync_line_changes();
+        self.modified = true;
+        if scroll_to_cursor {
+            self.scroll_to_cursor = true;
+        }
+        self.bump_version();
+    }
+
+    /// Inserts text at all cursor positions (primary + secondary).
+    pub fn insert_text_multi(&mut self, text: &str) {
+        if self.secondary_cursors.is_empty() {
+            self.insert_text(text);
+            return;
+        }
+
+        let mut cursor_indices = self.collect_cursor_indices();
+        cursor_indices.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let insert_len = text.chars().count();
+
+        // Delete selections first (in reverse order), then insert
+        self.delete_selections_at_cursors(&cursor_indices);
+
+        // Recalculate positions after deletions and insert in reverse order
+        let mut cursor_indices2 = self.collect_min_selection_positions();
         cursor_indices2.sort_by(|a, b| b.0.cmp(&a.0));
 
         for &(char_idx, _, _) in &cursor_indices2 {
@@ -70,30 +117,17 @@ impl Document {
         }
 
         // Sort ascending, track cumulative offset to update each cursor
-        let mut ascending: Vec<(usize, usize, bool)> = cursor_indices2.clone();
-        ascending.sort_by(|a, b| a.0.cmp(&b.0));
+        cursor_indices2.sort_by_key(|&(idx, _, _)| idx);
 
         let mut offset = 0usize;
-        for &(original_idx, src_idx, is_primary) in &ascending {
+        for &(original_idx, src_idx, is_primary) in &cursor_indices2 {
             let new_char_idx = original_idx + offset + insert_len;
             let new_pos = char_to_pos(&self.buffer, new_char_idx);
-            if is_primary {
-                self.cursor.position = new_pos;
-                self.cursor.clear_selection();
-                self.cursor.desired_col = None;
-            } else {
-                self.secondary_cursors[src_idx].position = new_pos;
-                self.secondary_cursors[src_idx].clear_selection();
-                self.secondary_cursors[src_idx].desired_col = None;
-            }
+            self.set_cursor_position(src_idx, is_primary, new_pos, true);
             offset += insert_len;
         }
 
-        self.merge_overlapping_cursors();
-        self.sync_line_changes();
-        self.modified = true;
-        self.scroll_to_cursor = true;
-        self.bump_version();
+        self.finalize_multi_edit(true);
     }
 
     /// Inserts a different string at each cursor position (primary + secondary).
@@ -103,7 +137,6 @@ impl Document {
     pub fn insert_text_per_cursor(&mut self, texts: &[&str]) {
         let cursor_count = 1 + self.secondary_cursors.len();
         if texts.len() != cursor_count {
-            // Fallback: insert the first text at all cursors
             if let Some(first) = texts.first() {
                 self.insert_text_multi(first);
             }
@@ -115,22 +148,11 @@ impl Document {
             return;
         }
 
-        // Build (char_idx, cursor_index_in_texts, is_primary) sorted by document position
-        let mut cursor_info: Vec<(usize, usize, bool)> = Vec::new();
-        if let Ok(idx) = self.cursor.to_char_index(&self.buffer) {
-            cursor_info.push((idx, 0, true));
-        }
-        for (i, sc) in self.secondary_cursors.iter().enumerate() {
-            if let Ok(idx) = sc.to_char_index(&self.buffer) {
-                cursor_info.push((idx, i, false));
-            }
-        }
-
-        // Sort ascending by char index to assign texts in document order
+        // Build (char_idx, src_idx, is_primary) sorted ascending by document position
+        let mut cursor_info = self.collect_cursor_indices();
         cursor_info.sort_by_key(|&(idx, _, _)| idx);
 
-        // Map each sorted position to its text: the first cursor in document
-        // order gets texts[0], the second gets texts[1], etc.
+        // Map each sorted position to its text in document order
         let text_assignments: Vec<(usize, &str, usize, bool)> = cursor_info
             .iter()
             .enumerate()
@@ -139,31 +161,18 @@ impl Document {
             })
             .collect();
 
-        // Delete selections first (reverse order)
-        let mut desc = text_assignments.clone();
+        // Delete selections first (reverse document order)
+        let mut desc = self.collect_cursor_indices();
         desc.sort_by(|a, b| b.0.cmp(&a.0));
-
-        for &(_, _, src_idx, is_primary) in &desc {
-            let cursor = if is_primary {
-                &self.cursor
-            } else {
-                &self.secondary_cursors[src_idx]
-            };
-            if let Ok(Some((start, end))) = cursor.selection_char_range(&self.buffer) {
-                if start != end {
-                    let _ = self.buffer.remove(start, end);
-                }
-            }
-        }
+        self.delete_selections_at_cursors(&desc);
 
         // Recalculate positions after deletions, preserving text assignment order
-        let mut assignments2: Vec<(usize, &str, usize, bool)> = Vec::new();
-        // Rebuild in the same document-order as text_assignments
         let positions_in_order: Vec<(usize, bool)> = text_assignments
             .iter()
             .map(|&(_, _, src_idx, is_primary)| (src_idx, is_primary))
             .collect();
 
+        let mut assignments2: Vec<(usize, &str, usize, bool)> = Vec::new();
         for (text_idx, &(src_idx, is_primary)) in positions_in_order.iter().enumerate() {
             let pos = if is_primary {
                 self.cursor
@@ -192,23 +201,11 @@ impl Document {
             let insert_len = text.chars().count();
             let new_char_idx = original_idx + offset + insert_len;
             let new_pos = char_to_pos(&self.buffer, new_char_idx);
-            if is_primary {
-                self.cursor.position = new_pos;
-                self.cursor.clear_selection();
-                self.cursor.desired_col = None;
-            } else {
-                self.secondary_cursors[src_idx].position = new_pos;
-                self.secondary_cursors[src_idx].clear_selection();
-                self.secondary_cursors[src_idx].desired_col = None;
-            }
+            self.set_cursor_position(src_idx, is_primary, new_pos, true);
             offset += insert_len;
         }
 
-        self.merge_overlapping_cursors();
-        self.sync_line_changes();
-        self.modified = true;
-        self.scroll_to_cursor = true;
-        self.bump_version();
+        self.finalize_multi_edit(true);
     }
 
     /// Performs backspace at all cursor positions.
@@ -218,7 +215,6 @@ impl Document {
             return;
         }
 
-        // If any cursor has a selection, delete selections instead
         let has_selection = self.cursor.selection_anchor.is_some()
             || self
                 .secondary_cursors
@@ -230,19 +226,9 @@ impl Document {
             return;
         }
 
-        // Collect char indices, sort descending
-        let mut indices: Vec<(usize, usize, bool)> = Vec::new();
-        if let Ok(idx) = self.cursor.to_char_index(&self.buffer) {
-            indices.push((idx, 0, true));
-        }
-        for (i, sc) in self.secondary_cursors.iter().enumerate() {
-            if let Ok(idx) = sc.to_char_index(&self.buffer) {
-                indices.push((idx, i, false));
-            }
-        }
+        let mut indices = self.collect_cursor_indices();
         indices.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Delete one char before each cursor (in reverse order)
         for &(char_idx, _, _) in &indices {
             if char_idx > 0 {
                 let _ = self.buffer.remove(char_idx - 1, char_idx);
@@ -250,37 +236,22 @@ impl Document {
         }
 
         // Update positions ascending with cumulative offset
-        let mut ascending = indices.clone();
-        ascending.sort_by(|a, b| a.0.cmp(&b.0));
+        indices.sort_by_key(|&(idx, _, _)| idx);
 
         let mut deleted_count = 0usize;
-        for &(original_idx, src_idx, is_primary) in &ascending {
+        for &(original_idx, src_idx, is_primary) in &indices {
             if original_idx > 0 {
                 let new_char_idx = original_idx - 1 - deleted_count;
                 let new_pos = char_to_pos(&self.buffer, new_char_idx);
-                if is_primary {
-                    self.cursor.position = new_pos;
-                    self.cursor.desired_col = None;
-                } else {
-                    self.secondary_cursors[src_idx].position = new_pos;
-                    self.secondary_cursors[src_idx].desired_col = None;
-                }
+                self.set_cursor_position(src_idx, is_primary, new_pos, false);
                 deleted_count += 1;
             } else {
-                // Cursor at position 0, can't backspace but still need to adjust for prior deletions
                 let new_pos = char_to_pos(&self.buffer, original_idx.saturating_sub(deleted_count));
-                if is_primary {
-                    self.cursor.position = new_pos;
-                } else {
-                    self.secondary_cursors[src_idx].position = new_pos;
-                }
+                self.set_cursor_position(src_idx, is_primary, new_pos, false);
             }
         }
 
-        self.merge_overlapping_cursors();
-        self.sync_line_changes();
-        self.modified = true;
-        self.bump_version();
+        self.finalize_multi_edit(false);
     }
 
     /// Deletes selections at all cursors (public alias).
@@ -291,7 +262,7 @@ impl Document {
     /// Deletes selections at all cursors.
     fn delete_selection_multi(&mut self) {
         // Collect selection ranges, sort descending by start
-        let mut ranges: Vec<(usize, usize, usize, bool)> = Vec::new(); // (start, end, idx, is_primary)
+        let mut ranges: Vec<(usize, usize, usize, bool)> = Vec::new();
         if let Ok(Some((s, e))) = self.cursor.selection_char_range(&self.buffer) {
             if s != e {
                 ranges.push((s, e, 0, true));
@@ -310,22 +281,13 @@ impl Document {
             let _ = self.buffer.remove(start, end);
         }
 
-        // Update positions
-        let mut ascending = ranges.clone();
-        ascending.sort_by(|a, b| a.0.cmp(&b.0));
+        // Update positions ascending
+        ranges.sort_by_key(|&(start, _, _, _)| start);
 
         let mut offset = 0usize;
-        for &(start, end, src_idx, is_primary) in &ascending {
+        for &(start, end, src_idx, is_primary) in &ranges {
             let new_pos = char_to_pos(&self.buffer, start.saturating_sub(offset));
-            if is_primary {
-                self.cursor.position = new_pos;
-                self.cursor.clear_selection();
-                self.cursor.desired_col = None;
-            } else {
-                self.secondary_cursors[src_idx].position = new_pos;
-                self.secondary_cursors[src_idx].clear_selection();
-                self.secondary_cursors[src_idx].desired_col = None;
-            }
+            self.set_cursor_position(src_idx, is_primary, new_pos, true);
             offset += end - start;
         }
 
@@ -335,10 +297,7 @@ impl Document {
             sc.clear_selection();
         }
 
-        self.merge_overlapping_cursors();
-        self.sync_line_changes();
-        self.modified = true;
-        self.bump_version();
+        self.finalize_multi_edit(false);
     }
 
     /// Performs delete-forward at all cursor positions.
@@ -360,15 +319,7 @@ impl Document {
         }
 
         let total = self.buffer.len_chars();
-        let mut indices: Vec<(usize, usize, bool)> = Vec::new();
-        if let Ok(idx) = self.cursor.to_char_index(&self.buffer) {
-            indices.push((idx, 0, true));
-        }
-        for (i, sc) in self.secondary_cursors.iter().enumerate() {
-            if let Ok(idx) = sc.to_char_index(&self.buffer) {
-                indices.push((idx, i, false));
-            }
-        }
+        let mut indices = self.collect_cursor_indices();
         indices.sort_by(|a, b| b.0.cmp(&a.0));
 
         for &(char_idx, _, _) in &indices {
@@ -378,29 +329,19 @@ impl Document {
         }
 
         // Update positions ascending
-        let mut ascending = indices.clone();
-        ascending.sort_by(|a, b| a.0.cmp(&b.0));
+        indices.sort_by_key(|&(idx, _, _)| idx);
 
         let mut deleted_count = 0usize;
-        for &(original_idx, src_idx, is_primary) in &ascending {
+        for &(original_idx, src_idx, is_primary) in &indices {
             let new_char_idx = original_idx.saturating_sub(deleted_count);
             let new_pos = char_to_pos(&self.buffer, new_char_idx);
-            if is_primary {
-                self.cursor.position = new_pos;
-                self.cursor.desired_col = None;
-            } else {
-                self.secondary_cursors[src_idx].position = new_pos;
-                self.secondary_cursors[src_idx].desired_col = None;
-            }
+            self.set_cursor_position(src_idx, is_primary, new_pos, false);
             if original_idx < total {
                 deleted_count += 1;
             }
         }
 
-        self.merge_overlapping_cursors();
-        self.sync_line_changes();
-        self.modified = true;
-        self.bump_version();
+        self.finalize_multi_edit(false);
     }
 
     /// Inserts a newline at all cursor positions.

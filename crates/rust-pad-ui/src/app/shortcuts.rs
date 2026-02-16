@@ -70,89 +70,176 @@ impl App {
         let dialog_open = self.is_dialog_open();
 
         for key in &keys {
+            // Always-active shortcuts first, then editor-only shortcuts.
+            if self.handle_file_shortcut(*key, ctrl, shift) {
+                continue;
+            }
+            if self.handle_search_shortcut(*key, ctrl) {
+                continue;
+            }
+            if self.handle_zoom_shortcut(*key, ctrl) {
+                continue;
+            }
+            if self.handle_tab_shortcut(*key, ctrl, shift) {
+                continue;
+            }
+            if self.handle_escape_shortcut(*key) {
+                continue;
+            }
+
+            // Editor-only shortcuts are suppressed when a dialog is open.
+            if dialog_open {
+                continue;
+            }
+            if self.handle_edit_shortcut(*key, ctrl) {
+                continue;
+            }
+            if self.handle_bookmark_shortcut(*key, ctrl, shift) {
+                continue;
+            }
+            self.handle_multicursor_and_line_shortcut(*key, alt, shift);
+        }
+    }
+
+    /// File operation shortcuts (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+W).
+    /// Returns `true` if the key was consumed.
+    fn handle_file_shortcut(&mut self, key: egui::Key, ctrl: bool, shift: bool) -> bool {
+        if !ctrl {
+            return false;
+        }
+        match key {
+            egui::Key::N => self.new_tab(),
+            egui::Key::O => self.open_file_dialog(),
+            egui::Key::S if shift => self.save_as_dialog(),
+            egui::Key::S => self.save_active(),
+            egui::Key::W => {
+                let active = self.tabs.active;
+                self.request_close_tab(active);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Search dialog shortcuts (Ctrl+F, Ctrl+H, Ctrl+G).
+    /// Returns `true` if the key was consumed.
+    fn handle_search_shortcut(&mut self, key: egui::Key, ctrl: bool) -> bool {
+        if !ctrl {
+            return false;
+        }
+        match key {
+            egui::Key::F | egui::Key::H => self.find_replace.open(),
+            egui::Key::G => self.go_to_line.open(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Zoom shortcuts (Ctrl+Plus, Ctrl+Minus, Ctrl+0).
+    /// Returns `true` if the key was consumed.
+    fn handle_zoom_shortcut(&mut self, key: egui::Key, ctrl: bool) -> bool {
+        if !ctrl {
+            return false;
+        }
+        match key {
+            egui::Key::Plus => {
+                self.zoom_level = (self.zoom_level + 0.1).min(self.max_zoom_level);
+            }
+            egui::Key::Minus => {
+                self.zoom_level = (self.zoom_level - 0.1).max(0.5);
+            }
+            egui::Key::Num0 => self.zoom_level = 1.0,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Tab switching shortcuts (Ctrl+Tab, Ctrl+Shift+Tab).
+    /// Returns `true` if the key was consumed.
+    fn handle_tab_shortcut(&mut self, key: egui::Key, ctrl: bool, shift: bool) -> bool {
+        if key != egui::Key::Tab || !ctrl {
+            return false;
+        }
+        if shift {
+            let count = self.tabs.tab_count();
+            let prev = (self.tabs.active + count - 1) % count;
+            self.tabs.switch_to(prev);
+        } else {
+            let next = (self.tabs.active + 1) % self.tabs.tab_count();
+            self.tabs.switch_to(next);
+        }
+        true
+    }
+
+    /// Escape key: closes dialogs and clears multi-cursor.
+    /// Returns `true` if the key was consumed.
+    fn handle_escape_shortcut(&mut self, key: egui::Key) -> bool {
+        if key != egui::Key::Escape {
+            return false;
+        }
+        self.find_replace.close();
+        self.go_to_line.visible = false;
+        self.tabs.active_doc_mut().clear_secondary_cursors();
+        true
+    }
+
+    /// Edit shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+X, Ctrl+C, Ctrl+V, Ctrl+A, Ctrl+D).
+    /// Returns `true` if the key was consumed.
+    fn handle_edit_shortcut(&mut self, key: egui::Key, ctrl: bool) -> bool {
+        if !ctrl {
+            return false;
+        }
+        match key {
+            egui::Key::Z => self.tabs.active_doc_mut().undo(),
+            egui::Key::Y => self.tabs.active_doc_mut().redo(),
+            egui::Key::X => self.cut(),
+            egui::Key::C => self.copy(),
+            egui::Key::V => self.paste(),
+            egui::Key::A => {
+                let doc = self.tabs.active_doc_mut();
+                doc.cursor.select_all(&doc.buffer);
+                doc.clear_secondary_cursors();
+            }
+            egui::Key::D => self.delete_current_line(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Bookmark shortcuts (F2, Ctrl+F2, Shift+F2).
+    /// Returns `true` if the key was consumed.
+    fn handle_bookmark_shortcut(&mut self, key: egui::Key, ctrl: bool, shift: bool) -> bool {
+        if key != egui::Key::F2 {
+            return false;
+        }
+        if ctrl {
+            let line = self.tabs.active_doc().cursor.position.line;
+            self.bookmarks.toggle(line);
+        } else if shift {
+            self.goto_prev_bookmark();
+        } else {
+            self.goto_next_bookmark();
+        }
+        true
+    }
+
+    /// Multi-cursor and line movement shortcuts (Alt+Shift+Period, Alt+Shift+Arrow, Alt+Arrow).
+    fn handle_multicursor_and_line_shortcut(&mut self, key: egui::Key, alt: bool, shift: bool) {
+        if !alt {
+            return;
+        }
+        if shift {
             match key {
-                // === Always-active shortcuts (file, zoom, tabs, search open) ===
-
-                // File operations
-                egui::Key::N if ctrl => self.new_tab(),
-                egui::Key::O if ctrl => self.open_file_dialog(),
-                egui::Key::S if ctrl && shift => self.save_as_dialog(),
-                egui::Key::S if ctrl => self.save_active(),
-                egui::Key::W if ctrl => {
-                    let active = self.tabs.active;
-                    self.request_close_tab(active);
-                }
-
-                // Search (open dialog)
-                egui::Key::F if ctrl => self.find_replace.open(),
-                egui::Key::H if ctrl => self.find_replace.open(),
-                egui::Key::G if ctrl => self.go_to_line.open(),
-
-                // Zoom
-                egui::Key::Plus if ctrl => {
-                    self.zoom_level = (self.zoom_level + 0.1).min(self.max_zoom_level);
-                }
-                egui::Key::Minus if ctrl => {
-                    self.zoom_level = (self.zoom_level - 0.1).max(0.5);
-                }
-                egui::Key::Num0 if ctrl => self.zoom_level = 1.0,
-
-                // Tab switching
-                egui::Key::Tab if ctrl && shift => {
-                    let count = self.tabs.tab_count();
-                    let prev = (self.tabs.active + count - 1) % count;
-                    self.tabs.switch_to(prev);
-                }
-                egui::Key::Tab if ctrl => {
-                    let next = (self.tabs.active + 1) % self.tabs.tab_count();
-                    self.tabs.switch_to(next);
-                }
-
-                // Escape closes dialogs and clears multi-cursor
-                egui::Key::Escape => {
-                    self.find_replace.close();
-                    self.go_to_line.visible = false;
-                    self.tabs.active_doc_mut().clear_secondary_cursors();
-                }
-
-                // === Editor-only shortcuts (suppressed when a dialog is open) ===
-
-                // Edit operations
-                egui::Key::Z if ctrl && !dialog_open => self.tabs.active_doc_mut().undo(),
-                egui::Key::Y if ctrl && !dialog_open => self.tabs.active_doc_mut().redo(),
-                egui::Key::X if ctrl && !dialog_open => self.cut(),
-                egui::Key::C if ctrl && !dialog_open => self.copy(),
-                egui::Key::V if ctrl && !dialog_open => self.paste(),
-                egui::Key::A if ctrl && !dialog_open => {
-                    let doc = self.tabs.active_doc_mut();
-                    doc.cursor.select_all(&doc.buffer);
-                    doc.clear_secondary_cursors();
-                }
-
-                // Bookmarks
-                egui::Key::F2 if ctrl && !dialog_open => {
-                    let line = self.tabs.active_doc().cursor.position.line;
-                    self.bookmarks.toggle(line);
-                }
-                egui::Key::F2 if shift && !dialog_open => self.goto_prev_bookmark(),
-                egui::Key::F2 if !dialog_open => self.goto_next_bookmark(),
-
-                // Delete current line
-                egui::Key::D if ctrl && !dialog_open => self.delete_current_line(),
-
-                // Multi-cursor: select next occurrence of word
-                egui::Key::Period if alt && shift && !dialog_open => {
-                    self.select_next_occurrence();
-                }
-
-                // Multi-cursor: add cursor above/below
-                egui::Key::ArrowUp if alt && shift && !dialog_open => self.add_cursor_above(),
-                egui::Key::ArrowDown if alt && shift && !dialog_open => self.add_cursor_below(),
-
-                // Line movement (only when shift is NOT held, to avoid conflict)
-                egui::Key::ArrowUp if alt && !dialog_open => self.move_current_line_up(),
-                egui::Key::ArrowDown if alt && !dialog_open => self.move_current_line_down(),
-
+                egui::Key::Period => self.select_next_occurrence(),
+                egui::Key::ArrowUp => self.add_cursor_above(),
+                egui::Key::ArrowDown => self.add_cursor_below(),
+                _ => {}
+            }
+        } else {
+            // Line movement (only when shift is NOT held, to avoid conflict)
+            match key {
+                egui::Key::ArrowUp => self.move_current_line_up(),
+                egui::Key::ArrowDown => self.move_current_line_down(),
                 _ => {}
             }
         }

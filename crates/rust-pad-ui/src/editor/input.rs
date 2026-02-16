@@ -90,6 +90,20 @@ impl<'a> EditorWidget<'a> {
             }
         }
 
+        // Try each handler group; return early once one matches.
+        if self.handle_navigation_key(key, ctrl) {
+            return;
+        }
+        if self.handle_editing_key(key, ctrl, shift) {
+            return;
+        }
+        self.handle_selection_key(key, ctrl);
+        // Note: Ctrl+Z/Y/X/C/V are handled by the App level
+    }
+
+    /// Handles navigation keys (arrows, Home, End, PageUp, PageDown).
+    /// Returns `true` if the key was consumed.
+    fn handle_navigation_key(&mut self, key: egui::Key, ctrl: bool) -> bool {
         match key {
             egui::Key::ArrowLeft if ctrl => {
                 self.doc.cursor.move_word_left(&self.doc.buffer);
@@ -155,6 +169,15 @@ impl<'a> EditorWidget<'a> {
                 self.doc.cursor.move_page_down(30, &self.doc.buffer);
                 self.doc.clear_secondary_cursors();
             }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Handles editing keys (Enter, Backspace, Delete, Tab).
+    /// Returns `true` if the key was consumed.
+    fn handle_editing_key(&mut self, key: egui::Key, ctrl: bool, shift: bool) -> bool {
+        match key {
             egui::Key::Enter => {
                 if self.doc.is_multi_cursor() {
                     self.doc.insert_newline_multi();
@@ -200,12 +223,16 @@ impl<'a> EditorWidget<'a> {
                     self.doc.insert_text(&indent);
                 }
             }
-            egui::Key::A if ctrl => {
-                self.doc.cursor.select_all(&self.doc.buffer);
-                self.doc.clear_secondary_cursors();
-            }
-            // Note: Ctrl+Z/Y/X/C/V are handled by the App level
-            _ => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// Handles selection keys (Ctrl+A to select all).
+    fn handle_selection_key(&mut self, key: egui::Key, ctrl: bool) {
+        if key == egui::Key::A && ctrl {
+            self.doc.cursor.select_all(&self.doc.buffer);
+            self.doc.clear_secondary_cursors();
         }
     }
 

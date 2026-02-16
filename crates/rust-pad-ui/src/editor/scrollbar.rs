@@ -8,6 +8,32 @@ use rust_pad_core::document::ScrollbarDrag;
 
 use super::widget::{EditorWidget, SCROLLBAR_MIN_THUMB, SCROLLBAR_WIDTH};
 
+/// Computes scroll position from a pointer coordinate along a scrollbar axis.
+fn scroll_ratio_from_pointer(
+    pointer_val: f32,
+    track_start: f32,
+    thumb_size: f32,
+    thumb_travel: f32,
+) -> f32 {
+    let relative = pointer_val - track_start - thumb_size * 0.5;
+    (relative / thumb_travel.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// Resolves the thumb color based on drag/hover state.
+fn thumb_color(
+    theme: &super::theme::EditorTheme,
+    is_dragging: bool,
+    is_hovering: bool,
+) -> egui::Color32 {
+    if is_dragging {
+        theme.scrollbar_thumb_active
+    } else if is_hovering {
+        theme.scrollbar_thumb_hover
+    } else {
+        theme.scrollbar_thumb_idle
+    }
+}
+
 impl<'a> EditorWidget<'a> {
     /// Renders the vertical scrollbar and handles interaction.
     #[allow(clippy::too_many_arguments)]
@@ -28,7 +54,6 @@ impl<'a> EditorWidget<'a> {
             Pos2::new(full_rect.max.x - SCROLLBAR_WIDTH, full_rect.min.y),
             Pos2::new(full_rect.max.x, full_rect.max.y - hscroll_height),
         );
-
         painter.rect_filled(track_rect, 0.0, self.theme.scrollbar_track_color);
 
         let content_height = total_lines as f32 * line_height;
@@ -37,9 +62,8 @@ impl<'a> EditorWidget<'a> {
             return;
         }
 
-        let thumb_ratio = (viewport_height / content_height).min(1.0);
-        let thumb_height = (viewport_height * thumb_ratio).max(SCROLLBAR_MIN_THUMB);
-
+        let thumb_height = (viewport_height * (viewport_height / content_height).min(1.0))
+            .max(SCROLLBAR_MIN_THUMB);
         let max_scroll = (total_lines.saturating_sub(1)) as f32;
         let scroll_ratio = if max_scroll > 0.0 {
             self.doc.scroll_y / max_scroll
@@ -55,38 +79,21 @@ impl<'a> EditorWidget<'a> {
         );
 
         let is_dragging = self.doc.scrollbar_drag == ScrollbarDrag::Vertical;
-        let is_hovering_thumb = pointer_pos.is_some_and(|p| thumb_rect.contains(p));
+        let color = thumb_color(
+            self.theme,
+            is_dragging,
+            pointer_pos.is_some_and(|p| thumb_rect.contains(p)),
+        );
+        painter.rect_filled(thumb_rect, 3.0, color);
 
-        let thumb_color = if is_dragging {
-            self.theme.scrollbar_thumb_active
-        } else if is_hovering_thumb {
-            self.theme.scrollbar_thumb_hover
-        } else {
-            self.theme.scrollbar_thumb_idle
-        };
-
-        painter.rect_filled(thumb_rect, 3.0, thumb_color);
-
-        // Handle drag: use pointer Y position regardless of whether it's still
-        // over the track (the drag was latched in scrollbar_drag state).
-        if is_dragging && response.dragged() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let relative_y = pos.y - track_rect.min.y - thumb_height * 0.5;
-                let ratio = (relative_y / thumb_travel.max(1.0)).clamp(0.0, 1.0);
-                self.doc.scroll_y = ratio * max_scroll;
-            }
-        }
-
-        // Handle click on track (jump to position)
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if track_rect.contains(pos) {
-                    let relative_y = pos.y - track_rect.min.y - thumb_height * 0.5;
-                    let ratio = (relative_y / thumb_travel.max(1.0)).clamp(0.0, 1.0);
-                    self.doc.scroll_y = ratio * max_scroll;
-                }
-            }
-        }
+        self.handle_scrollbar_interaction(
+            response,
+            track_rect,
+            thumb_height,
+            thumb_travel,
+            max_scroll,
+            true,
+        );
     }
 
     /// Renders the horizontal scrollbar and handles interaction.
@@ -106,7 +113,6 @@ impl<'a> EditorWidget<'a> {
             Pos2::new(full_rect.min.x, full_rect.max.y - SCROLLBAR_WIDTH),
             Pos2::new(full_rect.max.x - vscroll_width, full_rect.max.y),
         );
-
         painter.rect_filled(track_rect, 0.0, self.theme.scrollbar_track_color);
 
         let viewport_width = text_area.width();
@@ -115,9 +121,8 @@ impl<'a> EditorWidget<'a> {
             return;
         }
 
-        let thumb_ratio = (viewport_width / content_width).min(1.0);
-        let thumb_width = (track_width * thumb_ratio).max(SCROLLBAR_MIN_THUMB);
-
+        let thumb_width =
+            (track_width * (viewport_width / content_width).min(1.0)).max(SCROLLBAR_MIN_THUMB);
         let max_scroll = (content_width - viewport_width).max(0.0);
         let scroll_ratio = if max_scroll > 0.0 {
             self.doc.scroll_x / max_scroll
@@ -133,35 +138,69 @@ impl<'a> EditorWidget<'a> {
         );
 
         let is_dragging = self.doc.scrollbar_drag == ScrollbarDrag::Horizontal;
-        let is_hovering_thumb = pointer_pos.is_some_and(|p| thumb_rect.contains(p));
+        let color = thumb_color(
+            self.theme,
+            is_dragging,
+            pointer_pos.is_some_and(|p| thumb_rect.contains(p)),
+        );
+        painter.rect_filled(thumb_rect, 3.0, color);
 
-        let thumb_color = if is_dragging {
-            self.theme.scrollbar_thumb_active
-        } else if is_hovering_thumb {
-            self.theme.scrollbar_thumb_hover
+        self.handle_scrollbar_interaction(
+            response,
+            track_rect,
+            thumb_width,
+            thumb_travel,
+            max_scroll,
+            false,
+        );
+    }
+
+    /// Handles drag and click-to-jump interaction for either scrollbar axis.
+    fn handle_scrollbar_interaction(
+        &mut self,
+        response: &Response,
+        track_rect: Rect,
+        thumb_size: f32,
+        thumb_travel: f32,
+        max_scroll: f32,
+        vertical: bool,
+    ) {
+        let is_dragging = if vertical {
+            self.doc.scrollbar_drag == ScrollbarDrag::Vertical
         } else {
-            self.theme.scrollbar_thumb_idle
+            self.doc.scrollbar_drag == ScrollbarDrag::Horizontal
         };
 
-        painter.rect_filled(thumb_rect, 3.0, thumb_color);
+        let apply = |scroll: &mut f32, pos: Pos2| {
+            let val = if vertical { pos.y } else { pos.x };
+            let start = if vertical {
+                track_rect.min.y
+            } else {
+                track_rect.min.x
+            };
+            *scroll = scroll_ratio_from_pointer(val, start, thumb_size, thumb_travel) * max_scroll;
+        };
 
-        // Handle drag: use pointer X position regardless of whether it's still
-        // over the track (the drag was latched in scrollbar_drag state).
         if is_dragging && response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let relative_x = pos.x - track_rect.min.x - thumb_width * 0.5;
-                let ratio = (relative_x / thumb_travel.max(1.0)).clamp(0.0, 1.0);
-                self.doc.scroll_x = ratio * max_scroll;
+                let scroll = if vertical {
+                    &mut self.doc.scroll_y
+                } else {
+                    &mut self.doc.scroll_x
+                };
+                apply(scroll, pos);
             }
         }
 
-        // Handle click on track (jump to position)
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 if track_rect.contains(pos) {
-                    let relative_x = pos.x - track_rect.min.x - thumb_width * 0.5;
-                    let ratio = (relative_x / thumb_travel.max(1.0)).clamp(0.0, 1.0);
-                    self.doc.scroll_x = ratio * max_scroll;
+                    let scroll = if vertical {
+                        &mut self.doc.scroll_y
+                    } else {
+                        &mut self.doc.scroll_x
+                    };
+                    apply(scroll, pos);
                 }
             }
         }
