@@ -7,6 +7,26 @@
 </p>
 
 ---
+[![Release](https://github.com/brenordv/rust-pad/actions/workflows/release.yml/badge.svg)](https://github.com/brenordv/rust-pad/actions/workflows/release.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=bugs)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Technical Debt](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=sqale_index)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=code_smells)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=coverage)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Duplicated Lines (%)](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=duplicated_lines_density)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+[![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=ncloc)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
+---
+
+## Motivation
+I absolutely love Notepad++, so whenever I consider moving away from Windows, I end up looking for a way to run it on Linux. 
+Since I prefer native applications, I decided to take the longer route and write my own text editor in Rust. 
+This isn’t a port of Notepad++ and it doesn’t include all of its features—nor am I trying to compete with it. 
+Instead, my goal is to build a cross-platform Notepad-like editor with a few neat features, keeping it as simple, 
+stable, and fast as possible.
 
 ## Features
 
