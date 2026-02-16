@@ -1,0 +1,15 @@
+[package]
+name = "rust-pad-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ropey.workspace = true
+regex.workspace = true
+encoding_rs.workspace = true
+chardetng.workspace = true
+serde.workspace = true
+rust-pad-mod-history.workspace = true
+chrono.workspace = true

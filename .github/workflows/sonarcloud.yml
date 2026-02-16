@@ -1,0 +1,81 @@
+name: SonarCloud Analysis
+
+# Strategy to keep this workflow alive:
+# 1. Runs monthly via cron schedule
+# 2. Also supports manual dispatch for on-demand runs
+# 3. Updates a heartbeat file on each run to maintain repo activity,
+#    which prevents GitHub from auto-disabling the scheduled workflow
+#    (GitHub disables cron workflows after 60 days of repo inactivity)
+
+on:
+  schedule:
+    # Run on the 1st of every month at 06:00 UTC
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+    inputs:
+      skip_heartbeat:
+        description: "Skip heartbeat commit (useful for manual runs)"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sonar-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sonar-
+
+      - name: Build and test
+        run: |
+          cargo build --workspace
+          cargo test --workspace
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Run clippy for SonarCloud
+        run: cargo clippy --workspace --message-format=json > clippy-report.json 2>&1 || true
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  heartbeat:
+    name: Keep Workflow Alive
+    runs-on: ubuntu-latest
+    needs: sonarcloud
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.skip_heartbeat != 'true')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update heartbeat timestamp
+        run: |
+          echo "Last SonarCloud analysis: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" > .github/.sonar-heartbeat
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/.sonar-heartbeat
+          git diff --cached --quiet || git commit -m "chore: update SonarCloud heartbeat [skip ci]"
+          git push

@@ -1,0 +1,15 @@
+[package]
+name = "rust-pad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+eframe.workspace = true
+egui.workspace = true
+rust-pad-ui.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

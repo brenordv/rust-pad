@@ -1,0 +1,15 @@
+Normal text with spaces
+	Tab indented line
+Mixed	tabs	and spaces here
+Non-breaking space: hello world test
+Zero-width space: foo​bar
+Zero-width non-joiner: foo‌bar
+Zero-width joiner: foo‍bar
+All three: a​b‌c‍d
+    4-space indent
+		Double tab indent
+Trailing spaces   
+Empty line below:
+
+Back after empty line
+End of file

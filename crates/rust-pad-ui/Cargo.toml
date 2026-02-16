@@ -1,0 +1,26 @@
+[package]
+name = "rust-pad-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+egui.workspace = true
+eframe.workspace = true
+ropey.workspace = true
+rust-pad-config.workspace = true
+rust-pad-core.workspace = true
+tracing.workspace = true
+rfd.workspace = true
+arboard.workspace = true
+syntect.workspace = true
+dark-light.workspace = true
+dirs.workspace = true
+chrono.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+tempfile.workspace = true

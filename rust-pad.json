@@ -1,0 +1,111 @@
+{
+  "current_theme": "System",
+  "zoom_level": 1.0,
+  "word_wrap": false,
+  "show_special_chars": false,
+  "font_size": 14.0,
+  "themes": [
+    {
+      "name": "Dark",
+      "dark_mode": true,
+      "syntax_theme": "base16-eighties.dark",
+      "editor": {
+        "bg_color": "#1E1E1E",
+        "text_color": "#D4D4D4",
+        "cursor_color": "#FFFFFF",
+        "selection_color": "#326EC864",
+        "line_number_color": "#787878",
+        "line_number_bg": "#252525",
+        "current_line_highlight": "#2D2D2D",
+        "modified_line_color": "#E6961E",
+        "saved_line_color": "#50B450",
+        "gutter_separator_color": "#3C3C3C",
+        "scrollbar_track_color": "#232323",
+        "scrollbar_thumb_idle": "#505050",
+        "scrollbar_thumb_hover": "#6E6E6E",
+        "scrollbar_thumb_active": "#8C8C8C",
+        "occurrence_highlight_color": "#64643250",
+        "special_char_color": "#646464B4"
+      },
+      "ui": {
+        "panel_fill": "#2B2B2B",
+        "window_fill": "#2B2B2B",
+        "faint_bg_color": "#232323",
+        "extreme_bg_color": "#191919",
+        "widget_noninteractive_bg": "#2B2B2B",
+        "widget_inactive_bg": "#323232",
+        "widget_hovered_bg": "#3C3C3C",
+        "widget_active_bg": "#464646",
+        "accent_color": "#50B4C8"
+      }
+    },
+    {
+      "name": "Light",
+      "dark_mode": false,
+      "syntax_theme": "InspiredGitHub",
+      "editor": {
+        "bg_color": "#FFFFFF",
+        "text_color": "#1E1E1E",
+        "cursor_color": "#000000",
+        "selection_color": "#6496E664",
+        "line_number_color": "#828282",
+        "line_number_bg": "#F0F0F0",
+        "current_line_highlight": "#E8F2FE",
+        "modified_line_color": "#C87800",
+        "saved_line_color": "#32A032",
+        "gutter_separator_color": "#C8C8C8",
+        "scrollbar_track_color": "#EBEBEB",
+        "scrollbar_thumb_idle": "#BEBEBE",
+        "scrollbar_thumb_hover": "#A0A0A0",
+        "scrollbar_thumb_active": "#828282",
+        "occurrence_highlight_color": "#FFD25050",
+        "special_char_color": "#AAAAAAB4"
+      },
+      "ui": {
+        "panel_fill": "#F0F0F0",
+        "window_fill": "#FAFAFA",
+        "faint_bg_color": "#F5F5F5",
+        "extreme_bg_color": "#FFFFFF",
+        "widget_noninteractive_bg": "#E6E6E6",
+        "widget_inactive_bg": "#DCDCDC",
+        "widget_hovered_bg": "#D2D2D2",
+        "widget_active_bg": "#C8C8C8",
+        "accent_color": "#3278C8"
+      }
+    },
+    {
+      "name": "Wacky",
+      "dark_mode": false,
+      "syntax_theme": "InspiredGitHub",
+      "editor": {
+        "bg_color": "#7FFF00",
+        "text_color": "#00008B",
+        "cursor_color": "#FF0000",
+        "selection_color": "#FF8C0064",
+        "line_number_color": "#FF6347",
+        "line_number_bg": "#005F5F",
+        "current_line_highlight": "#9ACD32",
+        "modified_line_color": "#00CED1",
+        "saved_line_color": "#FFD700",
+        "gutter_separator_color": "#8B4513",
+        "scrollbar_track_color": "#556B2F",
+        "scrollbar_thumb_idle": "#A0522D",
+        "scrollbar_thumb_hover": "#CD853F",
+        "scrollbar_thumb_active": "#FF4500",
+        "occurrence_highlight_color": "#FF00FF50",
+        "special_char_color": "#FF69B4B4"
+      },
+      "ui": {
+        "panel_fill": "#008080",
+        "window_fill": "#008080",
+        "faint_bg_color": "#006464",
+        "extreme_bg_color": "#004D4D",
+        "widget_noninteractive_bg": "#5F8F5F",
+        "widget_inactive_bg": "#6B8E23",
+        "widget_hovered_bg": "#BDB76B",
+        "widget_active_bg": "#DAA520",
+        "accent_color": "#FFD700"
+      }
+    }
+  ]
+}

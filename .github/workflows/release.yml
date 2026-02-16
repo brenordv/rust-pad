@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: rust-pad
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: rust-pad.exe
+            archive_name: rust-pad-windows-x86_64.zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: rust-pad
+            archive_name: rust-pad-macos-aarch64.zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: rust-pad
+            archive_name: rust-pad-linux-x86_64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev libgtk-3-dev
+
+      - name: Build release binary
+        run: cargo build --release -p rust-pad
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/release/${{ matrix.artifact_name }}" -DestinationPath "${{ matrix.archive_name }}"
+
+      - name: Package (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          zip -j "${{ matrix.archive_name }}" "target/release/${{ matrix.artifact_name }}"
+
+      - name: Package (Linux tar.gz)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          tar czf "${{ matrix.archive_name }}" -C target/release "${{ matrix.artifact_name }}"
+
+      - name: Build .deb package (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          DEB_DIR="rust-pad_${TAG}_amd64"
+          mkdir -p "${DEB_DIR}/DEBIAN"
+          mkdir -p "${DEB_DIR}/usr/bin"
+
+          cp target/release/${{ matrix.artifact_name }} "${DEB_DIR}/usr/bin/rust-pad"
+          chmod 755 "${DEB_DIR}/usr/bin/rust-pad"
+
+          cat > "${DEB_DIR}/DEBIAN/control" <<EOF
+          Package: rust-pad
+          Version: ${TAG}
+          Section: editors
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Breno RdV
+          Description: A cross-platform text editor built with Rust and egui
+          Homepage: https://github.com/brenordv/rust-pad
+          EOF
+
+          dpkg-deb --build "${DEB_DIR}"
+          mv "${DEB_DIR}.deb" "rust-pad_${TAG}_amd64.deb"
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_name }}
+          path: ${{ matrix.archive_name }}
+
+      - name: Upload .deb artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-pad-deb
+          path: "*.deb"
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release files
+        run: |
+          mkdir release-files
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" \) \
+            -exec cp {} release-files/ \;
+          ls -la release-files/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  arch-pkgbuild:
+    name: Verify Arch PKGBUILD
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate PKGBUILD exists
+        run: |
+          if [ ! -f packaging/arch/PKGBUILD ]; then
+            echo "ERROR: packaging/arch/PKGBUILD not found"
+            exit 1
+          fi
+          echo "PKGBUILD found:"
+          cat packaging/arch/PKGBUILD

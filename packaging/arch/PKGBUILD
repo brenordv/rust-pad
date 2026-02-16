@@ -1,0 +1,38 @@
+# Maintainer: Breno RdV
+pkgname=rust-pad
+pkgdesc="A cross-platform text editor built with Rust and egui"
+pkgver=1.0.0
+pkgrel=1
+arch=('x86_64')
+url="https://github.com/brenordv/rust-pad"
+license=('MIT')
+depends=('gcc-libs' 'libxcb' 'libxkbcommon' 'gtk3' 'openssl')
+makedepends=('rust' 'cargo')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/brenordv/rust-pad/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p rust-pad
+}
+
+check() {
+  cd "${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+  install -Dm755 "target/release/rust-pad" "${pkgdir}/usr/bin/rust-pad"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
