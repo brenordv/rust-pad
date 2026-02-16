@@ -1,13 +1,5 @@
 name: SonarCloud Analysis
 
-# Strategy to keep this workflow alive:
-# 1. Runs on push/PR to main for continuous analysis
-# 2. Runs monthly via cron schedule as a safety net
-# 3. Supports manual dispatch for on-demand runs
-# 4. Updates a heartbeat file on scheduled/manual runs to maintain repo activity,
-#    which prevents GitHub from auto-disabling the scheduled workflow
-#    (GitHub disables cron workflows after 60 days of repo inactivity)
-
 on:
   push:
     branches: [main]
