@@ -8,17 +8,6 @@ use rust_pad_core::document::ScrollbarDrag;
 
 use super::widget::{EditorWidget, SCROLLBAR_MIN_THUMB, SCROLLBAR_WIDTH};
 
-/// Computes scroll position from a pointer coordinate along a scrollbar axis.
-fn scroll_ratio_from_pointer(
-    pointer_val: f32,
-    track_start: f32,
-    thumb_size: f32,
-    thumb_travel: f32,
-) -> f32 {
-    let relative = pointer_val - track_start - thumb_size * 0.5;
-    (relative / thumb_travel.max(1.0)).clamp(0.0, 1.0)
-}
-
 /// Resolves the thumb color based on drag/hover state.
 fn thumb_color(
     theme: &super::theme::EditorTheme,
@@ -31,6 +20,43 @@ fn thumb_color(
         theme.scrollbar_thumb_hover
     } else {
         theme.scrollbar_thumb_idle
+    }
+}
+
+/// Handles drag and click-to-jump interaction for a single scrollbar axis.
+///
+/// `scroll` is the mutable scroll position for this axis.
+/// `axis` extracts the relevant coordinate (x or y) from a pointer position.
+/// `track_start` is the track origin for this axis.
+#[allow(clippy::too_many_arguments)]
+fn handle_axis_scroll(
+    scroll: &mut f32,
+    response: &Response,
+    is_dragging: bool,
+    track_rect: Rect,
+    thumb_size: f32,
+    thumb_travel: f32,
+    max_scroll: f32,
+    axis: fn(Pos2) -> f32,
+    track_start: f32,
+) {
+    let compute = |pos: Pos2| -> f32 {
+        let relative = axis(pos) - track_start - thumb_size * 0.5;
+        (relative / thumb_travel.max(1.0)).clamp(0.0, 1.0) * max_scroll
+    };
+
+    if is_dragging && response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            *scroll = compute(pos);
+        }
+    }
+
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if track_rect.contains(pos) {
+                *scroll = compute(pos);
+            }
+        }
     }
 }
 
@@ -86,13 +112,16 @@ impl<'a> EditorWidget<'a> {
         );
         painter.rect_filled(thumb_rect, 3.0, color);
 
-        self.handle_scrollbar_interaction(
+        handle_axis_scroll(
+            &mut self.doc.scroll_y,
             response,
+            is_dragging,
             track_rect,
             thumb_height,
             thumb_travel,
             max_scroll,
-            true,
+            |p| p.y,
+            track_rect.min.y,
         );
     }
 
@@ -145,64 +174,16 @@ impl<'a> EditorWidget<'a> {
         );
         painter.rect_filled(thumb_rect, 3.0, color);
 
-        self.handle_scrollbar_interaction(
+        handle_axis_scroll(
+            &mut self.doc.scroll_x,
             response,
+            is_dragging,
             track_rect,
             thumb_width,
             thumb_travel,
             max_scroll,
-            false,
+            |p| p.x,
+            track_rect.min.x,
         );
-    }
-
-    /// Handles drag and click-to-jump interaction for either scrollbar axis.
-    fn handle_scrollbar_interaction(
-        &mut self,
-        response: &Response,
-        track_rect: Rect,
-        thumb_size: f32,
-        thumb_travel: f32,
-        max_scroll: f32,
-        vertical: bool,
-    ) {
-        let is_dragging = if vertical {
-            self.doc.scrollbar_drag == ScrollbarDrag::Vertical
-        } else {
-            self.doc.scrollbar_drag == ScrollbarDrag::Horizontal
-        };
-
-        let apply = |scroll: &mut f32, pos: Pos2| {
-            let val = if vertical { pos.y } else { pos.x };
-            let start = if vertical {
-                track_rect.min.y
-            } else {
-                track_rect.min.x
-            };
-            *scroll = scroll_ratio_from_pointer(val, start, thumb_size, thumb_travel) * max_scroll;
-        };
-
-        if is_dragging && response.dragged() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let scroll = if vertical {
-                    &mut self.doc.scroll_y
-                } else {
-                    &mut self.doc.scroll_x
-                };
-                apply(scroll, pos);
-            }
-        }
-
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if track_rect.contains(pos) {
-                    let scroll = if vertical {
-                        &mut self.doc.scroll_y
-                    } else {
-                        &mut self.doc.scroll_x
-                    };
-                    apply(scroll, pos);
-                }
-            }
-        }
     }
 }

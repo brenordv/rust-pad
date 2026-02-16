@@ -145,6 +145,26 @@ fn default_syntax_theme() -> String {
     "base16-eighties.dark".to_string()
 }
 
+impl ThemeDefinition {
+    /// Constructs a theme from palette arrays, avoiding structural duplication
+    /// across builtin theme constructors.
+    fn from_palettes(
+        name: &str,
+        dark_mode: bool,
+        syntax_theme: &str,
+        editor: [HexColor; 16],
+        ui: [HexColor; 9],
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            dark_mode,
+            syntax_theme: syntax_theme.to_string(),
+            editor: EditorColors::from_palette(editor),
+            ui: UiColors::from_palette(ui),
+        }
+    }
+}
+
 /// Built-in dark theme.
 pub fn builtin_dark() -> ThemeDefinition {
     ThemeDefinition {
@@ -158,11 +178,11 @@ pub fn builtin_dark() -> ThemeDefinition {
 
 /// Built-in light theme.
 pub fn builtin_light() -> ThemeDefinition {
-    ThemeDefinition {
-        name: "Light".to_string(),
-        dark_mode: false,
-        syntax_theme: "InspiredGitHub".to_string(),
-        editor: EditorColors::from_palette([
+    ThemeDefinition::from_palettes(
+        "Light",
+        false,
+        "InspiredGitHub",
+        [
             HexColor::rgb(255, 255, 255),       // bg
             HexColor::rgb(30, 30, 30),          // text
             HexColor::rgb(0, 0, 0),             // cursor
@@ -179,8 +199,8 @@ pub fn builtin_light() -> ThemeDefinition {
             HexColor::rgb(130, 130, 130),       // scrollbar_thumb_active
             HexColor::rgba(255, 210, 80, 80),   // occurrence_highlight
             HexColor::rgba(170, 170, 170, 180), // special_char
-        ]),
-        ui: UiColors::from_palette([
+        ],
+        [
             HexColor::rgb(240, 240, 240), // panel_fill
             HexColor::rgb(250, 250, 250), // window_fill
             HexColor::rgb(245, 245, 245), // faint_bg
@@ -190,17 +210,17 @@ pub fn builtin_light() -> ThemeDefinition {
             HexColor::rgb(210, 210, 210), // hovered_bg
             HexColor::rgb(200, 200, 200), // active_bg
             HexColor::rgb(50, 120, 200),  // accent
-        ]),
-    }
+        ],
+    )
 }
 
 /// Sample wacky theme — deliberately clashing "retro terminal nightmare" colors.
 pub fn sample_wacky() -> ThemeDefinition {
-    ThemeDefinition {
-        name: "Wacky".to_string(),
-        dark_mode: false,
-        syntax_theme: "InspiredGitHub".to_string(),
-        editor: EditorColors::from_palette([
+    ThemeDefinition::from_palettes(
+        "Wacky",
+        false,
+        "InspiredGitHub",
+        [
             HexColor::rgb(127, 255, 0),         // bg — chartreuse
             HexColor::rgb(0, 0, 139),           // text — dark blue
             HexColor::rgb(255, 0, 0),           // cursor — red
@@ -217,8 +237,8 @@ pub fn sample_wacky() -> ThemeDefinition {
             HexColor::rgb(255, 69, 0),          // scrollbar_thumb_active — orange-red
             HexColor::rgba(255, 0, 255, 80),    // occurrence_highlight — magenta
             HexColor::rgba(255, 105, 180, 180), // special_char — hot pink
-        ]),
-        ui: UiColors::from_palette([
+        ],
+        [
             HexColor::rgb(0, 128, 128),   // panel_fill — teal
             HexColor::rgb(0, 128, 128),   // window_fill — teal
             HexColor::rgb(0, 100, 100),   // faint_bg — darker teal
@@ -228,8 +248,8 @@ pub fn sample_wacky() -> ThemeDefinition {
             HexColor::rgb(189, 183, 107), // hovered_bg — dark khaki
             HexColor::rgb(218, 165, 32),  // active_bg — goldenrod
             HexColor::rgb(255, 215, 0),   // accent — gold
-        ]),
-    }
+        ],
+    )
 }
 
 #[cfg(test)]
