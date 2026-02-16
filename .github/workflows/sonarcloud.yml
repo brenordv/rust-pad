@@ -1,13 +1,18 @@
 name: SonarCloud Analysis
 
 # Strategy to keep this workflow alive:
-# 1. Runs monthly via cron schedule
-# 2. Also supports manual dispatch for on-demand runs
-# 3. Updates a heartbeat file on each run to maintain repo activity,
+# 1. Runs on push/PR to main for continuous analysis
+# 2. Runs monthly via cron schedule as a safety net
+# 3. Supports manual dispatch for on-demand runs
+# 4. Updates a heartbeat file on scheduled/manual runs to maintain repo activity,
 #    which prevents GitHub from auto-disabling the scheduled workflow
 #    (GitHub disables cron workflows after 60 days of repo inactivity)
 
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   schedule:
     # Run on the 1st of every month at 06:00 UTC
     - cron: "0 6 1 * *"
@@ -30,10 +35,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Full history for accurate blame information
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -54,7 +61,13 @@ jobs:
           CARGO_TERM_COLOR: always
 
       - name: Run clippy for SonarCloud
-        run: cargo clippy --workspace --message-format=json > clippy-report.json 2>&1 || true
+        run: cargo clippy --workspace --all-targets --message-format=json > clippy-report.json 2>&1 || true
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate coverage report
+        run: cargo tarpaulin --workspace --out xml --output-dir .
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v5
