@@ -647,157 +647,53 @@ impl<'a> EditorWidget<'a> {
             None
         };
 
-        let seg_len = info.segment_char_end - info.segment_char_start;
+        self.render_occurrence_highlights(
+            painter,
+            line_height,
+            char_width,
+            text_area,
+            info,
+            occurrence_ranges,
+            x_positions.as_deref(),
+        );
 
-        // Occurrence highlights (drawn first so selections paint on top)
-        for &(occ_start, occ_end) in occurrence_ranges {
-            if occ_start < info.segment_char_end && occ_end > info.segment_char_start {
-                let col_start = occ_start.saturating_sub(info.segment_char_start);
-                let col_end = occ_end.saturating_sub(info.segment_char_start).min(seg_len);
-                let x_start = text_area.min.x
-                    + Self::col_to_x(x_positions.as_deref(), col_start, char_width)
-                    - info.scroll_x;
-                let x_end = text_area.min.x
-                    + Self::col_to_x(x_positions.as_deref(), col_end, char_width)
-                    - info.scroll_x;
-                let occ_rect = Rect::from_min_max(
-                    Pos2::new(x_start.max(text_area.min.x), info.line_y),
-                    Pos2::new(x_end.min(text_area.max.x), info.line_y + line_height),
-                );
-                painter.rect_filled(occ_rect, 0.0, self.theme.occurrence_highlight_color);
-            }
-        }
+        self.render_selection_highlights(
+            painter,
+            line_height,
+            char_width,
+            badge_char_width,
+            text_area,
+            info,
+            all_selection_ranges,
+            x_positions.as_deref(),
+        );
 
-        // Selection highlights
-        for &(sel_start, sel_end) in all_selection_ranges {
-            if sel_start < info.segment_char_end + 1 && sel_end > info.segment_char_start {
-                let sel_col_start = sel_start.saturating_sub(info.segment_char_start);
-                let sel_col_end = if sel_end < info.segment_char_end {
-                    sel_end - info.segment_char_start
-                } else {
-                    seg_len + 1
-                };
-
-                let sel_x_start = text_area.min.x
-                    + Self::col_to_x(x_positions.as_deref(), sel_col_start, char_width)
-                    - info.scroll_x;
-                let mut sel_x_end = text_area.min.x
-                    + Self::col_to_x(x_positions.as_deref(), sel_col_end, char_width)
-                    - info.scroll_x;
-
-                // Extend selection to cover EOL badges when special chars are shown.
-                if self.show_special_chars
-                    && sel_end > info.segment_char_end
-                    && info.line_has_newline
-                {
-                    let text_end_x = text_area.min.x
-                        + Self::col_to_x(x_positions.as_deref(), seg_len, char_width)
-                        - info.scroll_x;
-                    let eol_w = Self::eol_badges_width(self.doc.line_ending, badge_char_width);
-                    sel_x_end = sel_x_end.max(text_end_x + eol_w);
-                }
-
-                let sel_rect = Rect::from_min_max(
-                    Pos2::new(sel_x_start.max(text_area.min.x), info.line_y),
-                    Pos2::new(sel_x_end.min(text_area.max.x), info.line_y + line_height),
-                );
-                painter.rect_filled(sel_rect, 0.0, self.theme.selection_color);
-            }
-        }
-
-        // Replace tabs with spaces for rendering.
         let render_content = info.content.replace('\t', " ");
 
-        // Text rendering
         if has_badges {
-            let char_colors = self.extract_char_colors(&render_content, font_id);
-            let text_y = info.line_y + line_height * 0.15;
-            let xp = x_positions.as_ref().unwrap();
-            for (i, ch) in info.content.chars().enumerate() {
-                let x = text_area.min.x + xp[i] - info.scroll_x;
-                if x + char_width < text_area.min.x || x > text_area.max.x {
-                    continue;
-                }
-                if matches!(ch, '\t' | '\u{00A0}' | '\u{200B}' | '\u{200C}' | '\u{200D}') {
-                    continue;
-                }
-                let color = char_colors.get(i).copied().unwrap_or(self.theme.text_color);
-                let ch_str = String::from(ch);
-                painter.text(
-                    Pos2::new(x, text_y),
-                    egui::Align2::LEFT_TOP,
-                    &ch_str,
-                    font_id.clone(),
-                    color,
-                );
-            }
+            self.render_text_with_badges(
+                painter,
+                font_id,
+                line_height,
+                char_width,
+                text_area,
+                info,
+                x_positions.as_deref().unwrap_or_default(),
+                &render_content,
+            );
         } else {
             let text_x = text_area.min.x - info.scroll_x;
             let text_pos = Pos2::new(text_x, info.line_y + line_height * 0.15);
-
-            if let Some(highlighter) = &self.highlighter {
-                if let Some(line_idx) = info.cache_line_idx {
-                    // Galley-cached path for non-wrapped lines and first wrap rows
-                    let content_hash = hash_str(&render_content);
-                    let cached = {
-                        let cache = get_render_cache(&mut self.doc.render_cache);
-                        cache.get(line_idx, content_hash)
-                    };
-                    if let Some(galley) = cached {
-                        painter.galley(text_pos, galley, Color32::WHITE);
-                    } else {
-                        let syntax = highlighter.detect_syntax(self.syntax_path().as_deref());
-                        if let Some(mut hl) = highlighter.create_highlighter(syntax) {
-                            let line_with_nl = format!("{render_content}\n");
-                            let job =
-                                highlighter.highlight_line(&line_with_nl, syntax, &mut hl, font_id);
-                            let galley = ui.fonts_mut(|f| f.layout_job(job));
-                            {
-                                let cache = get_render_cache(&mut self.doc.render_cache);
-                                cache.insert(line_idx, content_hash, galley.clone());
-                            }
-                            painter.galley(text_pos, galley, Color32::WHITE);
-                        } else {
-                            painter.text(
-                                text_pos,
-                                egui::Align2::LEFT_TOP,
-                                &render_content,
-                                font_id.clone(),
-                                self.theme.text_color,
-                            );
-                        }
-                    }
-                } else {
-                    // Non-cached highlighting (wrapped continuation rows)
-                    let syntax = highlighter.detect_syntax(self.syntax_path().as_deref());
-                    if let Some(mut hl) = highlighter.create_highlighter(syntax) {
-                        let line_with_nl = format!("{render_content}\n");
-                        let job =
-                            highlighter.highlight_line(&line_with_nl, syntax, &mut hl, font_id);
-                        let galley = ui.fonts_mut(|f| f.layout_job(job));
-                        painter.galley(text_pos, galley, Color32::WHITE);
-                    } else {
-                        painter.text(
-                            text_pos,
-                            egui::Align2::LEFT_TOP,
-                            &render_content,
-                            font_id.clone(),
-                            self.theme.text_color,
-                        );
-                    }
-                }
-            } else {
-                painter.text(
-                    text_pos,
-                    egui::Align2::LEFT_TOP,
-                    &render_content,
-                    font_id.clone(),
-                    self.theme.text_color,
-                );
-            }
+            self.render_highlighted_text(
+                ui,
+                painter,
+                font_id,
+                text_pos,
+                &render_content,
+                info.cache_line_idx,
+            );
         }
 
-        // Special characters overlay
         if self.show_special_chars {
             let eol = if info.line_has_newline {
                 Some(self.doc.line_ending)
@@ -817,6 +713,185 @@ impl<'a> EditorWidget<'a> {
                 x_positions.as_deref(),
             );
         }
+    }
+
+    /// Draws occurrence-highlight rectangles for search matches within a segment.
+    #[allow(clippy::too_many_arguments)]
+    fn render_occurrence_highlights(
+        &self,
+        painter: &egui::Painter,
+        line_height: f32,
+        char_width: f32,
+        text_area: &Rect,
+        info: &LineSegmentInfo<'_>,
+        occurrence_ranges: &[(usize, usize)],
+        x_positions: Option<&[f32]>,
+    ) {
+        let seg_len = info.segment_char_end - info.segment_char_start;
+        for &(occ_start, occ_end) in occurrence_ranges {
+            if occ_start < info.segment_char_end && occ_end > info.segment_char_start {
+                let col_start = occ_start.saturating_sub(info.segment_char_start);
+                let col_end = occ_end.saturating_sub(info.segment_char_start).min(seg_len);
+                let x_start = text_area.min.x + Self::col_to_x(x_positions, col_start, char_width)
+                    - info.scroll_x;
+                let x_end = text_area.min.x + Self::col_to_x(x_positions, col_end, char_width)
+                    - info.scroll_x;
+                let occ_rect = Rect::from_min_max(
+                    Pos2::new(x_start.max(text_area.min.x), info.line_y),
+                    Pos2::new(x_end.min(text_area.max.x), info.line_y + line_height),
+                );
+                painter.rect_filled(occ_rect, 0.0, self.theme.occurrence_highlight_color);
+            }
+        }
+    }
+
+    /// Draws selection-highlight rectangles for all cursors within a segment.
+    #[allow(clippy::too_many_arguments)]
+    fn render_selection_highlights(
+        &self,
+        painter: &egui::Painter,
+        line_height: f32,
+        char_width: f32,
+        badge_char_width: f32,
+        text_area: &Rect,
+        info: &LineSegmentInfo<'_>,
+        all_selection_ranges: &[(usize, usize)],
+        x_positions: Option<&[f32]>,
+    ) {
+        let seg_len = info.segment_char_end - info.segment_char_start;
+        for &(sel_start, sel_end) in all_selection_ranges {
+            if sel_start < info.segment_char_end + 1 && sel_end > info.segment_char_start {
+                let sel_col_start = sel_start.saturating_sub(info.segment_char_start);
+                let sel_col_end = if sel_end < info.segment_char_end {
+                    sel_end - info.segment_char_start
+                } else {
+                    seg_len + 1
+                };
+
+                let sel_x_start = text_area.min.x
+                    + Self::col_to_x(x_positions, sel_col_start, char_width)
+                    - info.scroll_x;
+                let mut sel_x_end = text_area.min.x
+                    + Self::col_to_x(x_positions, sel_col_end, char_width)
+                    - info.scroll_x;
+
+                if self.show_special_chars
+                    && sel_end > info.segment_char_end
+                    && info.line_has_newline
+                {
+                    let text_end_x = text_area.min.x
+                        + Self::col_to_x(x_positions, seg_len, char_width)
+                        - info.scroll_x;
+                    let eol_w = Self::eol_badges_width(self.doc.line_ending, badge_char_width);
+                    sel_x_end = sel_x_end.max(text_end_x + eol_w);
+                }
+
+                let sel_rect = Rect::from_min_max(
+                    Pos2::new(sel_x_start.max(text_area.min.x), info.line_y),
+                    Pos2::new(sel_x_end.min(text_area.max.x), info.line_y + line_height),
+                );
+                painter.rect_filled(sel_rect, 0.0, self.theme.selection_color);
+            }
+        }
+    }
+
+    /// Renders text character-by-character when badge-aware x-positions are needed.
+    #[allow(clippy::too_many_arguments)]
+    fn render_text_with_badges(
+        &self,
+        painter: &egui::Painter,
+        font_id: &FontId,
+        line_height: f32,
+        char_width: f32,
+        text_area: &Rect,
+        info: &LineSegmentInfo<'_>,
+        x_positions: &[f32],
+        render_content: &str,
+    ) {
+        let char_colors = self.extract_char_colors(render_content, font_id);
+        let text_y = info.line_y + line_height * 0.15;
+        for (i, ch) in info.content.chars().enumerate() {
+            let x = text_area.min.x + x_positions[i] - info.scroll_x;
+            if x + char_width < text_area.min.x || x > text_area.max.x {
+                continue;
+            }
+            if matches!(ch, '\t' | '\u{00A0}' | '\u{200B}' | '\u{200C}' | '\u{200D}') {
+                continue;
+            }
+            let color = char_colors.get(i).copied().unwrap_or(self.theme.text_color);
+            let ch_str = String::from(ch);
+            painter.text(
+                Pos2::new(x, text_y),
+                egui::Align2::LEFT_TOP,
+                &ch_str,
+                font_id.clone(),
+                color,
+            );
+        }
+    }
+
+    /// Renders text with syntax highlighting and optional galley caching.
+    ///
+    /// Uses early returns to flatten the nested highlighter/cache logic.
+    fn render_highlighted_text(
+        &mut self,
+        ui: &mut Ui,
+        painter: &egui::Painter,
+        font_id: &FontId,
+        text_pos: Pos2,
+        render_content: &str,
+        cache_line_idx: Option<usize>,
+    ) {
+        let text_color = self.theme.text_color;
+
+        let Some(highlighter) = &self.highlighter else {
+            painter.text(
+                text_pos,
+                egui::Align2::LEFT_TOP,
+                render_content,
+                font_id.clone(),
+                text_color,
+            );
+            return;
+        };
+
+        // Try galley cache for non-wrapped lines.
+        let content_hash = hash_str(render_content);
+        if let Some(line_idx) = cache_line_idx {
+            let cached = {
+                let cache = get_render_cache(&mut self.doc.render_cache);
+                cache.get(line_idx, content_hash)
+            };
+            if let Some(galley) = cached {
+                painter.galley(text_pos, galley, Color32::WHITE);
+                return;
+            }
+        }
+
+        // Highlight the line.
+        let syntax = highlighter.detect_syntax(self.syntax_path().as_deref());
+        let Some(mut hl) = highlighter.create_highlighter(syntax) else {
+            painter.text(
+                text_pos,
+                egui::Align2::LEFT_TOP,
+                render_content,
+                font_id.clone(),
+                text_color,
+            );
+            return;
+        };
+
+        let line_with_nl = format!("{render_content}\n");
+        let job = highlighter.highlight_line(&line_with_nl, syntax, &mut hl, font_id);
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+
+        // Store in cache when applicable.
+        if let Some(line_idx) = cache_line_idx {
+            let cache = get_render_cache(&mut self.doc.render_cache);
+            cache.insert(line_idx, content_hash, galley.clone());
+        }
+
+        painter.galley(text_pos, galley, Color32::WHITE);
     }
 
     /// Renders the gutter for a line: current-line highlight, change tracking, line number.
@@ -1098,8 +1173,12 @@ impl<'a> EditorWidget<'a> {
 
             let is_first_row = wrap_row == 0;
 
+            // Clip text rendering to the text area so the current-line highlight
+            // doesn't bleed into the gutter (matches the non-wrapped path).
+            let text_painter = painter.with_clip_rect(*text_area);
+
             self.render_gutter_for_line(
-                painter,
+                &text_painter,
                 painter,
                 font_id,
                 line_height,
@@ -1314,5 +1393,385 @@ impl<'a> EditorWidget<'a> {
         .max(3);
         let digit_width = self.measure_char_width(ui, font_id);
         (digits as f32 + 2.0) * digit_width + 8.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── line_content_string ─────────────────────────────────────────
+
+    #[test]
+    fn line_content_string_strips_trailing_newline() {
+        let rope = ropey::Rope::from_str("hello\nworld\n");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "hello");
+    }
+
+    #[test]
+    fn line_content_string_preserves_line_without_newline() {
+        let rope = ropey::Rope::from_str("hello");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "hello");
+    }
+
+    #[test]
+    fn line_content_string_empty_line_with_newline() {
+        let rope = ropey::Rope::from_str("\n");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "");
+    }
+
+    #[test]
+    fn line_content_string_empty_rope() {
+        let rope = ropey::Rope::from_str("");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "");
+    }
+
+    #[test]
+    fn line_content_string_preserves_internal_whitespace() {
+        let rope = ropey::Rope::from_str("  hello  world  \n");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "  hello  world  ");
+    }
+
+    #[test]
+    fn line_content_string_unicode() {
+        let rope = ropey::Rope::from_str("こんにちは\n");
+        let slice = rope.line(0);
+        assert_eq!(line_content_string(slice), "こんにちは");
+    }
+
+    // ── rope_slice_ends_with_newline ────────────────────────────────
+
+    #[test]
+    fn rope_slice_ends_with_newline_true() {
+        let rope = ropey::Rope::from_str("hello\n");
+        assert!(rope_slice_ends_with_newline(rope.line(0)));
+    }
+
+    #[test]
+    fn rope_slice_ends_with_newline_false() {
+        let rope = ropey::Rope::from_str("hello");
+        assert!(!rope_slice_ends_with_newline(rope.line(0)));
+    }
+
+    #[test]
+    fn rope_slice_ends_with_newline_empty() {
+        let rope = ropey::Rope::from_str("");
+        assert!(!rope_slice_ends_with_newline(rope.line(0)));
+    }
+
+    #[test]
+    fn rope_slice_ends_with_newline_only_newline() {
+        let rope = ropey::Rope::from_str("\n");
+        assert!(rope_slice_ends_with_newline(rope.line(0)));
+    }
+
+    #[test]
+    fn rope_slice_ends_with_newline_middle_line() {
+        let rope = ropey::Rope::from_str("a\nb\nc");
+        assert!(rope_slice_ends_with_newline(rope.line(0))); // "a\n"
+        assert!(rope_slice_ends_with_newline(rope.line(1))); // "b\n"
+        assert!(!rope_slice_ends_with_newline(rope.line(2))); // "c"
+    }
+
+    // ── LineSegmentInfo construction ────────────────────────────────
+
+    #[test]
+    fn line_segment_info_basic_construction() {
+        let content = "hello world";
+        let info = LineSegmentInfo {
+            line_y: 10.0,
+            content,
+            segment_char_start: 0,
+            segment_char_end: 11,
+            line_has_newline: true,
+            scroll_x: 5.0,
+            cache_line_idx: Some(0),
+        };
+        assert_eq!(info.content, "hello world");
+        assert_eq!(info.segment_char_end - info.segment_char_start, 11);
+        assert!(info.line_has_newline);
+    }
+
+    #[test]
+    fn line_segment_info_wrapped_segment() {
+        let content = "world";
+        let info = LineSegmentInfo {
+            line_y: 30.0,
+            content,
+            segment_char_start: 6,
+            segment_char_end: 11,
+            line_has_newline: false,
+            scroll_x: 0.0,
+            cache_line_idx: None,
+        };
+        assert_eq!(info.segment_char_end - info.segment_char_start, 5);
+        assert!(!info.line_has_newline);
+        assert!(info.cache_line_idx.is_none());
+    }
+
+    // ── syntax_path ────────────────────────────────────────────────
+
+    #[test]
+    fn syntax_path_with_file_path() {
+        let mut doc = Document::default();
+        doc.file_path = Some(std::path::PathBuf::from("/tmp/test.rs"));
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let result = widget.syntax_path();
+        assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test.rs")));
+    }
+
+    #[test]
+    fn syntax_path_with_titled_extension() {
+        let mut doc = Document::default();
+        doc.title = "Untitled.py".to_string();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let result = widget.syntax_path();
+        assert_eq!(result, Some(std::path::PathBuf::from("Untitled.py")));
+    }
+
+    #[test]
+    fn syntax_path_without_extension() {
+        let mut doc = Document::default();
+        doc.title = "Untitled".to_string();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        assert!(widget.syntax_path().is_none());
+    }
+
+    #[test]
+    fn syntax_path_file_path_takes_priority() {
+        let mut doc = Document::default();
+        doc.file_path = Some(std::path::PathBuf::from("/tmp/test.rs"));
+        doc.title = "something.py".to_string();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let result = widget.syntax_path();
+        assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test.rs")));
+    }
+
+    // ── ensure_cursor_visible ──────────────────────────────────────
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_down() {
+        let mut doc = Document::default();
+        doc.buffer = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into();
+        doc.cursor.position = Position::new(9, 0);
+        doc.scroll_y = 0.0;
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(5, 100.0, 10.0, None);
+        assert!(widget.doc.scroll_y > 0.0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_scrolls_up() {
+        let mut doc = Document::default();
+        doc.buffer = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into();
+        doc.cursor.position = Position::new(0, 0);
+        doc.scroll_y = 5.0;
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(5, 100.0, 10.0, None);
+        assert!(widget.doc.scroll_y < 5.0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_horizontal_scroll_right() {
+        let mut doc = Document::default();
+        doc.buffer = "abcdefghijklmnopqrstuvwxyz".into();
+        doc.cursor.position = Position::new(0, 25);
+        doc.scroll_x = 0.0;
+        let theme = EditorTheme::default();
+        let char_width = 10.0;
+        let text_width = 100.0; // only 10 chars visible
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(10, text_width, char_width, None);
+        assert!(widget.doc.scroll_x > 0.0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_horizontal_scroll_left() {
+        let mut doc = Document::default();
+        doc.buffer = "abcdefghijklmnopqrstuvwxyz".into();
+        doc.cursor.position = Position::new(0, 0);
+        doc.scroll_x = 100.0;
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(10, 200.0, 10.0, None);
+        assert!(widget.doc.scroll_x < 100.0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_wrap_mode_resets_scroll_x() {
+        let mut doc = Document::default();
+        doc.buffer = "hello world".into();
+        doc.scroll_x = 50.0;
+        let theme = EditorTheme::default();
+        let wm = WrapMap::build(&doc, 5);
+        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        widget.ensure_cursor_visible(10, 200.0, 10.0, Some(&wm));
+        assert!((widget.doc.scroll_x - 0.0).abs() < f32::EPSILON);
+    }
+
+    // ── x_to_col_badge_aware ───────────────────────────────────────
+
+    #[test]
+    fn x_to_col_normal_text() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let col = widget.x_to_col_badge_aware("hello", 25.0, 10.0);
+        // 25.0 / 10.0 = 2.5 → rounds to 3
+        assert_eq!(col, 3);
+    }
+
+    #[test]
+    fn x_to_col_at_start() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let col = widget.x_to_col_badge_aware("hello", 0.0, 10.0);
+        assert_eq!(col, 0);
+    }
+
+    #[test]
+    fn x_to_col_beyond_end() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let col = widget.x_to_col_badge_aware("hi", 100.0, 10.0);
+        // Returns unclamped column (cursor clamping happens at a higher level)
+        assert_eq!(col, 10);
+    }
+
+    #[test]
+    fn x_to_col_negative() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let col = widget.x_to_col_badge_aware("hello", -5.0, 10.0);
+        assert_eq!(col, 0);
+    }
+
+    // ── col_to_x_badge_aware ───────────────────────────────────────
+
+    #[test]
+    fn col_to_x_normal_text() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let x = widget.col_to_x_badge_aware("hello", 3, 10.0);
+        assert!((x - 30.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn col_to_x_at_zero() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let x = widget.col_to_x_badge_aware("hello", 0, 10.0);
+        assert!((x - 0.0).abs() < f32::EPSILON);
+    }
+
+    // ── EditorWidget construction ──────────────────────────────────
+
+    #[test]
+    fn editor_widget_defaults() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.5, None);
+        assert!((widget.zoom_level - 1.5).abs() < f32::EPSILON);
+        assert!(widget.highlighter.is_none());
+        assert!(!widget.word_wrap);
+        assert!(!widget.show_special_chars);
+        assert!(!widget.dialog_open);
+        assert!((widget.zoom_request - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn editor_widget_with_settings() {
+        let mut doc = Document::default();
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, 2.0, None);
+        widget.word_wrap = true;
+        widget.show_special_chars = true;
+        widget.show_line_numbers = true;
+        widget.dialog_open = true;
+        assert!(widget.word_wrap);
+        assert!(widget.show_special_chars);
+        assert!(widget.show_line_numbers);
+        assert!(widget.dialog_open);
+    }
+
+    // ── screen_to_position (non-wrapped) ───────────────────────────
+
+    #[test]
+    fn screen_to_position_basic() {
+        let mut doc = Document::default();
+        doc.buffer = "hello\nworld\n".into();
+        doc.scroll_y = 0.0;
+        doc.scroll_x = 0.0;
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+        let char_width = 10.0;
+        let line_height = 20.0;
+
+        let pos = widget.screen_to_position(
+            Pos2::new(50.0, 5.0),
+            text_area,
+            line_height,
+            char_width,
+            None,
+        );
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.col, 0);
+    }
+
+    #[test]
+    fn screen_to_position_second_line() {
+        let mut doc = Document::default();
+        doc.buffer = "hello\nworld\n".into();
+        doc.scroll_y = 0.0;
+        doc.scroll_x = 0.0;
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+        let char_width = 10.0;
+        let line_height = 20.0;
+
+        let pos = widget.screen_to_position(
+            Pos2::new(80.0, 25.0),
+            text_area,
+            line_height,
+            char_width,
+            None,
+        );
+        assert_eq!(pos.line, 1);
+        assert_eq!(pos.col, 3); // (80 - 50) / 10 = 3
+    }
+
+    #[test]
+    fn screen_to_position_far_below_returns_large_line() {
+        let mut doc = Document::default();
+        doc.buffer = "hello\n".into();
+        doc.scroll_y = 0.0;
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+
+        // screen_to_position doesn't clamp — cursor clamping happens elsewhere
+        let pos = widget.screen_to_position(Pos2::new(50.0, 500.0), text_area, 20.0, 10.0, None);
+        assert!(pos.line > 1);
     }
 }
