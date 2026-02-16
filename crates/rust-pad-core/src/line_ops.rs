@@ -36,6 +36,46 @@ pub enum CaseConversion {
     TitleCase,
 }
 
+/// Reads lines from the buffer in the given range, stripping trailing newlines.
+fn read_lines_trimmed(
+    buffer: &TextBuffer,
+    start_line: usize,
+    end_line: usize,
+) -> Result<Vec<String>> {
+    (start_line..end_line)
+        .map(|i| {
+            buffer
+                .line(i)
+                .map(|l| l.to_string().trim_end_matches('\n').to_string())
+        })
+        .collect::<Result<Vec<_>>>()
+}
+
+/// Replaces lines in the buffer range with the given lines.
+fn write_lines_back(
+    buffer: &mut TextBuffer,
+    start_line: usize,
+    end_line: usize,
+    lines: &[&str],
+) -> Result<()> {
+    let start_char = buffer.line_to_char(start_line)?;
+    let end_char = if end_line < buffer.len_lines() {
+        buffer.line_to_char(end_line)?
+    } else {
+        buffer.len_chars()
+    };
+
+    let new_text = lines.join("\n")
+        + if end_line < buffer.len_lines() {
+            "\n"
+        } else {
+            ""
+        };
+
+    buffer.replace(start_char, end_char, &new_text)?;
+    Ok(())
+}
+
 /// Sorts lines in the given range.
 ///
 /// # Errors
@@ -54,13 +94,7 @@ pub fn sort_lines(
         return Ok(());
     }
 
-    let mut lines: Vec<String> = (start_line..end_line)
-        .map(|i| {
-            buffer
-                .line(i)
-                .map(|l| l.to_string().trim_end_matches('\n').to_string())
-        })
-        .collect::<Result<Vec<_>>>()
+    let mut lines = read_lines_trimmed(buffer, start_line, end_line)
         .context("failed to read lines for sorting")?;
 
     lines.sort_by(|a, b| {
@@ -90,22 +124,8 @@ pub fn sort_lines(
         }
     });
 
-    // Rebuild the text for those lines
-    let start_char = buffer.line_to_char(start_line)?;
-    let end_char = if end_line < buffer.len_lines() {
-        buffer.line_to_char(end_line)?
-    } else {
-        buffer.len_chars()
-    };
-
-    let new_text = lines.join("\n")
-        + if end_line < buffer.len_lines() {
-            "\n"
-        } else {
-            ""
-        };
-
-    buffer.replace(start_char, end_char, &new_text)?;
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    write_lines_back(buffer, start_line, end_line, &refs)?;
     Ok(())
 }
 
@@ -119,13 +139,7 @@ pub fn remove_consecutive_duplicates(
         return Ok(0);
     }
 
-    let lines: Vec<String> = (start_line..end_line)
-        .map(|i| {
-            buffer
-                .line(i)
-                .map(|l| l.to_string().trim_end_matches('\n').to_string())
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let lines = read_lines_trimmed(buffer, start_line, end_line)?;
 
     let mut result: Vec<String> = Vec::with_capacity(lines.len());
     let mut removed = 0;
@@ -139,21 +153,8 @@ pub fn remove_consecutive_duplicates(
     }
 
     if removed > 0 {
-        let start_char = buffer.line_to_char(start_line)?;
-        let end_char = if end_line < buffer.len_lines() {
-            buffer.line_to_char(end_line)?
-        } else {
-            buffer.len_chars()
-        };
-
-        let new_text = result.join("\n")
-            + if end_line < buffer.len_lines() {
-                "\n"
-            } else {
-                ""
-            };
-
-        buffer.replace(start_char, end_char, &new_text)?;
+        let refs: Vec<&str> = result.iter().map(String::as_str).collect();
+        write_lines_back(buffer, start_line, end_line, &refs)?;
     }
 
     Ok(removed)
@@ -169,13 +170,7 @@ pub fn remove_all_duplicates(
         return Ok(0);
     }
 
-    let lines: Vec<String> = (start_line..end_line)
-        .map(|i| {
-            buffer
-                .line(i)
-                .map(|l| l.to_string().trim_end_matches('\n').to_string())
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let lines = read_lines_trimmed(buffer, start_line, end_line)?;
 
     let mut seen = std::collections::HashSet::new();
     let mut result: Vec<String> = Vec::with_capacity(lines.len());
@@ -190,21 +185,8 @@ pub fn remove_all_duplicates(
     }
 
     if removed > 0 {
-        let start_char = buffer.line_to_char(start_line)?;
-        let end_char = if end_line < buffer.len_lines() {
-            buffer.line_to_char(end_line)?
-        } else {
-            buffer.len_chars()
-        };
-
-        let new_text = result.join("\n")
-            + if end_line < buffer.len_lines() {
-                "\n"
-            } else {
-                ""
-            };
-
-        buffer.replace(start_char, end_char, &new_text)?;
+        let refs: Vec<&str> = result.iter().map(String::as_str).collect();
+        write_lines_back(buffer, start_line, end_line, &refs)?;
     }
 
     Ok(removed)
@@ -220,37 +202,17 @@ pub fn remove_empty_lines(
         return Ok(0);
     }
 
-    let lines: Vec<String> = (start_line..end_line)
-        .map(|i| {
-            buffer
-                .line(i)
-                .map(|l| l.to_string().trim_end_matches('\n').to_string())
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let lines = read_lines_trimmed(buffer, start_line, end_line)?;
 
-    let non_empty: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    let non_empty: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
     let removed = lines.len() - non_empty.len();
 
     if removed > 0 {
-        let start_char = buffer.line_to_char(start_line)?;
-        let end_char = if end_line < buffer.len_lines() {
-            buffer.line_to_char(end_line)?
-        } else {
-            buffer.len_chars()
-        };
-
-        let new_text: String = non_empty
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-            + if end_line < buffer.len_lines() {
-                "\n"
-            } else {
-                ""
-            };
-
-        buffer.replace(start_char, end_char, &new_text)?;
+        write_lines_back(buffer, start_line, end_line, &non_empty)?;
     }
 
     Ok(removed)

@@ -439,3 +439,292 @@ impl Document {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cursor::{Cursor, Position};
+
+    /// Helper: creates a Document with text and cursor at (0,0).
+    fn doc_with(text: &str) -> Document {
+        let mut doc = Document::new();
+        if !text.is_empty() {
+            doc.insert_text(text);
+        }
+        doc.cursor.position = Position::new(0, 0);
+        doc.cursor.clear_selection();
+        doc
+    }
+
+    /// Helper: adds a secondary cursor at the given position.
+    fn add_cursor(doc: &mut Document, line: usize, col: usize) {
+        let mut sc = Cursor::new();
+        sc.position = Position::new(line, col);
+        doc.secondary_cursors.push(sc);
+    }
+
+    // ── insert_text_multi ─────────────────────────────────────────
+
+    #[test]
+    fn insert_multi_single_cursor_delegates() {
+        let mut doc = doc_with("hello");
+        doc.cursor.position = Position::new(0, 5);
+        // No secondary cursors — should behave like insert_text
+        doc.insert_text_multi("!");
+        assert_eq!(doc.buffer.to_string(), "hello!");
+    }
+
+    #[test]
+    fn insert_multi_replaces_selections() {
+        let mut doc = doc_with("hello world");
+        // Select "hello" with primary cursor
+        doc.cursor.position = Position::new(0, 5);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        // Select "world" with secondary
+        let mut sc = Cursor::new();
+        sc.position = Position::new(0, 11);
+        sc.selection_anchor = Some(Position::new(0, 6));
+        doc.secondary_cursors.push(sc);
+
+        doc.insert_text_multi("X");
+        assert_eq!(doc.buffer.to_string(), "X X");
+    }
+
+    #[test]
+    fn insert_multi_multichar_text() {
+        let mut doc = doc_with("ab\ncd");
+        doc.cursor.position = Position::new(0, 1);
+        add_cursor(&mut doc, 1, 1);
+
+        doc.insert_text_multi("XX");
+        assert_eq!(doc.buffer.to_string(), "aXXb\ncXXd");
+    }
+
+    // ── insert_text_per_cursor ────────────────────────────────────
+
+    #[test]
+    fn per_cursor_single_cursor_delegates() {
+        let mut doc = doc_with("hello");
+        doc.cursor.position = Position::new(0, 5);
+        // No secondary cursors
+        doc.insert_text_per_cursor(&["!"]);
+        assert_eq!(doc.buffer.to_string(), "hello!");
+    }
+
+    #[test]
+    fn per_cursor_empty_texts_array() {
+        let mut doc = doc_with("hello");
+        doc.cursor.position = Position::new(0, 5);
+        add_cursor(&mut doc, 0, 0);
+        // Empty texts — fallback to insert_text_multi with first (none available)
+        doc.insert_text_per_cursor(&[]);
+        // No crash, text should be unchanged
+        assert_eq!(doc.buffer.to_string(), "hello");
+    }
+
+    #[test]
+    fn per_cursor_with_selections_replaces() {
+        let mut doc = doc_with("AAA BBB");
+        // Select "AAA" with primary
+        doc.cursor.position = Position::new(0, 3);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        // Select "BBB" with secondary
+        let mut sc = Cursor::new();
+        sc.position = Position::new(0, 7);
+        sc.selection_anchor = Some(Position::new(0, 4));
+        doc.secondary_cursors.push(sc);
+
+        doc.insert_text_per_cursor(&["X", "Y"]);
+        assert_eq!(doc.buffer.to_string(), "X Y");
+    }
+
+    // ── backspace_multi ───────────────────────────────────────────
+
+    #[test]
+    fn backspace_multi_single_cursor_delegates() {
+        let mut doc = doc_with("abc");
+        doc.cursor.position = Position::new(0, 3);
+        doc.backspace_multi();
+        assert_eq!(doc.buffer.to_string(), "ab");
+    }
+
+    #[test]
+    fn backspace_multi_at_start_noop() {
+        let mut doc = doc_with("hello");
+        doc.cursor.position = Position::new(0, 0);
+        add_cursor(&mut doc, 0, 0);
+        // Both cursors at position 0 — nothing to delete
+        doc.backspace_multi();
+        assert_eq!(doc.buffer.to_string(), "hello");
+    }
+
+    #[test]
+    fn backspace_multi_with_selection_deletes_selection() {
+        let mut doc = doc_with("hello world");
+        // Select "hello" with primary
+        doc.cursor.position = Position::new(0, 5);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        // No secondary cursors, but has_selection triggers delete_selection_multi
+        add_cursor(&mut doc, 0, 11);
+
+        doc.backspace_multi();
+        // The selection on primary should be deleted
+        assert_eq!(doc.buffer.to_string(), " world");
+    }
+
+    // ── delete_forward_multi ──────────────────────────────────────
+
+    #[test]
+    fn delete_forward_multi_single_cursor_delegates() {
+        let mut doc = doc_with("abc");
+        doc.cursor.position = Position::new(0, 0);
+        doc.delete_forward_multi();
+        assert_eq!(doc.buffer.to_string(), "bc");
+    }
+
+    #[test]
+    fn delete_forward_multi_at_end_noop() {
+        let mut doc = doc_with("ab");
+        doc.cursor.position = Position::new(0, 2);
+        add_cursor(&mut doc, 0, 2);
+        doc.delete_forward_multi();
+        assert_eq!(doc.buffer.to_string(), "ab");
+    }
+
+    #[test]
+    fn delete_forward_multi_with_selection_deletes_selection() {
+        let mut doc = doc_with("hello world");
+        // Select "world" with primary
+        doc.cursor.position = Position::new(0, 11);
+        doc.cursor.selection_anchor = Some(Position::new(0, 6));
+        add_cursor(&mut doc, 0, 0);
+
+        doc.delete_forward_multi();
+        assert_eq!(doc.buffer.to_string(), "hello ");
+    }
+
+    // ── delete_selection_multi_public ──────────────────────────────
+
+    #[test]
+    fn delete_selection_multi_public_no_selection_noop() {
+        let mut doc = doc_with("hello");
+        doc.cursor.position = Position::new(0, 3);
+        add_cursor(&mut doc, 0, 1);
+        // No selections on any cursor
+        doc.delete_selection_multi_public();
+        assert_eq!(doc.buffer.to_string(), "hello");
+    }
+
+    #[test]
+    fn delete_selection_multi_public_multiple_selections() {
+        let mut doc = doc_with("aabbcc");
+        // Select "aa" with primary
+        doc.cursor.position = Position::new(0, 2);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        // Select "cc" with secondary
+        let mut sc = Cursor::new();
+        sc.position = Position::new(0, 6);
+        sc.selection_anchor = Some(Position::new(0, 4));
+        doc.secondary_cursors.push(sc);
+
+        doc.delete_selection_multi_public();
+        assert_eq!(doc.buffer.to_string(), "bb");
+    }
+
+    // ── insert_newline_multi ──────────────────────────────────────
+
+    #[test]
+    fn insert_newline_multi_single_cursor_delegates() {
+        let mut doc = doc_with("ab");
+        doc.cursor.position = Position::new(0, 1);
+        doc.insert_newline_multi();
+        assert_eq!(doc.buffer.to_string(), "a\nb");
+    }
+
+    // ── selected_text_multi ───────────────────────────────────────
+
+    #[test]
+    fn selected_text_multi_no_selections_returns_none() {
+        let mut doc = doc_with("hello");
+        doc.cursor.position = Position::new(0, 3);
+        add_cursor(&mut doc, 0, 1);
+        assert_eq!(doc.selected_text_multi(), None);
+    }
+
+    #[test]
+    fn selected_text_multi_single_cursor_delegates() {
+        let mut doc = doc_with("hello");
+        doc.cursor.position = Position::new(0, 5);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        // No secondary cursors — delegates to selected_text
+        assert_eq!(doc.selected_text_multi(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn selected_text_multi_partial_selections() {
+        let mut doc = doc_with("hello world foo");
+        // Only primary has selection
+        doc.cursor.position = Position::new(0, 5);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        // Secondary has no selection
+        add_cursor(&mut doc, 0, 10);
+
+        let text = doc.selected_text_multi().unwrap();
+        assert_eq!(text, "hello");
+    }
+
+    // ── merge_overlapping_cursors ─────────────────────────────────
+
+    #[test]
+    fn insert_multi_adjacent_cursors_stay_separate() {
+        let mut doc = doc_with("ab");
+        // Two cursors at the same position
+        doc.cursor.position = Position::new(0, 1);
+        add_cursor(&mut doc, 0, 1);
+
+        doc.insert_text_multi("X");
+        // Both cursors insert at position 1, resulting in "aXXb"
+        assert_eq!(doc.buffer.to_string(), "aXXb");
+    }
+
+    // ── marks modified and bumps version ──────────────────────────
+
+    #[test]
+    fn insert_multi_marks_modified_and_bumps_version() {
+        let mut doc = doc_with("hello");
+        doc.modified = false;
+        let v0 = doc.content_version;
+        doc.cursor.position = Position::new(0, 5);
+        add_cursor(&mut doc, 0, 0);
+
+        doc.insert_text_multi("!");
+        assert!(doc.modified);
+        assert!(doc.content_version > v0);
+    }
+
+    #[test]
+    fn backspace_multi_marks_modified_and_bumps_version() {
+        let mut doc = doc_with("hello");
+        doc.modified = false;
+        let v0 = doc.content_version;
+        doc.cursor.position = Position::new(0, 5);
+        add_cursor(&mut doc, 0, 3);
+
+        doc.backspace_multi();
+        assert!(doc.modified);
+        assert!(doc.content_version > v0);
+    }
+
+    #[test]
+    fn delete_forward_multi_marks_modified_and_bumps_version() {
+        let mut doc = doc_with("hello");
+        doc.modified = false;
+        let v0 = doc.content_version;
+        doc.cursor.position = Position::new(0, 0);
+        add_cursor(&mut doc, 0, 2);
+
+        doc.delete_forward_multi();
+        assert!(doc.modified);
+        assert!(doc.content_version > v0);
+    }
+}

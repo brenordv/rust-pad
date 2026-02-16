@@ -1,6 +1,6 @@
 //! Menu bar rendering for the editor application.
 //!
-//! Contains the File, Edit, Search, View, Encoding, Window, and Help menus.
+//! Contains the File, Edit, Search, Encoding, View, Settings, Window, and Help menus.
 
 use eframe::egui;
 use rust_pad_core::encoding::{LineEnding, TextEncoding};
@@ -9,7 +9,7 @@ use rust_pad_core::line_ops::{CaseConversion, SortOrder};
 use super::{App, ThemeMode};
 
 impl App {
-    /// Renders the menu bar with File, Edit, Search, View, Encoding, and Help menus.
+    /// Renders the menu bar with File, Edit, Search, Encoding, View, Settings, Window, and Help menus.
     pub(crate) fn show_menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         egui::MenuBar::new().ui(ui, |ui| {
             // File menu
@@ -179,6 +179,38 @@ impl App {
                 }
             });
 
+            // Encoding menu
+            ui.menu_button("Encoding", |ui| {
+                let current = self.tabs.active_doc().encoding;
+                let current_eol = self.tabs.active_doc().line_ending;
+                ui.label(format!("Current: {current}"));
+                ui.separator();
+
+                for enc in [
+                    TextEncoding::Utf8,
+                    TextEncoding::Utf8Bom,
+                    TextEncoding::Utf16Le,
+                    TextEncoding::Utf16Be,
+                    TextEncoding::Ascii,
+                ] {
+                    if ui.radio(current == enc, format!("{enc}")).clicked() {
+                        self.tabs.active_doc_mut().encoding = enc;
+                        self.tabs.active_doc_mut().modified = true;
+                        ui.close();
+                    }
+                }
+
+                ui.separator();
+                ui.label(format!("Line Ending: {current_eol}"));
+                for eol in [LineEnding::Lf, LineEnding::CrLf, LineEnding::Cr] {
+                    if ui.radio(current_eol == eol, format!("{eol}")).clicked() {
+                        self.tabs.active_doc_mut().line_ending = eol;
+                        self.tabs.active_doc_mut().modified = true;
+                        ui.close();
+                    }
+                }
+            });
+
             // View menu
             ui.menu_button("View", |ui| {
                 if ui.button("Zoom In          Ctrl++").clicked() {
@@ -259,50 +291,10 @@ impl App {
                 });
             });
 
-            // Encoding menu
-            ui.menu_button("Encoding", |ui| {
-                let current = self.tabs.active_doc().encoding;
-                let current_eol = self.tabs.active_doc().line_ending;
-                ui.label(format!("Current: {current}"));
-                ui.separator();
-
-                for enc in [
-                    TextEncoding::Utf8,
-                    TextEncoding::Utf8Bom,
-                    TextEncoding::Utf16Le,
-                    TextEncoding::Utf16Be,
-                    TextEncoding::Ascii,
-                ] {
-                    if ui.radio(current == enc, format!("{enc}")).clicked() {
-                        self.tabs.active_doc_mut().encoding = enc;
-                        self.tabs.active_doc_mut().modified = true;
-                        ui.close();
-                    }
-                }
-
-                ui.separator();
-                ui.label(format!("Line Ending: {current_eol}"));
-                for eol in [LineEnding::Lf, LineEnding::CrLf, LineEnding::Cr] {
-                    if ui.radio(current_eol == eol, format!("{eol}")).clicked() {
-                        self.tabs.active_doc_mut().line_ending = eol;
-                        self.tabs.active_doc_mut().modified = true;
-                        ui.close();
-                    }
-                }
-            });
-
             // Settings menu
             ui.menu_button("Settings", |ui| {
                 if ui.button("Preferences...").clicked() {
                     self.settings_open = true;
-                    ui.close();
-                }
-            });
-
-            // Help menu
-            ui.menu_button("Help", |ui| {
-                if ui.button("About rust-pad").clicked() {
-                    self.about_open = true;
                     ui.close();
                 }
             });
@@ -346,6 +338,14 @@ impl App {
                         self.tabs.switch_to(idx);
                         ui.close();
                     }
+                }
+            });
+
+            // Help menu
+            ui.menu_button("Help", |ui| {
+                if ui.button("About rust-pad").clicked() {
+                    self.about_open = true;
+                    ui.close();
                 }
             });
         });

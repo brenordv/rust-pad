@@ -111,3 +111,131 @@ fn syntect_color_to_egui(style: Style) -> Color32 {
         style.foreground.a,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_creates_valid_highlighter() {
+        let hl = SyntaxHighlighter::new();
+        assert_eq!(hl.current_theme(), "base16-eighties.dark");
+    }
+
+    #[test]
+    fn detect_syntax_rust_extension() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("main.rs")));
+        assert_eq!(syntax.name, "Rust");
+    }
+
+    #[test]
+    fn detect_syntax_python_extension() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("script.py")));
+        assert_eq!(syntax.name, "Python");
+    }
+
+    #[test]
+    fn detect_syntax_javascript_extension() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("app.js")));
+        assert_eq!(syntax.name, "JavaScript");
+    }
+
+    #[test]
+    fn detect_syntax_no_path_returns_plain_text() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(None);
+        assert_eq!(syntax.name, "Plain Text");
+    }
+
+    #[test]
+    fn detect_syntax_unknown_extension_returns_plain_text() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("file.xyz_unknown")));
+        assert_eq!(syntax.name, "Plain Text");
+    }
+
+    #[test]
+    fn detect_syntax_makefile_by_filename() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("Makefile")));
+        assert_eq!(syntax.name, "Makefile");
+    }
+
+    #[test]
+    fn create_highlighter_returns_some() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("test.rs")));
+        assert!(hl.create_highlighter(syntax).is_some());
+    }
+
+    #[test]
+    fn set_theme_valid_name() {
+        let mut hl = SyntaxHighlighter::new();
+        let themes = hl.available_themes();
+        assert!(!themes.is_empty());
+        // Set to a different valid theme
+        let other: String = themes
+            .iter()
+            .find(|&&t| t != hl.current_theme())
+            .unwrap()
+            .to_string();
+        hl.set_theme(&other);
+        assert_eq!(hl.current_theme(), other);
+    }
+
+    #[test]
+    fn set_theme_invalid_name_is_noop() {
+        let mut hl = SyntaxHighlighter::new();
+        let original = hl.current_theme().to_string();
+        hl.set_theme("nonexistent-theme-name");
+        assert_eq!(hl.current_theme(), original);
+    }
+
+    #[test]
+    fn available_themes_not_empty() {
+        let hl = SyntaxHighlighter::new();
+        let themes = hl.available_themes();
+        assert!(!themes.is_empty());
+        assert!(themes.contains(&"base16-eighties.dark"));
+    }
+
+    #[test]
+    fn highlight_line_produces_non_empty_job() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("test.rs")));
+        let mut highlighter = hl.create_highlighter(syntax).unwrap();
+        let font_id = FontId::monospace(14.0);
+
+        let job = hl.highlight_line("fn main() {}", syntax, &mut highlighter, &font_id);
+        assert!(!job.text.is_empty());
+    }
+
+    #[test]
+    fn highlight_line_empty_string() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("test.rs")));
+        let mut highlighter = hl.create_highlighter(syntax).unwrap();
+        let font_id = FontId::monospace(14.0);
+
+        let job = hl.highlight_line("", syntax, &mut highlighter, &font_id);
+        assert!(job.text.is_empty());
+    }
+
+    #[test]
+    fn syntect_color_conversion() {
+        let style = Style {
+            foreground: syntect::highlighting::Color {
+                r: 255,
+                g: 128,
+                b: 64,
+                a: 200,
+            },
+            ..Default::default()
+        };
+        let color = syntect_color_to_egui(style);
+        assert_eq!(color, Color32::from_rgba_unmultiplied(255, 128, 64, 200));
+    }
+}
