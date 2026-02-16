@@ -191,83 +191,11 @@ impl App {
 
         // Restore session if enabled
         if app_config.restore_open_files {
-            if let Some(store) = &session_store {
-                if let Ok(Some(session_data)) = store.load_session() {
-                    let mut any_restored = false;
-                    for entry in &session_data.tabs {
-                        match entry {
-                            SessionTabEntry::File { path } => {
-                                let p = std::path::Path::new(path);
-                                if p.exists() {
-                                    if let Err(e) = tabs.open_file(p) {
-                                        tracing::warn!("Failed to restore '{path}': {e}");
-                                    } else {
-                                        any_restored = true;
-                                    }
-                                }
-                            }
-                            SessionTabEntry::Unsaved { session_id, title } => {
-                                let content = store
-                                    .load_content(session_id)
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_default();
-                                let mut doc = rust_pad_core::document::Document::new();
-                                doc.title = title.clone();
-                                if !content.is_empty() {
-                                    doc.buffer =
-                                        rust_pad_core::buffer::TextBuffer::from(content.as_str());
-                                    doc.modified = true;
-                                }
-                                doc.session_id = Some(generate_session_id());
-                                tabs.documents.push(doc);
-                                any_restored = true;
-                            }
-                        }
-                    }
-                    if any_restored {
-                        // Remove the phantom initial empty tab
-                        tabs.documents.remove(0);
-                        tabs.active = session_data
-                            .active_tab_index
-                            .min(tabs.documents.len().saturating_sub(1));
-                    }
-                    // Clear old content — fresh IDs assigned, will be rewritten on exit
-                    let _ = store.clear_all_content();
-                }
-            }
+            Self::restore_session(&mut tabs, &session_store);
         }
 
         // Open files requested via CLI arguments
-        let has_cli_content = !args.files.is_empty() || args.new_file_text.is_some();
-        for path in &args.files {
-            let abs_path = if path.is_absolute() {
-                path.clone()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(path)
-            };
-            if let Err(e) = tabs.open_file(&abs_path) {
-                tracing::warn!("Failed to open '{}': {e}", abs_path.display());
-            }
-        }
-
-        // Handle --new-file: create an untitled tab pre-filled with the given text
-        if let Some(text) = args.new_file_text {
-            tabs.new_tab();
-            let doc = tabs.active_doc_mut();
-            doc.insert_text(&text);
-        }
-
-        // If CLI args opened any tabs, remove the initial empty tab that came
-        // from TabManager construction (only if it's still pristine).
-        if has_cli_content && tabs.tab_count() > 1 {
-            let first_is_empty = tabs.documents[0].buffer.is_empty()
-                && tabs.documents[0].file_path.is_none()
-                && !tabs.documents[0].modified;
-            if first_is_empty {
-                tabs.close_tab(0);
-            }
-        }
+        Self::open_startup_files(&mut tabs, &args);
 
         Self {
             tabs,
@@ -308,6 +236,86 @@ impl App {
             settings_tab: settings_dialog::SettingsTab::default(),
             about_open: false,
             about_logo: None,
+        }
+    }
+
+    /// Restores a previous session from the session store.
+    fn restore_session(tabs: &mut TabManager, session_store: &Option<SessionStore>) {
+        let Some(store) = session_store else { return };
+        let Ok(Some(session_data)) = store.load_session() else {
+            return;
+        };
+
+        let mut any_restored = false;
+        for entry in &session_data.tabs {
+            match entry {
+                SessionTabEntry::File { path } => {
+                    let p = std::path::Path::new(path);
+                    if p.exists() {
+                        if let Err(e) = tabs.open_file(p) {
+                            tracing::warn!("Failed to restore '{path}': {e}");
+                        } else {
+                            any_restored = true;
+                        }
+                    }
+                }
+                SessionTabEntry::Unsaved { session_id, title } => {
+                    let content = store
+                        .load_content(session_id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    let mut doc = rust_pad_core::document::Document::new();
+                    doc.title = title.clone();
+                    if !content.is_empty() {
+                        doc.buffer = rust_pad_core::buffer::TextBuffer::from(content.as_str());
+                        doc.modified = true;
+                    }
+                    doc.session_id = Some(generate_session_id());
+                    tabs.documents.push(doc);
+                    any_restored = true;
+                }
+            }
+        }
+
+        if any_restored {
+            tabs.documents.remove(0);
+            tabs.active = session_data
+                .active_tab_index
+                .min(tabs.documents.len().saturating_sub(1));
+        }
+        let _ = store.clear_all_content();
+    }
+
+    /// Opens files from startup arguments (CLI).
+    fn open_startup_files(tabs: &mut TabManager, args: &StartupArgs) {
+        let has_cli_content = !args.files.is_empty() || args.new_file_text.is_some();
+
+        for path in &args.files {
+            let abs_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(path)
+            };
+            if let Err(e) = tabs.open_file(&abs_path) {
+                tracing::warn!("Failed to open '{}': {e}", abs_path.display());
+            }
+        }
+
+        if let Some(text) = &args.new_file_text {
+            tabs.new_tab();
+            let doc = tabs.active_doc_mut();
+            doc.insert_text(text);
+        }
+
+        // Remove the initial empty tab if CLI args opened any tabs
+        if has_cli_content && tabs.tab_count() > 1 {
+            let first_is_empty = tabs.documents[0].buffer.is_empty()
+                && tabs.documents[0].file_path.is_none()
+                && !tabs.documents[0].modified;
+            if first_is_empty {
+                tabs.close_tab(0);
+            }
         }
     }
 
@@ -426,80 +434,76 @@ impl App {
 
     /// Shows all dialog windows.
     fn show_dialogs(&mut self, ctx: &egui::Context) {
-        // Confirm close dialog
-        match self.dialog_state {
-            DialogState::ConfirmClose(idx) => {
-                let mut open = true;
-                let title = if idx < self.tabs.tab_count() {
-                    self.tabs.documents[idx].title.clone()
-                } else {
-                    "Document".to_string()
-                };
-
-                egui::Window::new("Unsaved Changes")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        ui.spacing_mut().item_spacing.y = 8.0;
-
-                        ui.label(format!("'{title}' has unsaved changes. Close anyway?"));
-
-                        ui.add_space(4.0);
-
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            if ui.button("  Save & Close  ").clicked() {
-                                if idx < self.tabs.tab_count() {
-                                    let doc = &mut self.tabs.documents[idx];
-                                    if doc.file_path.is_some() {
-                                        let _ = doc.save();
-                                    }
-                                    self.cleanup_session_for_tab(idx);
-                                    self.tabs.close_tab(idx);
-                                }
-                                self.dialog_state = DialogState::None;
-                            }
-                            if ui.button("  Discard  ").clicked() {
-                                self.cleanup_session_for_tab(idx);
-                                self.tabs.close_tab(idx);
-                                self.dialog_state = DialogState::None;
-                            }
-                            if ui.button("  Cancel  ").clicked() {
-                                self.dialog_state = DialogState::None;
-                            }
-                        });
-                    });
-
-                if !open {
-                    self.dialog_state = DialogState::None;
-                }
-            }
-            DialogState::None => {}
-        }
-
-        // Settings dialog
+        self.show_confirm_close_dialog(ctx);
         self.show_settings_dialog(ctx);
 
-        // About dialog
         if self.about_open {
             self.load_about_logo(ctx);
         }
         self.show_about_dialog(ctx);
 
-        // Find/Replace dialog
         if let Some(action) = self.find_replace.show(ctx) {
             self.handle_search_action(action);
         }
 
-        // Go to Line dialog
         let total_lines = self.tabs.active_doc().buffer.len_lines();
         if let Some(target) = self.go_to_line.show(ctx, total_lines) {
             let doc = self.tabs.active_doc_mut();
             doc.cursor.clear_selection();
             doc.cursor
                 .move_to(Position::new(target.line, target.column), &doc.buffer);
+        }
+    }
+
+    /// Shows the confirm-close dialog when a tab has unsaved changes.
+    fn show_confirm_close_dialog(&mut self, ctx: &egui::Context) {
+        let DialogState::ConfirmClose(idx) = self.dialog_state else {
+            return;
+        };
+
+        let mut open = true;
+        let title = if idx < self.tabs.tab_count() {
+            self.tabs.documents[idx].title.clone()
+        } else {
+            "Document".to_string()
+        };
+
+        egui::Window::new("Unsaved Changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(format!("'{title}' has unsaved changes. Close anyway?"));
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.button("  Save & Close  ").clicked() {
+                        if idx < self.tabs.tab_count() {
+                            let doc = &mut self.tabs.documents[idx];
+                            if doc.file_path.is_some() {
+                                let _ = doc.save();
+                            }
+                            self.cleanup_session_for_tab(idx);
+                            self.tabs.close_tab(idx);
+                        }
+                        self.dialog_state = DialogState::None;
+                    }
+                    if ui.button("  Discard  ").clicked() {
+                        self.cleanup_session_for_tab(idx);
+                        self.tabs.close_tab(idx);
+                        self.dialog_state = DialogState::None;
+                    }
+                    if ui.button("  Cancel  ").clicked() {
+                        self.dialog_state = DialogState::None;
+                    }
+                });
+            });
+
+        if !open {
+            self.dialog_state = DialogState::None;
         }
     }
 }

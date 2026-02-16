@@ -112,21 +112,50 @@ fn format_saved_time(dt: &chrono::DateTime<chrono::Local>) -> String {
     }
 }
 
+/// Snapshot of document state captured before rendering the status bar.
+///
+/// This avoids borrowing `self` while rendering individual sections.
+struct StatusBarData {
+    cursor_line: usize,
+    cursor_col: usize,
+    encoding: rust_pad_core::encoding::TextEncoding,
+    line_ending: rust_pad_core::encoding::LineEnding,
+    indent_style: rust_pad_core::indent::IndentStyle,
+    line_count: usize,
+    char_count: usize,
+    byte_size: usize,
+    last_saved: Option<chrono::DateTime<chrono::Local>>,
+    live_monitoring: bool,
+    auto_save: bool,
+    file_path_display: Option<String>,
+    match_info: Option<(usize, usize)>,
+    bookmark_count: usize,
+    zoom_level: f32,
+}
+
 impl App {
     /// Renders the status bar at the bottom of the application window.
     pub(crate) fn show_status_bar(&mut self, ui: &mut egui::Ui) {
+        let data = self.collect_status_bar_data();
+
+        ui.horizontal(|ui| {
+            Self::status_bar_cursor_info(ui, &data);
+            ui.separator();
+            self.status_bar_encoding_selector(ui, &data);
+            ui.separator();
+            self.status_bar_line_ending_selector(ui, &data);
+            ui.separator();
+            self.status_bar_indent_selector(ui, &data);
+            ui.separator();
+            Self::status_bar_document_stats(ui, &data);
+            Self::status_bar_indicators(ui, &data);
+            Self::status_bar_right_section(ui, &data);
+        });
+    }
+
+    /// Collects all the data needed by the status bar into a snapshot struct.
+    fn collect_status_bar_data(&self) -> StatusBarData {
         let doc = self.tabs.active_doc();
-        let pos = doc.cursor.position;
-        let encoding = doc.encoding;
-        let line_ending = doc.line_ending;
-        let indent_style = doc.indent_style;
-        let line_count = doc.buffer.len_lines();
-        let char_count = doc.buffer.len_chars();
-        let byte_size = doc.buffer.len_bytes();
-        let last_saved = doc.last_saved_at;
-        let live_monitoring = doc.live_monitoring;
-        let auto_save = self.auto_save_enabled;
-        let file_path_display = doc.file_path.as_ref().map(|p| p.display().to_string());
         let match_info = if !self.find_replace.engine.matches.is_empty() {
             let current = self
                 .find_replace
@@ -139,144 +168,177 @@ impl App {
         } else {
             None
         };
-        let bookmark_count = self.bookmarks.count();
 
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::Label::new(format!("Ln {}, Col {}", pos.line + 1, pos.col + 1))
-                    .selectable(false),
-            );
-            ui.separator();
+        StatusBarData {
+            cursor_line: doc.cursor.position.line,
+            cursor_col: doc.cursor.position.col,
+            encoding: doc.encoding,
+            line_ending: doc.line_ending,
+            indent_style: doc.indent_style,
+            line_count: doc.buffer.len_lines(),
+            char_count: doc.buffer.len_chars(),
+            byte_size: doc.buffer.len_bytes(),
+            last_saved: doc.last_saved_at,
+            live_monitoring: doc.live_monitoring,
+            auto_save: self.auto_save_enabled,
+            file_path_display: doc.file_path.as_ref().map(|p| p.display().to_string()),
+            match_info,
+            bookmark_count: self.bookmarks.count(),
+            zoom_level: self.zoom_level,
+        }
+    }
 
-            // Clickable encoding selector
-            let enc_response = ui.add(
-                egui::Label::new(format!("{encoding}"))
-                    .selectable(false)
-                    .sense(egui::Sense::click()),
-            );
-            egui::Popup::from_toggle_button_response(&enc_response).show(|ui| {
-                use rust_pad_core::encoding::TextEncoding;
-                for enc in [
-                    TextEncoding::Utf8,
-                    TextEncoding::Utf8Bom,
-                    TextEncoding::Utf16Le,
-                    TextEncoding::Utf16Be,
-                    TextEncoding::Ascii,
-                ] {
-                    if ui.radio(encoding == enc, format!("{enc}")).clicked() {
-                        self.tabs.active_doc_mut().encoding = enc;
-                        self.tabs.active_doc_mut().modified = true;
-                        ui.close();
-                    }
+    /// Renders the cursor position (line and column).
+    fn status_bar_cursor_info(ui: &mut egui::Ui, data: &StatusBarData) {
+        ui.add(
+            egui::Label::new(format!(
+                "Ln {}, Col {}",
+                data.cursor_line + 1,
+                data.cursor_col + 1
+            ))
+            .selectable(false),
+        );
+    }
+
+    /// Renders the clickable encoding selector popup.
+    fn status_bar_encoding_selector(&mut self, ui: &mut egui::Ui, data: &StatusBarData) {
+        let enc_response = ui.add(
+            egui::Label::new(format!("{}", data.encoding))
+                .selectable(false)
+                .sense(egui::Sense::click()),
+        );
+        egui::Popup::from_toggle_button_response(&enc_response).show(|ui| {
+            use rust_pad_core::encoding::TextEncoding;
+            for enc in [
+                TextEncoding::Utf8,
+                TextEncoding::Utf8Bom,
+                TextEncoding::Utf16Le,
+                TextEncoding::Utf16Be,
+                TextEncoding::Ascii,
+            ] {
+                if ui.radio(data.encoding == enc, format!("{enc}")).clicked() {
+                    self.tabs.active_doc_mut().encoding = enc;
+                    self.tabs.active_doc_mut().modified = true;
+                    ui.close();
                 }
-            });
+            }
+        });
+    }
 
-            ui.separator();
-
-            // Clickable line ending selector
-            let eol_response = ui.add(
-                egui::Label::new(format!("{line_ending}"))
-                    .selectable(false)
-                    .sense(egui::Sense::click()),
-            );
-            egui::Popup::from_toggle_button_response(&eol_response).show(|ui| {
-                use rust_pad_core::encoding::LineEnding;
-                for eol in [LineEnding::Lf, LineEnding::CrLf, LineEnding::Cr] {
-                    if ui.radio(line_ending == eol, format!("{eol}")).clicked() {
-                        self.tabs.active_doc_mut().line_ending = eol;
-                        self.tabs.active_doc_mut().modified = true;
-                        ui.close();
-                    }
+    /// Renders the clickable line ending selector popup.
+    fn status_bar_line_ending_selector(&mut self, ui: &mut egui::Ui, data: &StatusBarData) {
+        let eol_response = ui.add(
+            egui::Label::new(format!("{}", data.line_ending))
+                .selectable(false)
+                .sense(egui::Sense::click()),
+        );
+        egui::Popup::from_toggle_button_response(&eol_response).show(|ui| {
+            use rust_pad_core::encoding::LineEnding;
+            for eol in [LineEnding::Lf, LineEnding::CrLf, LineEnding::Cr] {
+                if ui
+                    .radio(data.line_ending == eol, format!("{eol}"))
+                    .clicked()
+                {
+                    self.tabs.active_doc_mut().line_ending = eol;
+                    self.tabs.active_doc_mut().modified = true;
+                    ui.close();
                 }
-            });
+            }
+        });
+    }
 
-            ui.separator();
-
-            // Clickable indent style selector
-            let indent_response = ui.add(
-                egui::Label::new(format!("{indent_style}"))
-                    .selectable(false)
-                    .sense(egui::Sense::click()),
-            );
-            egui::Popup::from_toggle_button_response(&indent_response).show(|ui| {
-                use rust_pad_core::indent::IndentStyle;
-                for style in [
-                    IndentStyle::Spaces(2),
-                    IndentStyle::Spaces(4),
-                    IndentStyle::Spaces(8),
-                    IndentStyle::Tabs,
-                ] {
-                    if ui
-                        .radio(indent_style == style, format!("{style}"))
-                        .clicked()
-                    {
-                        self.tabs.active_doc_mut().indent_style = style;
-                        ui.close();
-                    }
+    /// Renders the clickable indent style selector popup.
+    fn status_bar_indent_selector(&mut self, ui: &mut egui::Ui, data: &StatusBarData) {
+        let indent_response = ui.add(
+            egui::Label::new(format!("{}", data.indent_style))
+                .selectable(false)
+                .sense(egui::Sense::click()),
+        );
+        egui::Popup::from_toggle_button_response(&indent_response).show(|ui| {
+            use rust_pad_core::indent::IndentStyle;
+            for style in [
+                IndentStyle::Spaces(2),
+                IndentStyle::Spaces(4),
+                IndentStyle::Spaces(8),
+                IndentStyle::Tabs,
+            ] {
+                if ui
+                    .radio(data.indent_style == style, format!("{style}"))
+                    .clicked()
+                {
+                    self.tabs.active_doc_mut().indent_style = style;
+                    ui.close();
                 }
-            });
+            }
+        });
+    }
 
+    /// Renders document statistics: line count, char count, file size, and zoom level.
+    fn status_bar_document_stats(ui: &mut egui::Ui, data: &StatusBarData) {
+        ui.add(egui::Label::new(format!("{} lines", data.line_count)).selectable(false));
+        ui.separator();
+        ui.add(
+            egui::Label::new(format!("{} chars", format_char_count(data.char_count)))
+                .selectable(false),
+        );
+        ui.separator();
+        ui.add(egui::Label::new(format_file_size(data.byte_size)).selectable(false));
+        ui.separator();
+        ui.add(
+            egui::Label::new(format!("Zoom: {:.0}%", data.zoom_level * 100.0)).selectable(false),
+        );
+    }
+
+    /// Renders conditional indicators: match count, bookmarks, live monitoring, auto-save.
+    fn status_bar_indicators(ui: &mut egui::Ui, data: &StatusBarData) {
+        if let Some((current, total)) = data.match_info {
             ui.separator();
-            ui.add(egui::Label::new(format!("{line_count} lines")).selectable(false));
+            ui.add(egui::Label::new(format!("Match {current}/{total}")).selectable(false));
+        }
+
+        if data.bookmark_count > 0 {
             ui.separator();
             ui.add(
-                egui::Label::new(format!("{} chars", format_char_count(char_count)))
-                    .selectable(false),
+                egui::Label::new(format!("Bookmarks: {}", data.bookmark_count)).selectable(false),
             );
+        }
+
+        if data.live_monitoring {
             ui.separator();
-            ui.add(egui::Label::new(format_file_size(byte_size)).selectable(false));
+            ui.add(egui::Label::new("LIVE").selectable(false));
+        }
+
+        if data.auto_save {
             ui.separator();
             ui.add(
-                egui::Label::new(format!("Zoom: {:.0}%", self.zoom_level * 100.0))
-                    .selectable(false),
+                egui::Label::new(RichText::new("Auto-Save").color(Color32::GRAY)).selectable(false),
             );
+        }
+    }
 
-            if let Some((current, total)) = match_info {
-                ui.separator();
-                ui.add(egui::Label::new(format!("Match {current}/{total}")).selectable(false));
-            }
-
-            if bookmark_count > 0 {
-                ui.separator();
-                ui.add(egui::Label::new(format!("Bookmarks: {bookmark_count}")).selectable(false));
-            }
-
-            if live_monitoring {
-                ui.separator();
-                ui.add(egui::Label::new("LIVE").selectable(false));
-            }
-
-            if auto_save {
-                ui.separator();
+    /// Renders the right-aligned section: last saved time and file path.
+    fn status_bar_right_section(ui: &mut egui::Ui, data: &StatusBarData) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(ref path_str) = data.file_path_display {
                 ui.add(
-                    egui::Label::new(RichText::new("Auto-Save").color(Color32::GRAY))
+                    egui::Label::new(RichText::new(path_str).small().color(Color32::GRAY))
                         .selectable(false),
                 );
             }
 
-            // Right-aligned section: last saved time and file path
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(ref path_str) = file_path_display {
-                    ui.add(
-                        egui::Label::new(RichText::new(path_str).small().color(Color32::GRAY))
-                            .selectable(false),
-                    );
+            if let Some(saved_at) = data.last_saved {
+                if data.file_path_display.is_some() {
+                    ui.separator();
                 }
-
-                if let Some(saved_at) = last_saved {
-                    if file_path_display.is_some() {
-                        ui.separator();
-                    }
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("Saved: {}", format_saved_time(&saved_at)))
-                                .small()
-                                .color(Color32::GRAY),
-                        )
-                        .selectable(false),
-                    );
-                }
-            });
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Saved: {}", format_saved_time(&saved_at)))
+                            .small()
+                            .color(Color32::GRAY),
+                    )
+                    .selectable(false),
+                );
+            }
         });
     }
 }
@@ -285,7 +347,7 @@ impl App {
 mod tests {
     use super::*;
 
-    // ── format_file_size ────────────────────────────────────────────
+    // -- format_file_size ----
 
     #[test]
     fn test_format_file_size_zero() {
@@ -330,7 +392,7 @@ mod tests {
         assert_eq!(format_file_size(1023), "1023 B");
     }
 
-    // ── format_char_count ───────────────────────────────────────────
+    // -- format_char_count ---
 
     #[test]
     fn test_format_char_count_small() {
@@ -352,7 +414,7 @@ mod tests {
         assert_eq!(format_char_count(2_500_000), "~2.5M");
     }
 
-    // ── format_saved_time ───────────────────────────────────────────
+    // -- format_saved_time ---
 
     #[test]
     fn test_format_saved_time_returns_non_empty() {
@@ -374,7 +436,7 @@ mod tests {
         );
     }
 
-    // ── system_uses_24h ─────────────────────────────────────────────
+    // -- system_uses_24h -----
 
     #[test]
     fn test_system_uses_24h_returns_bool() {

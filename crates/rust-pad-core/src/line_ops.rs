@@ -76,6 +76,32 @@ fn write_lines_back(
     Ok(())
 }
 
+/// Compares two strings using case-sensitive or case-insensitive ordering.
+fn compare_strings(a: &str, b: &str, case_sensitive: bool) -> std::cmp::Ordering {
+    if case_sensitive {
+        a.cmp(b)
+    } else {
+        a.to_lowercase().cmp(&b.to_lowercase())
+    }
+}
+
+/// Compares two lines according to the given sort options.
+fn compare_lines(a: &str, b: &str, options: &SortOptions) -> std::cmp::Ordering {
+    let base = if options.numeric {
+        match (a.trim().parse::<f64>().ok(), b.trim().parse::<f64>().ok()) {
+            (Some(an), Some(bn)) => an.partial_cmp(&bn).unwrap_or(std::cmp::Ordering::Equal),
+            _ => compare_strings(a, b, options.case_sensitive),
+        }
+    } else {
+        compare_strings(a, b, options.case_sensitive)
+    };
+
+    match options.order {
+        SortOrder::Ascending => base,
+        SortOrder::Descending => base.reverse(),
+    }
+}
+
 /// Sorts lines in the given range.
 ///
 /// # Errors
@@ -97,32 +123,7 @@ pub fn sort_lines(
     let mut lines = read_lines_trimmed(buffer, start_line, end_line)
         .context("failed to read lines for sorting")?;
 
-    lines.sort_by(|a, b| {
-        let cmp = if options.numeric {
-            // Try numeric comparison first, fall back to string
-            let a_num: Option<f64> = a.trim().parse().ok();
-            let b_num: Option<f64> = b.trim().parse().ok();
-            match (a_num, b_num) {
-                (Some(an), Some(bn)) => an.partial_cmp(&bn).unwrap_or(std::cmp::Ordering::Equal),
-                _ => {
-                    if options.case_sensitive {
-                        a.cmp(b)
-                    } else {
-                        a.to_lowercase().cmp(&b.to_lowercase())
-                    }
-                }
-            }
-        } else if options.case_sensitive {
-            a.cmp(b)
-        } else {
-            a.to_lowercase().cmp(&b.to_lowercase())
-        };
-
-        match options.order {
-            SortOrder::Ascending => cmp,
-            SortOrder::Descending => cmp.reverse(),
-        }
-    });
+    lines.sort_by(|a, b| compare_lines(a, b, options));
 
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     write_lines_back(buffer, start_line, end_line, &refs)?;
@@ -314,31 +315,30 @@ pub fn move_line_down(buffer: &mut TextBuffer, line_idx: usize) -> Result<bool> 
     Ok(true)
 }
 
+/// Converts text to title case (capitalize first letter of each word).
+fn to_title_case(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut capitalize_next = true;
+    for ch in text.chars() {
+        if ch.is_whitespace() || ch == '-' || ch == '_' {
+            capitalize_next = true;
+            result.push(ch);
+        } else if capitalize_next {
+            result.extend(ch.to_uppercase());
+            capitalize_next = false;
+        } else {
+            result.extend(ch.to_lowercase());
+        }
+    }
+    result
+}
+
 /// Converts the case of text.
 pub fn convert_case(text: &str, conversion: CaseConversion) -> String {
     match conversion {
         CaseConversion::Upper => text.to_uppercase(),
         CaseConversion::Lower => text.to_lowercase(),
-        CaseConversion::TitleCase => {
-            let mut result = String::with_capacity(text.len());
-            let mut capitalize_next = true;
-            for ch in text.chars() {
-                if ch.is_whitespace() || ch == '-' || ch == '_' {
-                    capitalize_next = true;
-                    result.push(ch);
-                } else if capitalize_next {
-                    for upper in ch.to_uppercase() {
-                        result.push(upper);
-                    }
-                    capitalize_next = false;
-                } else {
-                    for lower in ch.to_lowercase() {
-                        result.push(lower);
-                    }
-                }
-            }
-            result
-        }
+        CaseConversion::TitleCase => to_title_case(text),
     }
 }
 

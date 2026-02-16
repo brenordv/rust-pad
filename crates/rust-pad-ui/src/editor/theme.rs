@@ -43,30 +43,9 @@ impl Default for EditorTheme {
 }
 
 impl EditorTheme {
-    /// Dark theme preset.
+    /// Dark theme preset (uses `EditorColors::default()`).
     pub fn dark() -> Self {
-        Self {
-            font_size: 14.0,
-            font_id: FontId::monospace(14.0),
-            bg_color: Color32::from_rgb(30, 30, 30),
-            text_color: Color32::from_rgb(212, 212, 212),
-            cursor_color: Color32::from_rgb(255, 255, 255),
-            selection_color: Color32::from_rgba_premultiplied(50, 100, 200, 100),
-            line_number_color: Color32::from_rgb(120, 120, 120),
-            line_number_bg: Color32::from_rgb(37, 37, 37),
-            gutter_width: 50.0,
-            current_line_highlight: Color32::from_rgb(45, 45, 45),
-            modified_line_color: Color32::from_rgb(230, 150, 30),
-            saved_line_color: Color32::from_rgb(80, 180, 80),
-            show_change_tracking: false,
-            gutter_separator_color: Color32::from_rgb(60, 60, 60),
-            scrollbar_track_color: Color32::from_rgb(35, 35, 35),
-            scrollbar_thumb_idle: Color32::from_rgb(80, 80, 80),
-            scrollbar_thumb_hover: Color32::from_rgb(110, 110, 110),
-            scrollbar_thumb_active: Color32::from_rgb(140, 140, 140),
-            occurrence_highlight_color: Color32::from_rgba_premultiplied(100, 100, 50, 80),
-            special_char_color: Color32::from_rgba_premultiplied(100, 100, 100, 180),
-        }
+        Self::from_config(&EditorColors::default(), 14.0)
     }
 
     /// Builds an `EditorTheme` from config colors and font size.
@@ -95,30 +74,9 @@ impl EditorTheme {
         }
     }
 
-    /// Light theme preset.
+    /// Light theme preset (uses config-crate `builtin_light()` colors).
     pub fn light() -> Self {
-        Self {
-            font_size: 14.0,
-            font_id: FontId::monospace(14.0),
-            bg_color: Color32::from_rgb(255, 255, 255),
-            text_color: Color32::from_rgb(30, 30, 30),
-            cursor_color: Color32::from_rgb(0, 0, 0),
-            selection_color: Color32::from_rgba_premultiplied(100, 150, 230, 100),
-            line_number_color: Color32::from_rgb(130, 130, 130),
-            line_number_bg: Color32::from_rgb(240, 240, 240),
-            gutter_width: 50.0,
-            current_line_highlight: Color32::from_rgb(232, 242, 254),
-            modified_line_color: Color32::from_rgb(200, 120, 0),
-            saved_line_color: Color32::from_rgb(50, 160, 50),
-            show_change_tracking: false,
-            gutter_separator_color: Color32::from_rgb(200, 200, 200),
-            scrollbar_track_color: Color32::from_rgb(235, 235, 235),
-            scrollbar_thumb_idle: Color32::from_rgb(190, 190, 190),
-            scrollbar_thumb_hover: Color32::from_rgb(160, 160, 160),
-            scrollbar_thumb_active: Color32::from_rgb(130, 130, 130),
-            occurrence_highlight_color: Color32::from_rgba_premultiplied(255, 210, 80, 80),
-            special_char_color: Color32::from_rgba_premultiplied(170, 170, 170, 180),
-        }
+        Self::from_config(&rust_pad_config::theme::builtin_light().editor, 14.0)
     }
 }
 

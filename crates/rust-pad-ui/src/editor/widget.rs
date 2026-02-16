@@ -60,6 +60,23 @@ struct LineSegmentInfo<'a> {
     cache_line_idx: Option<usize>,
 }
 
+struct FrameLayout {
+    font_id: FontId,
+    effective_font_size: f32,
+    line_height: f32,
+    char_width: f32,
+    gutter_width: f32,
+    text_area: Rect,
+    gutter_rect: Rect,
+    vscroll_width: f32,
+    hscroll_height: f32,
+    needs_vscroll: bool,
+    needs_hscroll: bool,
+    content_width: f32,
+    visible_lines: usize,
+    max_scroll_y: f32,
+}
+
 /// The custom editor widget that renders a Document.
 pub struct EditorWidget<'a> {
     pub doc: &'a mut Document,
@@ -118,31 +135,91 @@ impl<'a> EditorWidget<'a> {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let rect = response.rect;
+        let version_before_input = self.doc.content_version;
 
+        let mut wrap_map = self.build_initial_wrap_map(rect, ui);
+        let layout = self.compute_layout(ui, rect, wrap_map.as_ref());
+
+        self.paint_background(&painter, rect, &layout);
+        self.handle_scroll_input(ui, &response, &layout);
+
+        let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+        let (vscroll_track, hscroll_track) = Self::compute_scrollbar_tracks(rect, &layout);
+        self.detect_scrollbar_drag(&response, vscroll_track, hscroll_track);
+
+        let pointer_on_scrollbar =
+            self.is_pointer_on_scrollbar(pointer_pos, vscroll_track, hscroll_track);
+
+        let cursor_pos_before = self.doc.cursor.position;
+        self.handle_mouse_input(
+            ui,
+            &response,
+            &layout,
+            wrap_map.as_ref(),
+            pointer_on_scrollbar,
+        );
+        self.handle_focus_and_keyboard(ui, &response);
+        self.follow_cursor(cursor_pos_before, &layout, wrap_map.as_ref());
+
+        // Rebuild wrap map after input only if the buffer actually changed
+        if self.word_wrap && self.doc.content_version != version_before_input {
+            wrap_map = self.rebuild_wrap_map(rect, &layout);
+        }
+        let total_lines = self.doc.buffer.len_lines();
+        let total_visual_lines = wrap_map
+            .as_ref()
+            .map_or(total_lines, |w| w.total_visual_lines);
+
+        self.render_content(
+            ui,
+            &painter,
+            &response,
+            &layout,
+            wrap_map.as_ref(),
+            total_lines,
+            total_visual_lines,
+        );
+        self.render_scrollbars(
+            ui,
+            &painter,
+            &response,
+            rect,
+            &layout,
+            total_visual_lines,
+            pointer_pos,
+        );
+        self.clamp_scroll_values(&layout, total_visual_lines);
+
+        response
+    }
+
+    fn build_initial_wrap_map(&self, rect: Rect, ui: &Ui) -> Option<WrapMap> {
+        if !self.word_wrap {
+            return None;
+        }
+        let font_id = FontId::monospace(self.theme.font_size * self.zoom_level);
+        let gutter_width = self.compute_gutter_width(ui, &font_id);
+        let char_width = self.measure_char_width(ui, &font_id);
+        let exact_text_width = rect.width() - gutter_width - SCROLLBAR_WIDTH;
+        let chars_per_line = (exact_text_width / char_width).floor().max(1.0) as usize;
+        Some(WrapMap::build(self.doc, chars_per_line))
+    }
+
+    fn rebuild_wrap_map(&self, rect: Rect, layout: &FrameLayout) -> Option<WrapMap> {
+        let exact_text_width = rect.width() - layout.gutter_width - layout.vscroll_width;
+        let chars_per_line = (exact_text_width / layout.char_width).floor().max(1.0) as usize;
+        Some(WrapMap::build(self.doc, chars_per_line))
+    }
+
+    fn compute_layout(&mut self, ui: &Ui, rect: Rect, wrap_map: Option<&WrapMap>) -> FrameLayout {
         let effective_font_size = self.theme.font_size * self.zoom_level;
         let font_id = FontId::monospace(effective_font_size);
         let line_height = effective_font_size * 1.4;
         let char_width = self.measure_char_width(ui, &font_id);
-
         let gutter_width = self.compute_gutter_width(ui, &font_id);
         let total_lines = self.doc.buffer.len_lines();
-        let version_before_input = self.doc.content_version;
 
-        // In wrap mode, assume vertical scrollbar is present for the initial build
-        // to avoid building WrapMap twice. The error from an absent scrollbar is
-        // only SCROLLBAR_WIDTH (14px) worth of wrap difference, which is acceptable.
-        let wrap_map = if self.word_wrap {
-            let exact_text_width = rect.width() - gutter_width - SCROLLBAR_WIDTH;
-            let chars_per_line = (exact_text_width / char_width).floor().max(1.0) as usize;
-            Some(WrapMap::build(self.doc, chars_per_line))
-        } else {
-            None
-        };
-
-        // Content dimensions depend on wrap mode.
-        let total_visual_lines = wrap_map
-            .as_ref()
-            .map_or(total_lines, |w| w.total_visual_lines);
+        let total_visual_lines = wrap_map.map_or(total_lines, |w| w.total_visual_lines);
         let max_line_chars = if self.word_wrap {
             0
         } else {
@@ -151,25 +228,17 @@ impl<'a> EditorWidget<'a> {
         let content_width = max_line_chars as f32 * char_width;
         let content_height = total_visual_lines as f32 * line_height;
 
-        // Determine which scrollbars are needed
-        let inner_width = rect.width() - gutter_width;
-        let inner_height = rect.height();
-        let needs_vscroll = content_height > inner_height;
-        let needs_hscroll = if self.word_wrap {
-            false
-        } else {
-            content_width > (inner_width - if needs_vscroll { SCROLLBAR_WIDTH } else { 0.0 })
-        };
-        let needs_vscroll = if needs_hscroll {
-            content_height > (inner_height - SCROLLBAR_WIDTH)
-        } else {
-            needs_vscroll
-        };
+        let (needs_vscroll, needs_hscroll) = Self::determine_scrollbar_need(
+            rect,
+            gutter_width,
+            content_width,
+            content_height,
+            self.word_wrap,
+        );
 
         let vscroll_width = if needs_vscroll { SCROLLBAR_WIDTH } else { 0.0 };
         let hscroll_height = if needs_hscroll { SCROLLBAR_WIDTH } else { 0.0 };
 
-        // Text area shrinks to accommodate scrollbars and left padding
         let text_area = Rect::from_min_max(
             Pos2::new(rect.min.x + gutter_width + TEXT_LEFT_PADDING, rect.min.y),
             Pos2::new(rect.max.x - vscroll_width, rect.max.y - hscroll_height),
@@ -178,66 +247,117 @@ impl<'a> EditorWidget<'a> {
             rect.min,
             Pos2::new(rect.min.x + gutter_width, rect.max.y - hscroll_height),
         );
-
-        // Background
-        painter.rect_filled(rect, 0.0, self.theme.bg_color);
-        if self.show_line_numbers {
-            painter.rect_filled(gutter_rect, 0.0, self.theme.line_number_bg);
-
-            // Gutter separator line
-            painter.line_segment(
-                [
-                    Pos2::new(gutter_rect.max.x, rect.min.y),
-                    Pos2::new(gutter_rect.max.x, rect.max.y - hscroll_height),
-                ],
-                Stroke::new(1.0, self.theme.gutter_separator_color),
-            );
-        }
-
-        // Handle mouse-wheel scrolling
         let visible_lines = (text_area.height() / line_height).ceil() as usize;
-        let max_scroll_y = (total_visual_lines.saturating_sub(1)) as f32;
+        let max_scroll_y = total_visual_lines.saturating_sub(1) as f32;
 
-        if response.hovered() {
-            // Ctrl+scroll → zoom (egui converts Ctrl+scroll into zoom_delta,
-            // removing it from smooth_scroll_delta)
-            let zoom_delta = ui.input(|i| i.zoom_delta());
-            if zoom_delta != 1.0 {
-                self.zoom_request = zoom_delta;
-            }
-
-            let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
-            if scroll_delta.y != 0.0 {
-                self.doc.scroll_y -= scroll_delta.y / line_height;
-                self.doc.scroll_y = self.doc.scroll_y.clamp(0.0, max_scroll_y);
-            }
-            if !self.word_wrap && scroll_delta.x != 0.0 {
-                let max_scroll_x = (content_width - text_area.width()).max(0.0);
-                self.doc.scroll_x -= scroll_delta.x;
-                self.doc.scroll_x = self.doc.scroll_x.clamp(0.0, max_scroll_x);
-            }
+        FrameLayout {
+            font_id,
+            effective_font_size,
+            line_height,
+            char_width,
+            gutter_width,
+            text_area,
+            gutter_rect,
+            vscroll_width,
+            hscroll_height,
+            needs_vscroll,
+            needs_hscroll,
+            content_width,
+            visible_lines,
+            max_scroll_y,
         }
+    }
 
-        // Compute scrollbar track rects so we can detect interactions early.
-        let pointer_pos = ui.input(|i| i.pointer.interact_pos());
-        let vscroll_track = if needs_vscroll {
+    fn determine_scrollbar_need(
+        rect: Rect,
+        gutter_width: f32,
+        content_width: f32,
+        content_height: f32,
+        word_wrap: bool,
+    ) -> (bool, bool) {
+        let inner_width = rect.width() - gutter_width;
+        let inner_height = rect.height();
+        let tentative_vscroll = content_height > inner_height;
+        let needs_hscroll = if word_wrap {
+            false
+        } else {
+            let available = inner_width
+                - if tentative_vscroll {
+                    SCROLLBAR_WIDTH
+                } else {
+                    0.0
+                };
+            content_width > available
+        };
+        let needs_vscroll = if needs_hscroll {
+            content_height > (inner_height - SCROLLBAR_WIDTH)
+        } else {
+            tentative_vscroll
+        };
+        (needs_vscroll, needs_hscroll)
+    }
+
+    fn paint_background(&self, painter: &egui::Painter, rect: Rect, layout: &FrameLayout) {
+        painter.rect_filled(rect, 0.0, self.theme.bg_color);
+        if !self.show_line_numbers {
+            return;
+        }
+        painter.rect_filled(layout.gutter_rect, 0.0, self.theme.line_number_bg);
+        painter.line_segment(
+            [
+                Pos2::new(layout.gutter_rect.max.x, rect.min.y),
+                Pos2::new(layout.gutter_rect.max.x, rect.max.y - layout.hscroll_height),
+            ],
+            Stroke::new(1.0, self.theme.gutter_separator_color),
+        );
+    }
+
+    fn handle_scroll_input(&mut self, ui: &Ui, response: &Response, layout: &FrameLayout) {
+        if !response.hovered() {
+            return;
+        }
+        let zoom_delta = ui.input(|i| i.zoom_delta());
+        if zoom_delta != 1.0 {
+            self.zoom_request = zoom_delta;
+        }
+        let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
+        if scroll_delta.y != 0.0 {
+            self.doc.scroll_y -= scroll_delta.y / layout.line_height;
+            self.doc.scroll_y = self.doc.scroll_y.clamp(0.0, layout.max_scroll_y);
+        }
+        if !self.word_wrap && scroll_delta.x != 0.0 {
+            let max_scroll_x = (layout.content_width - layout.text_area.width()).max(0.0);
+            self.doc.scroll_x -= scroll_delta.x;
+            self.doc.scroll_x = self.doc.scroll_x.clamp(0.0, max_scroll_x);
+        }
+    }
+
+    fn compute_scrollbar_tracks(rect: Rect, layout: &FrameLayout) -> (Option<Rect>, Option<Rect>) {
+        let vscroll_track = if layout.needs_vscroll {
             Some(Rect::from_min_max(
                 Pos2::new(rect.max.x - SCROLLBAR_WIDTH, rect.min.y),
-                Pos2::new(rect.max.x, rect.max.y - hscroll_height),
+                Pos2::new(rect.max.x, rect.max.y - layout.hscroll_height),
             ))
         } else {
             None
         };
-        let hscroll_track = if needs_hscroll {
+        let hscroll_track = if layout.needs_hscroll {
             Some(Rect::from_min_max(
                 Pos2::new(rect.min.x, rect.max.y - SCROLLBAR_WIDTH),
-                Pos2::new(rect.max.x - vscroll_width, rect.max.y),
+                Pos2::new(rect.max.x - layout.vscroll_width, rect.max.y),
             ))
         } else {
             None
         };
+        (vscroll_track, hscroll_track)
+    }
 
-        // Track scrollbar drag state across frames.
+    fn detect_scrollbar_drag(
+        &mut self,
+        response: &Response,
+        vscroll_track: Option<Rect>,
+        hscroll_track: Option<Rect>,
+    ) {
         if response.drag_started() {
             if let Some(pos) = response.interact_pointer_pos() {
                 if vscroll_track.is_some_and(|r| r.contains(pos)) {
@@ -252,80 +372,104 @@ impl<'a> EditorWidget<'a> {
         if response.drag_stopped() {
             self.doc.scrollbar_drag = ScrollbarDrag::None;
         }
+    }
 
-        let pointer_on_scrollbar = self.doc.scrollbar_drag != ScrollbarDrag::None
+    fn is_pointer_on_scrollbar(
+        &self,
+        pointer_pos: Option<Pos2>,
+        vscroll_track: Option<Rect>,
+        hscroll_track: Option<Rect>,
+    ) -> bool {
+        self.doc.scrollbar_drag != ScrollbarDrag::None
             || pointer_pos.is_some_and(|p| {
                 vscroll_track.is_some_and(|r| r.contains(p))
                     || hscroll_track.is_some_and(|r| r.contains(p))
-            });
+            })
+    }
 
-        // Save cursor position before processing input to detect changes
-        let cursor_pos_before = self.doc.cursor.position;
-
-        // ── Process ALL input BEFORE rendering ──────────────────
-        // This ensures the cursor and buffer are up-to-date when we render,
-        // preventing a one-frame lag where the cursor appears at its old position.
-
-        // Handle mouse clicks
+    #[allow(clippy::too_many_arguments)]
+    fn handle_mouse_input(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        layout: &FrameLayout,
+        wrap_map: Option<&WrapMap>,
+        pointer_on_scrollbar: bool,
+    ) {
         if !pointer_on_scrollbar && (response.clicked() || response.drag_started()) {
-            self.doc.cursor_activity_time = ui.input(|i| i.time);
-            if let Some(pos) = response.interact_pointer_pos() {
-                if text_area.contains(pos) || gutter_rect.contains(pos) {
-                    self.doc.clear_secondary_cursors();
-                    if pos.x >= text_area.min.x {
-                        let click_pos = self.screen_to_position(
-                            pos,
-                            text_area,
-                            line_height,
-                            char_width,
-                            wrap_map.as_ref(),
-                        );
-                        if response.drag_started() && ui.input(|i| i.modifiers.shift) {
-                            self.doc.cursor.start_selection();
-                        } else if response.clicked() {
-                            self.doc.cursor.clear_selection();
-                        }
-                        self.doc.cursor.move_to(click_pos, &self.doc.buffer);
-                    }
-                }
-            }
+            self.handle_mouse_click(ui, response, layout, wrap_map);
             response.request_focus();
         }
-
-        // Handle drag for selection
         if !pointer_on_scrollbar && response.dragged() {
-            self.doc.cursor_activity_time = ui.input(|i| i.time);
-            if let Some(pos) = response.interact_pointer_pos() {
-                if pos.x >= text_area.min.x && pos.x <= text_area.max.x {
-                    self.doc.cursor.start_selection();
-                    let drag_pos = self.screen_to_position(
-                        pos,
-                        text_area,
-                        line_height,
-                        char_width,
-                        wrap_map.as_ref(),
-                    );
-                    self.doc.cursor.move_to(drag_pos, &self.doc.buffer);
-                }
-            }
+            self.handle_mouse_drag(ui, response, layout, wrap_map);
         }
-
-        // Handle double-click to select word
         if response.double_clicked() {
             self.doc.cursor.select_word(&self.doc.buffer);
         }
+    }
 
-        // Auto-focus the editor on first render so it's ready for typing,
-        // but skip when a dialog is open so it doesn't steal focus from
-        // dialog text fields.
+    fn handle_mouse_click(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        layout: &FrameLayout,
+        wrap_map: Option<&WrapMap>,
+    ) {
+        self.doc.cursor_activity_time = ui.input(|i| i.time);
+        let Some(pos) = response.interact_pointer_pos() else {
+            return;
+        };
+        if !layout.text_area.contains(pos) && !layout.gutter_rect.contains(pos) {
+            return;
+        }
+        self.doc.clear_secondary_cursors();
+        if pos.x < layout.text_area.min.x {
+            return;
+        }
+        let click_pos = self.screen_to_position(
+            pos,
+            layout.text_area,
+            layout.line_height,
+            layout.char_width,
+            wrap_map,
+        );
+        if response.drag_started() && ui.input(|i| i.modifiers.shift) {
+            self.doc.cursor.start_selection();
+        } else if response.clicked() {
+            self.doc.cursor.clear_selection();
+        }
+        self.doc.cursor.move_to(click_pos, &self.doc.buffer);
+    }
+
+    fn handle_mouse_drag(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        layout: &FrameLayout,
+        wrap_map: Option<&WrapMap>,
+    ) {
+        self.doc.cursor_activity_time = ui.input(|i| i.time);
+        let Some(pos) = response.interact_pointer_pos() else {
+            return;
+        };
+        if pos.x < layout.text_area.min.x || pos.x > layout.text_area.max.x {
+            return;
+        }
+        self.doc.cursor.start_selection();
+        let drag_pos = self.screen_to_position(
+            pos,
+            layout.text_area,
+            layout.line_height,
+            layout.char_width,
+            wrap_map,
+        );
+        self.doc.cursor.move_to(drag_pos, &self.doc.buffer);
+    }
+
+    fn handle_focus_and_keyboard(&mut self, ui: &mut Ui, response: &Response) {
         if !self.dialog_open && !response.has_focus() && !response.lost_focus() {
             response.request_focus();
         }
-
-        // Handle keyboard input when focused and no dialog is open.
-        // The EventFilter tells egui NOT to consume Tab or arrow keys for
-        // focus navigation — we handle them ourselves for indent/dedent and
-        // cursor movement.
         if !self.dialog_open && response.has_focus() {
             ui.memory_mut(|mem| {
                 mem.set_focus_lock_filter(
@@ -340,46 +484,40 @@ impl<'a> EditorWidget<'a> {
             });
             self.handle_keyboard_input(ui);
         }
+    }
 
-        // Scroll to follow the cursor when it moved (before rendering so
-        // the viewport is correct for this frame).
-        // Also honor the `scroll_to_cursor` flag which is set by operations
-        // that run outside the widget's input loop (e.g. paste, undo/redo
-        // from global shortcuts).
+    fn follow_cursor(
+        &mut self,
+        cursor_pos_before: Position,
+        layout: &FrameLayout,
+        wrap_map: Option<&WrapMap>,
+    ) {
         let cursor_moved =
             self.doc.cursor.position != cursor_pos_before || self.doc.scroll_to_cursor;
         self.doc.scroll_to_cursor = false;
         if cursor_moved {
             self.ensure_cursor_visible(
-                visible_lines,
-                text_area.width(),
-                char_width,
-                wrap_map.as_ref(),
+                layout.visible_lines,
+                layout.text_area.width(),
+                layout.char_width,
+                wrap_map,
             );
         }
+    }
 
-        // ── Render with up-to-date state ────────────────────────
-
-        // Recompute line count after input may have changed the buffer
-        let total_lines = self.doc.buffer.len_lines();
-
-        // Rebuild wrap map after input only if the buffer actually changed
-        let wrap_map = if self.word_wrap && self.doc.content_version != version_before_input {
-            let exact_text_width = rect.width() - gutter_width - vscroll_width;
-            let chars_per_line = (exact_text_width / char_width).floor().max(1.0) as usize;
-            Some(WrapMap::build(self.doc, chars_per_line))
-        } else {
-            wrap_map
-        };
-        let total_visual_lines = wrap_map
-            .as_ref()
-            .map_or(total_lines, |w| w.total_visual_lines);
-
-        // Collect all selection ranges for highlighting (primary + secondary cursors)
+    #[allow(clippy::too_many_arguments)]
+    fn render_content(
+        &mut self,
+        ui: &mut Ui,
+        painter: &egui::Painter,
+        response: &Response,
+        layout: &FrameLayout,
+        wrap_map: Option<&WrapMap>,
+        total_lines: usize,
+        total_visual_lines: usize,
+    ) {
         let all_selection_ranges = self.collect_selection_ranges();
         let cursor_lines = self.collect_cursor_lines();
-
-        // Find occurrences of selected text for highlight-all
         let occurrence_ranges = self
             .doc
             .selected_text()
@@ -387,25 +525,22 @@ impl<'a> EditorWidget<'a> {
             .map(|needle| self.find_occurrence_ranges(&needle, &all_selection_ranges))
             .unwrap_or_default();
 
-        // Validate galley render cache
         {
             let cache = get_render_cache(&mut self.doc.render_cache);
-            cache.validate(self.doc.content_version, effective_font_size);
+            cache.validate(self.doc.content_version, layout.effective_font_size);
         }
 
-        if let Some(ref wm) = wrap_map {
-            // ── Word-wrap rendering path ─────────────────────────
+        if let Some(wm) = wrap_map {
             let first_visual = self.doc.scroll_y as usize;
-            let last_visual = (first_visual + visible_lines + 1).min(total_visual_lines);
-
+            let last_visual = (first_visual + layout.visible_lines + 1).min(total_visual_lines);
             self.render_lines_wrapped(
                 ui,
-                &painter,
-                &font_id,
-                line_height,
-                char_width,
-                &text_area,
-                &gutter_rect,
+                painter,
+                &layout.font_id,
+                layout.line_height,
+                layout.char_width,
+                &layout.text_area,
+                &layout.gutter_rect,
                 first_visual,
                 last_visual,
                 &all_selection_ranges,
@@ -415,28 +550,27 @@ impl<'a> EditorWidget<'a> {
             );
             self.render_cursors(
                 ui,
-                &painter,
-                &response,
-                &text_area,
-                line_height,
-                char_width,
+                painter,
+                response,
+                &layout.text_area,
+                layout.line_height,
+                layout.char_width,
                 first_visual,
                 last_visual,
                 Some(wm),
             );
         } else {
-            // ── Normal (non-wrapped) rendering path ──────────────
             let first_visible_line = self.doc.scroll_y as usize;
-            let last_visible_line = (first_visible_line + visible_lines + 1).min(total_lines);
-
+            let last_visible_line =
+                (first_visible_line + layout.visible_lines + 1).min(total_lines);
             self.render_lines(
                 ui,
-                &painter,
-                &font_id,
-                line_height,
-                char_width,
-                &text_area,
-                &gutter_rect,
+                painter,
+                &layout.font_id,
+                layout.line_height,
+                layout.char_width,
+                &layout.text_area,
+                &layout.gutter_rect,
                 first_visible_line,
                 last_visible_line,
                 &all_selection_ranges,
@@ -445,69 +579,81 @@ impl<'a> EditorWidget<'a> {
             );
             self.render_cursors(
                 ui,
-                &painter,
-                &response,
-                &text_area,
-                line_height,
-                char_width,
+                painter,
+                response,
+                &layout.text_area,
+                layout.line_height,
+                layout.char_width,
                 first_visible_line,
                 last_visible_line,
                 None,
             );
         }
 
-        // Request continuous repaint for cursor blink
         if response.has_focus() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(500));
         }
+    }
 
-        // Render scrollbars
-        if needs_vscroll {
+    #[allow(clippy::too_many_arguments)]
+    fn render_scrollbars(
+        &mut self,
+        ui: &mut Ui,
+        painter: &egui::Painter,
+        response: &Response,
+        rect: Rect,
+        layout: &FrameLayout,
+        total_visual_lines: usize,
+        pointer_pos: Option<Pos2>,
+    ) {
+        if layout.needs_vscroll {
             self.render_vertical_scrollbar(
                 ui,
-                &painter,
-                &response,
+                painter,
+                response,
                 rect,
-                &text_area,
+                &layout.text_area,
                 total_visual_lines,
-                visible_lines,
-                line_height,
-                hscroll_height,
+                layout.visible_lines,
+                layout.line_height,
+                layout.hscroll_height,
                 pointer_pos,
             );
         }
-        if needs_hscroll {
+        if layout.needs_hscroll {
             self.render_horizontal_scrollbar(
                 ui,
-                &painter,
-                &response,
+                painter,
+                response,
                 rect,
-                &text_area,
-                content_width,
-                vscroll_width,
+                &layout.text_area,
+                layout.content_width,
+                layout.vscroll_width,
                 pointer_pos,
             );
         }
-        if needs_vscroll && needs_hscroll {
+        if layout.needs_vscroll && layout.needs_hscroll {
             let corner = Rect::from_min_max(
-                Pos2::new(rect.max.x - vscroll_width, rect.max.y - hscroll_height),
+                Pos2::new(
+                    rect.max.x - layout.vscroll_width,
+                    rect.max.y - layout.hscroll_height,
+                ),
                 rect.max,
             );
             painter.rect_filled(corner, 0.0, self.theme.scrollbar_track_color);
         }
+    }
 
-        // Clamp scroll values to valid range
-        let max_scroll_y = (total_visual_lines.saturating_sub(1)) as f32;
+    fn clamp_scroll_values(&mut self, layout: &FrameLayout, total_visual_lines: usize) {
+        let max_scroll_y = total_visual_lines.saturating_sub(1) as f32;
         self.doc.scroll_y = self.doc.scroll_y.clamp(0.0, max_scroll_y);
         if self.word_wrap {
             self.doc.scroll_x = 0.0;
         } else {
-            let max_scroll_x = (content_width - text_area.width()).max(0.0);
+            let max_scroll_x = (layout.content_width - layout.text_area.width()).max(0.0);
             self.doc.scroll_x = self.doc.scroll_x.clamp(0.0, max_scroll_x);
         }
-
-        response
     }
 
     /// Computes the maximum line length in characters across all lines.
@@ -1042,8 +1188,47 @@ impl<'a> EditorWidget<'a> {
         }
     }
 
+    /// Returns the visual line and x position for a cursor at the given logical position.
+    fn cursor_screen_coords(
+        &self,
+        cursor_line: usize,
+        cursor_col: usize,
+        text_area: &Rect,
+        char_width: f32,
+        wrap_map: Option<&WrapMap>,
+    ) -> (usize, f32) {
+        let line_content = self
+            .doc
+            .buffer
+            .line(cursor_line)
+            .map(line_content_string)
+            .unwrap_or_default();
+
+        if let Some(wm) = wrap_map {
+            let vl = wm.position_to_visual_line(cursor_line, cursor_col);
+            let vc = wm.position_to_visual_col(cursor_col);
+            let lchars: Vec<char> = line_content.chars().collect();
+            let ws = (vl - wm.logical_to_visual(cursor_line)) * wm.chars_per_visual_line;
+            let we = (ws + wm.chars_per_visual_line).min(lchars.len());
+            let seg: String = lchars[ws..we].iter().collect();
+            let x = text_area.min.x + self.col_to_x_badge_aware(&seg, vc, char_width);
+            (vl, x)
+        } else {
+            let x = text_area.min.x
+                + self.col_to_x_badge_aware(&line_content, cursor_col, char_width)
+                - self.doc.scroll_x;
+            (cursor_line, x)
+        }
+    }
+
+    /// Returns true if the cursor blink state is "on" (visible).
+    fn is_cursor_blink_visible(ui: &Ui, activity_time: f64) -> bool {
+        let time = ui.input(|i| i.time);
+        let since_activity = time - activity_time;
+        since_activity < 0.5 || ((time * 2.0) as u64).is_multiple_of(2)
+    }
+
     /// Renders all cursors (primary + secondary) with blink and activity reset.
-    /// When `wrap_map` is provided, uses wrapped visual coordinates.
     #[allow(clippy::too_many_arguments)]
     fn render_cursors(
         &self,
@@ -1057,86 +1242,54 @@ impl<'a> EditorWidget<'a> {
         last_visible: usize,
         wrap_map: Option<&WrapMap>,
     ) {
-        let cursor_visible = {
-            let time = ui.input(|i| i.time);
-            let since_activity = time - self.doc.cursor_activity_time;
-            if since_activity < 0.5 {
-                true
+        if !response.has_focus()
+            || !Self::is_cursor_blink_visible(ui, self.doc.cursor_activity_time)
+        {
+            return;
+        }
+
+        let text_painter = painter.with_clip_rect(*text_area);
+        let secondary_cursor_color = Color32::from_rgb(200, 200, 200);
+
+        let all_cursors: Vec<(usize, usize, bool)> = std::iter::once((
+            self.doc.cursor.position.line,
+            self.doc.cursor.position.col,
+            true,
+        ))
+        .chain(
+            self.doc
+                .secondary_cursors
+                .iter()
+                .map(|sc| (sc.position.line, sc.position.col, false)),
+        )
+        .collect();
+
+        for (cursor_line, cursor_col, is_primary) in all_cursors {
+            let (visual_line, cursor_x) =
+                self.cursor_screen_coords(cursor_line, cursor_col, text_area, char_width, wrap_map);
+
+            let in_view = visual_line >= first_visible
+                && visual_line < last_visible
+                && cursor_x >= text_area.min.x
+                && cursor_x <= text_area.max.x;
+            if !in_view {
+                continue;
+            }
+
+            let y_offset = (visual_line as f32 - self.doc.scroll_y) * line_height;
+            let cursor_y = text_area.min.y + y_offset;
+            let color = if is_primary {
+                self.theme.cursor_color
             } else {
-                ((time * 2.0) as u64).is_multiple_of(2)
-            }
-        };
-        if cursor_visible && response.has_focus() {
-            // Clip cursor rendering to the text area so cursors scrolled
-            // out of view don't render over the gutter.
-            let text_painter = painter.with_clip_rect(*text_area);
-            let secondary_cursor_color = Color32::from_rgb(200, 200, 200);
-
-            let all_cursors: Vec<(usize, usize, bool)> = std::iter::once((
-                self.doc.cursor.position.line,
-                self.doc.cursor.position.col,
-                true,
-            ))
-            .chain(
-                self.doc
-                    .secondary_cursors
-                    .iter()
-                    .map(|sc| (sc.position.line, sc.position.col, false)),
-            )
-            .collect();
-
-            for (cursor_line, cursor_col, is_primary) in all_cursors {
-                let (visual_line, cursor_x) = if let Some(wm) = wrap_map {
-                    let vl = wm.position_to_visual_line(cursor_line, cursor_col);
-                    let vc = wm.position_to_visual_col(cursor_col);
-
-                    // Badge-aware x for the wrap segment
-                    let lc = self
-                        .doc
-                        .buffer
-                        .line(cursor_line)
-                        .map(line_content_string)
-                        .unwrap_or_default();
-                    let lchars: Vec<char> = lc.chars().collect();
-                    let ws = (vl - wm.logical_to_visual(cursor_line)) * wm.chars_per_visual_line;
-                    let we = (ws + wm.chars_per_visual_line).min(lchars.len());
-                    let seg: String = lchars[ws..we].iter().collect();
-                    let x = text_area.min.x + self.col_to_x_badge_aware(&seg, vc, char_width);
-                    (vl, x)
-                } else {
-                    let lc = self
-                        .doc
-                        .buffer
-                        .line(cursor_line)
-                        .map(line_content_string)
-                        .unwrap_or_default();
-                    let x = text_area.min.x
-                        + self.col_to_x_badge_aware(&lc, cursor_col, char_width)
-                        - self.doc.scroll_x;
-                    (cursor_line, x)
-                };
-
-                if visual_line >= first_visible
-                    && visual_line < last_visible
-                    && cursor_x >= text_area.min.x
-                    && cursor_x <= text_area.max.x
-                {
-                    let y_offset = (visual_line as f32 - self.doc.scroll_y) * line_height;
-                    let cursor_y = text_area.min.y + y_offset;
-                    let color = if is_primary {
-                        self.theme.cursor_color
-                    } else {
-                        secondary_cursor_color
-                    };
-                    text_painter.line_segment(
-                        [
-                            Pos2::new(cursor_x, cursor_y),
-                            Pos2::new(cursor_x, cursor_y + line_height),
-                        ],
-                        Stroke::new(2.0, color),
-                    );
-                }
-            }
+                secondary_cursor_color
+            };
+            text_painter.line_segment(
+                [
+                    Pos2::new(cursor_x, cursor_y),
+                    Pos2::new(cursor_x, cursor_y + line_height),
+                ],
+                Stroke::new(2.0, color),
+            );
         }
     }
 

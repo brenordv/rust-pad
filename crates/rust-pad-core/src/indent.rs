@@ -43,6 +43,24 @@ impl IndentStyle {
     }
 }
 
+/// Records an indent delta into the histogram if it's in range.
+fn record_indent_delta(delta_counts: &mut [usize; 9], prev: usize, current: usize) {
+    let delta = prev.abs_diff(current);
+    if delta > 0 && delta < delta_counts.len() {
+        delta_counts[delta] += 1;
+    }
+}
+
+/// Picks the best standard indent width from the observed delta histogram.
+fn best_standard_width(delta_counts: &[usize; 9]) -> IndentStyle {
+    let best = [2usize, 4, 8]
+        .into_iter()
+        .filter(|&w| delta_counts[w] > 0)
+        .max_by_key(|&w| delta_counts[w])
+        .unwrap_or(4);
+    IndentStyle::Spaces(best)
+}
+
 /// Detects the indentation style by scanning the first lines of text.
 ///
 /// Compares consecutive lines to find the most common indent-level delta,
@@ -50,54 +68,42 @@ impl IndentStyle {
 pub fn detect_indent(text: &str) -> IndentStyle {
     let mut tab_lines = 0usize;
     let mut space_lines = 0usize;
-    // Count how often each indent delta appears (indices 1..=8).
     let mut delta_counts = [0usize; 9];
-
     let mut prev_indent: Option<usize> = None;
 
     for line in text.lines().take(100) {
-        if line.starts_with('\t') {
-            tab_lines += 1;
-            prev_indent = None; // reset; can't mix tab/space deltas
-        } else if line.starts_with(' ') {
-            space_lines += 1;
-            let spaces = line.chars().take_while(|c| *c == ' ').count();
-            if let Some(prev) = prev_indent {
-                let delta = spaces.abs_diff(prev);
-                if delta > 0 && delta < delta_counts.len() {
-                    delta_counts[delta] += 1;
-                }
+        let leading = line.chars().next().unwrap_or(' ');
+        match leading {
+            '\t' => {
+                tab_lines += 1;
+                prev_indent = None;
             }
-            prev_indent = Some(spaces);
-        } else if !line.trim().is_empty() {
-            // Non-indented, non-empty line resets the chain but records
-            // the delta from the previous indented line back to 0.
-            if let Some(prev) = prev_indent {
-                if prev > 0 && prev < delta_counts.len() {
-                    delta_counts[prev] += 1;
+            ' ' => {
+                space_lines += 1;
+                let spaces = line.chars().take_while(|c| *c == ' ').count();
+                if let Some(prev) = prev_indent {
+                    record_indent_delta(&mut delta_counts, prev, spaces);
                 }
+                prev_indent = Some(spaces);
             }
-            prev_indent = Some(0);
+            _ if !line.trim().is_empty() => {
+                if let Some(prev) = prev_indent {
+                    record_indent_delta(&mut delta_counts, prev, 0);
+                }
+                prev_indent = Some(0);
+            }
+            _ => {}
         }
     }
 
     if tab_lines == 0 && space_lines == 0 {
         return IndentStyle::default();
     }
-
     if tab_lines > space_lines {
         return IndentStyle::Tabs;
     }
 
-    // Pick the smallest standard width whose delta was observed most often.
-    // Prefer smaller widths in a tie since they are more common in practice.
-    let best_width = [2usize, 4, 8]
-        .into_iter()
-        .filter(|&w| delta_counts[w] > 0)
-        .max_by_key(|&w| delta_counts[w])
-        .unwrap_or(4);
-
-    IndentStyle::Spaces(best_width)
+    best_standard_width(&delta_counts)
 }
 
 #[cfg(test)]
