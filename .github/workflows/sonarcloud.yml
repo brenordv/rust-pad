@@ -64,19 +64,33 @@ jobs:
       - name: Convert LCOV to SonarQube generic coverage format
         run: |
           awk '
-          BEGIN { print "<coverage version=\"1\">" }
+          BEGIN {
+            print "<coverage version=\"1\">"
+            current_file = ""
+            has_coverage = 0
+          }
           /^SF:/ {
             filepath = substr($0, 4)
-            # Strip absolute prefix to make paths relative to repo root
             sub(/^\/home\/runner\/work\/[^/]+\/[^/]+\//, "", filepath)
-            print "  <file path=\"" filepath "\">"
+            current_file = filepath
+            has_coverage = 0
           }
-          /^DA:/ {
+          /^DA:/ && current_file != "" {
+            if (!has_coverage) {
+              print "  <file path=\"" current_file "\">"
+              has_coverage = 1
+            }
             split(substr($0, 4), parts, ",")
             covered = (parts[2] + 0 > 0) ? "true" : "false"
             print "    <lineToCover lineNumber=\"" parts[1] "\" covered=\"" covered "\"/>"
           }
-          /^end_of_record/ { print "  </file>" }
+          /^end_of_record/ {
+            if (current_file != "" && has_coverage) {
+              print "  </file>"
+            }
+            current_file = ""
+            has_coverage = 0
+          }
           END { print "</coverage>" }
           ' lcov.info > sonar-coverage.xml
 
