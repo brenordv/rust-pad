@@ -99,7 +99,6 @@ jobs:
           EOF
 
           dpkg-deb --build "${DEB_DIR}"
-          mv "${DEB_DIR}.deb" "rust-pad_${TAG}_amd64.deb"
 
       - name: Upload archive artifact
         uses: actions/upload-artifact@v4
