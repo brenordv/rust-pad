@@ -19,7 +19,7 @@ use eframe::egui;
 use egui::Color32;
 
 use rust_pad_config::session::{generate_session_id, SessionData, SessionStore, SessionTabEntry};
-use rust_pad_config::{AppConfig, ThemeDefinition, UiColors};
+use rust_pad_config::{AppConfig, RecentFilesCleanup, ThemeDefinition, UiColors};
 use rust_pad_core::bookmarks::BookmarkManager;
 use rust_pad_core::cursor::Position;
 use rust_pad_core::history::{HistoryConfig, PersistenceLayer};
@@ -104,6 +104,10 @@ pub struct App {
     pub auto_save_enabled: bool,
     pub auto_save_interval_secs: u64,
     last_auto_save: Instant,
+    pub recent_files_enabled: bool,
+    pub recent_files_max_count: usize,
+    pub recent_files_cleanup: RecentFilesCleanup,
+    pub recent_files: Vec<PathBuf>,
     pub available_themes: Vec<ThemeDefinition>,
     accent_color: Color32,
     config_path: PathBuf,
@@ -220,6 +224,20 @@ impl App {
             auto_save_enabled: app_config.auto_save_enabled,
             auto_save_interval_secs: app_config.auto_save_interval_secs,
             last_auto_save: Instant::now(),
+            recent_files_enabled: app_config.recent_files_enabled,
+            recent_files_max_count: app_config.recent_files_max_count,
+            recent_files_cleanup: app_config.recent_files_cleanup,
+            recent_files: {
+                let mut files: Vec<PathBuf> =
+                    app_config.recent_files.iter().map(PathBuf::from).collect();
+                if matches!(
+                    app_config.recent_files_cleanup,
+                    RecentFilesCleanup::OnStartup | RecentFilesCleanup::Both
+                ) {
+                    files.retain(|p| p.is_file());
+                }
+                files
+            },
             available_themes: app_config.themes,
             accent_color,
             config_path,
@@ -675,6 +693,14 @@ impl eframe::App for App {
                 .unwrap_or_default(),
             auto_save_enabled: self.auto_save_enabled,
             auto_save_interval_secs: self.auto_save_interval_secs,
+            recent_files_enabled: self.recent_files_enabled,
+            recent_files_max_count: self.recent_files_max_count,
+            recent_files_cleanup: self.recent_files_cleanup,
+            recent_files: self
+                .recent_files
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
             themes: self.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
@@ -710,6 +736,10 @@ mod tests {
             auto_save_enabled: false,
             auto_save_interval_secs: 30,
             last_auto_save: Instant::now(),
+            recent_files_enabled: true,
+            recent_files_max_count: 10,
+            recent_files_cleanup: RecentFilesCleanup::default(),
+            recent_files: Vec::new(),
             available_themes: vec![
                 rust_pad_config::theme::builtin_dark(),
                 rust_pad_config::theme::builtin_light(),

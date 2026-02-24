@@ -3,6 +3,7 @@
 //! Provides a tabbed interface for General, Editor, File Dialogs, and Auto-Save settings.
 
 use eframe::egui;
+use rust_pad_config::RecentFilesCleanup;
 
 use super::App;
 
@@ -14,6 +15,7 @@ pub(crate) enum SettingsTab {
     Editor,
     FileDialogs,
     AutoSave,
+    History,
 }
 
 impl App {
@@ -43,6 +45,7 @@ impl App {
                         "File Dialogs",
                     );
                     ui.selectable_value(&mut self.settings_tab, SettingsTab::AutoSave, "Auto-Save");
+                    ui.selectable_value(&mut self.settings_tab, SettingsTab::History, "History");
                 });
 
                 ui.separator();
@@ -52,6 +55,7 @@ impl App {
                     SettingsTab::Editor => self.settings_editor(ui),
                     SettingsTab::FileDialogs => self.settings_file_dialogs(ui),
                     SettingsTab::AutoSave => self.settings_auto_save(ui),
+                    SettingsTab::History => self.settings_history(ui),
                 }
             });
 
@@ -195,6 +199,67 @@ impl App {
                     self.auto_save_interval_secs = (interval as u64).max(5);
                 }
             });
+        });
+    }
+
+    fn settings_history(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Recent Files");
+        ui.add_space(4.0);
+
+        ui.checkbox(
+            &mut self.recent_files_enabled,
+            "Enable recent files history",
+        );
+
+        ui.add_space(8.0);
+
+        ui.add_enabled_ui(self.recent_files_enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Max files to show:");
+                let mut count = self.recent_files_max_count as f64;
+                if ui
+                    .add(egui::DragValue::new(&mut count).range(1.0..=50.0))
+                    .changed()
+                {
+                    self.recent_files_max_count = (count as usize).clamp(1, 50);
+                    self.recent_files.truncate(self.recent_files_max_count);
+                }
+            });
+
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Remove unavailable files:");
+                egui::ComboBox::from_id_salt("recent_files_cleanup")
+                    .selected_text(match self.recent_files_cleanup {
+                        RecentFilesCleanup::OnStartup => "On Startup",
+                        RecentFilesCleanup::OnMenuOpen => "When Menu Opens",
+                        RecentFilesCleanup::Both => "Both",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.recent_files_cleanup,
+                            RecentFilesCleanup::OnStartup,
+                            "On Startup",
+                        );
+                        ui.selectable_value(
+                            &mut self.recent_files_cleanup,
+                            RecentFilesCleanup::OnMenuOpen,
+                            "When Menu Opens",
+                        );
+                        ui.selectable_value(
+                            &mut self.recent_files_cleanup,
+                            RecentFilesCleanup::Both,
+                            "Both",
+                        );
+                    });
+            });
+
+            ui.add_space(8.0);
+
+            if ui.button("Clear Recent Files List Now").clicked() {
+                self.recent_files.clear();
+            }
         });
     }
 }
