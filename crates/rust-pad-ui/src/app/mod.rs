@@ -2568,4 +2568,181 @@ mod tests {
         );
         assert_eq!(doc.selected_text(), Some("HELLO".to_string()));
     }
+
+    // -- Vertical selection (Alt+Shift+Up/Down) --
+
+    #[test]
+    fn test_add_cursor_below_inherits_selection() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("Hello World\nFoo Bar Baz\nLine Three!");
+        // Select columns 0..5 ("Hello") on line 0
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        app.add_cursor_below();
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        let sc = &doc.secondary_cursors[0];
+        assert_eq!(sc.position, Position::new(1, 5));
+        assert_eq!(sc.selection_anchor, Some(Position::new(1, 0)));
+    }
+
+    #[test]
+    fn test_add_cursor_above_inherits_selection() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("Hello World\nFoo Bar Baz\nLine Three!");
+        // Select columns 0..5 on line 2
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(2, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(2, 5), &doc.buffer);
+
+        app.add_cursor_above();
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        let sc = &doc.secondary_cursors[0];
+        assert_eq!(sc.position, Position::new(1, 5));
+        assert_eq!(sc.selection_anchor, Some(Position::new(1, 0)));
+    }
+
+    #[test]
+    fn test_add_cursor_below_clamps_to_short_line() {
+        let mut app = test_app();
+        // Line 0 has 10 chars, line 1 has only 2 chars
+        app.tabs
+            .active_doc_mut()
+            .insert_text("0123456789\nab\nlong line here");
+        // Select columns 3..8 on line 0
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 3), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 8), &doc.buffer);
+
+        app.add_cursor_below();
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        let sc = &doc.secondary_cursors[0];
+        // Both position and anchor columns clamped to line 1 length (2)
+        assert_eq!(sc.position, Position::new(1, 2));
+        assert_eq!(sc.selection_anchor, Some(Position::new(1, 2)));
+    }
+
+    #[test]
+    fn test_add_cursor_below_no_selection_backward_compat() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("Hello\nWorld\nThree");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 3), &doc.buffer);
+
+        app.add_cursor_below();
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        let sc = &doc.secondary_cursors[0];
+        assert_eq!(sc.position, Position::new(1, 3));
+        assert_eq!(sc.selection_anchor, None);
+    }
+
+    #[test]
+    fn test_vertical_selection_shrink_below_then_up() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("aaa\nbbb\nccc\nddd");
+        // Primary cursor on line 1
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(1, 0), &doc.buffer);
+
+        // Extend down twice: adds cursors on lines 2 and 3
+        app.add_cursor_below();
+        app.add_cursor_below();
+        assert_eq!(app.tabs.active_doc().secondary_cursors.len(), 2);
+
+        // Pressing Up should shrink: remove the furthest below (line 3)
+        app.add_cursor_above();
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        assert_eq!(doc.secondary_cursors[0].position.line, 2);
+
+        // Pressing Up again removes line 2
+        app.add_cursor_above();
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 0);
+    }
+
+    #[test]
+    fn test_vertical_selection_shrink_above_then_down() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("aaa\nbbb\nccc\nddd");
+        // Primary cursor on line 2
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(2, 0), &doc.buffer);
+
+        // Extend up twice: adds cursors on lines 1 and 0
+        app.add_cursor_above();
+        app.add_cursor_above();
+        assert_eq!(app.tabs.active_doc().secondary_cursors.len(), 2);
+
+        // Pressing Down should shrink: remove the furthest above (line 0)
+        app.add_cursor_below();
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        assert_eq!(doc.secondary_cursors[0].position.line, 1);
+
+        // Pressing Down again removes line 1
+        app.add_cursor_below();
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 0);
+    }
+
+    #[test]
+    fn test_vertical_selection_full_walkthrough() {
+        // Mimics: select "Hello" on line 0, Alt+Shift+Down x2, Alt+Shift+Up x2
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("Hello World\nFoo Bar Baz\nLine Three!");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        // Alt+Shift+Down: add cursor on line 1 with selection 0..5
+        app.add_cursor_below();
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        assert_eq!(doc.secondary_cursors[0].position, Position::new(1, 5));
+        assert_eq!(
+            doc.secondary_cursors[0].selection_anchor,
+            Some(Position::new(1, 0))
+        );
+
+        // Alt+Shift+Down: add cursor on line 2 with selection 0..5
+        app.add_cursor_below();
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 2);
+        assert_eq!(doc.secondary_cursors[1].position, Position::new(2, 5));
+        assert_eq!(
+            doc.secondary_cursors[1].selection_anchor,
+            Some(Position::new(2, 0))
+        );
+
+        // Alt+Shift+Up: shrink — remove line 2 cursor
+        app.add_cursor_above();
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        assert_eq!(doc.secondary_cursors[0].position.line, 1);
+
+        // Alt+Shift+Up: shrink — remove line 1 cursor
+        app.add_cursor_above();
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 0);
+    }
 }

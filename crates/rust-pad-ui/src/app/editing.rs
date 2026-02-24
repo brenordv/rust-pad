@@ -214,8 +214,28 @@ impl App {
     }
 
     /// Adds a cursor on the line above the topmost cursor (Alt+Shift+Up).
+    ///
+    /// If secondary cursors exist below the primary, the furthest below is
+    /// removed instead (shrink). New cursors inherit the primary's selection
+    /// column range.
     pub(crate) fn add_cursor_above(&mut self) {
         let doc = self.tabs.active_doc_mut();
+        let primary_line = doc.cursor.position.line;
+
+        // Phase 1 — shrink: remove the furthest secondary *below* primary
+        if let Some(idx) = doc
+            .secondary_cursors
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.position.line > primary_line)
+            .max_by_key(|(_, c)| c.position.line)
+            .map(|(i, _)| i)
+        {
+            doc.secondary_cursors.remove(idx);
+            return;
+        }
+
+        // Phase 2 — add above the topmost cursor
         let min_line = std::iter::once(&doc.cursor)
             .chain(doc.secondary_cursors.iter())
             .map(|c| c.position.line)
@@ -226,18 +246,34 @@ impl App {
             return;
         }
 
-        let col = doc.cursor.position.col;
         let target_line = min_line - 1;
-        let line_len = doc.buffer.line_len_chars(target_line).unwrap_or(0);
-
-        let mut new_cursor = Cursor::new();
-        new_cursor.position = Position::new(target_line, col.min(line_len));
+        let new_cursor = Self::build_vertical_cursor(doc, target_line);
         doc.add_secondary_cursor(new_cursor);
     }
 
     /// Adds a cursor on the line below the bottommost cursor (Alt+Shift+Down).
+    ///
+    /// If secondary cursors exist above the primary, the furthest above is
+    /// removed instead (shrink). New cursors inherit the primary's selection
+    /// column range.
     pub(crate) fn add_cursor_below(&mut self) {
         let doc = self.tabs.active_doc_mut();
+        let primary_line = doc.cursor.position.line;
+
+        // Phase 1 — shrink: remove the furthest secondary *above* primary
+        if let Some(idx) = doc
+            .secondary_cursors
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.position.line < primary_line)
+            .min_by_key(|(_, c)| c.position.line)
+            .map(|(i, _)| i)
+        {
+            doc.secondary_cursors.remove(idx);
+            return;
+        }
+
+        // Phase 2 — add below the bottommost cursor
         let max_line = std::iter::once(&doc.cursor)
             .chain(doc.secondary_cursors.iter())
             .map(|c| c.position.line)
@@ -248,13 +284,27 @@ impl App {
             return;
         }
 
-        let col = doc.cursor.position.col;
         let target_line = max_line + 1;
-        let line_len = doc.buffer.line_len_chars(target_line).unwrap_or(0);
-
-        let mut new_cursor = Cursor::new();
-        new_cursor.position = Position::new(target_line, col.min(line_len));
+        let new_cursor = Self::build_vertical_cursor(doc, target_line);
         doc.add_secondary_cursor(new_cursor);
+    }
+
+    /// Builds a new cursor on `target_line`, inheriting the primary cursor's
+    /// selection column range (if any) and clamping to the target line length.
+    fn build_vertical_cursor(doc: &Document, target_line: usize) -> Cursor {
+        let line_len = doc.buffer.line_len_chars(target_line).unwrap_or(0);
+        let mut new_cursor = Cursor::new();
+
+        let pos_col = doc.cursor.position.col;
+        new_cursor.position = Position::new(target_line, pos_col.min(line_len));
+
+        if let Some(anchor) = doc.cursor.selection_anchor {
+            let anchor_col = anchor.col;
+            new_cursor.selection_anchor =
+                Some(Position::new(target_line, anchor_col.min(line_len)));
+        }
+
+        new_cursor
     }
 
     /// Sorts all lines in the document in the given order.
