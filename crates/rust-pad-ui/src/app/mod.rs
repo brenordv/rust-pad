@@ -2,6 +2,7 @@
 
 mod about_dialog;
 mod clipboard;
+mod context_menu;
 mod editing;
 mod file_ops;
 mod menu_bar;
@@ -561,23 +562,29 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme.bg_color))
             .show(ctx, |ui| {
-                let doc = self.tabs.active_doc_mut();
-                let mut editor = EditorWidget::new(
-                    doc,
-                    &self.theme,
-                    self.zoom_level,
-                    Some(&self.syntax_highlighter),
-                );
-                editor.word_wrap = self.word_wrap;
-                editor.show_special_chars = self.show_special_chars;
-                editor.show_line_numbers = self.show_line_numbers;
-                editor.dialog_open = dialog_open;
-                editor.show(ui);
+                let (response, zoom_request) = {
+                    let doc = self.tabs.active_doc_mut();
+                    let mut editor = EditorWidget::new(
+                        doc,
+                        &self.theme,
+                        self.zoom_level,
+                        Some(&self.syntax_highlighter),
+                    );
+                    editor.word_wrap = self.word_wrap;
+                    editor.show_special_chars = self.show_special_chars;
+                    editor.show_line_numbers = self.show_line_numbers;
+                    editor.dialog_open = dialog_open;
+                    let r = editor.show(ui);
+                    (r, editor.zoom_request)
+                };
 
-                // Apply Ctrl+scroll zoom from the editor widget
-                if editor.zoom_request != 1.0 {
+                response.context_menu(|ui| {
+                    self.show_editor_context_menu(ui);
+                });
+
+                if zoom_request != 1.0 {
                     self.zoom_level =
-                        (self.zoom_level * editor.zoom_request).clamp(0.5, self.max_zoom_level);
+                        (self.zoom_level * zoom_request).clamp(0.5, self.max_zoom_level);
                 }
             });
 
@@ -1873,5 +1880,692 @@ mod tests {
         app.find_replace.scope = SearchScope::AllTabs;
         app.handle_search_action(FindReplaceAction::Search);
         assert!(app.find_replace.status.starts_with("Error:"));
+    }
+
+    // ── Context menu: scoped operations ─────────────────────────────
+
+    use super::context_menu::OperationScope;
+
+    #[test]
+    fn test_convert_case_scoped_global_uppercases_entire_doc() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        app.convert_case_scoped(CaseConversion::Upper, OperationScope::Global);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "HELLO WORLD");
+        assert!(app.tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_convert_case_scoped_global_lowercases_entire_doc() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("HELLO WORLD");
+        app.convert_case_scoped(CaseConversion::Lower, OperationScope::Global);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "hello world");
+    }
+
+    #[test]
+    fn test_convert_case_scoped_global_title_case() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        app.convert_case_scoped(CaseConversion::TitleCase, OperationScope::Global);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "Hello World");
+    }
+
+    #[test]
+    fn test_convert_case_scoped_global_no_change_noop() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("HELLO");
+        // Reset modified flag after insert
+        app.tabs.active_doc_mut().modified = false;
+        app.convert_case_scoped(CaseConversion::Upper, OperationScope::Global);
+        // Already uppercase — nothing changed
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "HELLO");
+        assert!(!app.tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_convert_case_scoped_selection_only_affects_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        // Select "hello" (chars 0..5)
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        app.convert_case_scoped(CaseConversion::Upper, OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "HELLO world");
+    }
+
+    #[test]
+    fn test_convert_case_scoped_selection_no_selection_noop() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        // No selection
+        app.convert_case_scoped(CaseConversion::Upper, OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "hello world");
+    }
+
+    #[test]
+    fn test_sort_lines_scoped_global() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("cherry\napple\nbanana");
+        app.sort_lines_scoped(SortOrder::Ascending, OperationScope::Global);
+        assert_eq!(
+            app.tabs.active_doc().buffer.to_string(),
+            "apple\nbanana\ncherry"
+        );
+    }
+
+    #[test]
+    fn test_sort_lines_scoped_selection_only_sorts_selected_lines() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("delta\ncherry\napple\nbanana");
+        // Select lines 1-2 ("cherry\napple")
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(1, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(2, 5), &doc.buffer);
+
+        app.sort_lines_scoped(SortOrder::Ascending, OperationScope::Selection);
+        assert_eq!(
+            app.tabs.active_doc().buffer.to_string(),
+            "delta\napple\ncherry\nbanana"
+        );
+    }
+
+    #[test]
+    fn test_remove_duplicate_lines_scoped_global() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\na\nc\nb");
+        app.remove_duplicate_lines_scoped(OperationScope::Global);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
+    }
+
+    #[test]
+    fn test_remove_duplicate_lines_scoped_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("x\na\nb\na\ny");
+        // Select lines 1-3 ("a\nb\na")
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(1, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(3, 1), &doc.buffer);
+
+        app.remove_duplicate_lines_scoped(OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "x\na\nb\ny");
+    }
+
+    #[test]
+    fn test_remove_empty_lines_scoped_global() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\n\nb\n\nc");
+        app.remove_empty_lines_scoped(OperationScope::Global);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
+    }
+
+    #[test]
+    fn test_remove_empty_lines_scoped_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("x\na\n\nb\ny");
+        // Select lines 1-3 ("a\n\nb")
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(1, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(3, 1), &doc.buffer);
+
+        app.remove_empty_lines_scoped(OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "x\na\nb\ny");
+    }
+
+    // ── Context menu: invert selection ──────────────────────────────
+
+    #[test]
+    fn test_invert_selection_no_selection_selects_all() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        // Cursor at position 3, no selection
+        app.tabs.active_doc_mut().cursor.position = Position::new(0, 3);
+        app.tabs.active_doc_mut().cursor.clear_selection();
+
+        app.invert_selection();
+
+        // Should select all text
+        assert!(app.tabs.active_doc().cursor.selection_anchor.is_some());
+        assert_eq!(
+            app.tabs.active_doc().selected_text(),
+            Some("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_invert_selection_entire_doc_clears() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.select_all(&doc.buffer);
+
+        app.invert_selection();
+
+        // Should clear selection
+        assert!(app.tabs.active_doc().cursor.selection_anchor.is_none());
+    }
+
+    #[test]
+    fn test_invert_selection_at_start() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        // Select "hello" (0..5)
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        app.invert_selection();
+
+        // Should now select " world" (5..11)
+        let sel_text = app.tabs.active_doc().selected_text().unwrap();
+        assert_eq!(sel_text, " world");
+    }
+
+    #[test]
+    fn test_invert_selection_at_end() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        // Select " world" (5..11)
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 11), &doc.buffer);
+
+        app.invert_selection();
+
+        // Should now select "hello" (0..5)
+        let sel_text = app.tabs.active_doc().selected_text().unwrap();
+        assert_eq!(sel_text, "hello");
+    }
+
+    #[test]
+    fn test_invert_selection_in_middle() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        // Select "lo wo" (3..8)
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 3), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 8), &doc.buffer);
+
+        app.invert_selection();
+
+        // Primary cursor: select "hel" (0..3)
+        let primary_text = app.tabs.active_doc().selected_text().unwrap();
+        assert_eq!(primary_text, "hel");
+        // Secondary cursor should exist and select "rld" (8..11)
+        assert_eq!(app.tabs.active_doc().secondary_cursors.len(), 1);
+        let sc = &app.tabs.active_doc().secondary_cursors[0];
+        assert_eq!(sc.selection_anchor, Some(Position::new(0, 8)));
+        assert_eq!(sc.position, Position::new(0, 11));
+    }
+
+    // ── Context menu: delete_selection_or_char ──────────────────────
+
+    #[test]
+    fn test_delete_selection_or_char_with_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        app.delete_selection_or_char();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), " world");
+    }
+
+    #[test]
+    fn test_delete_selection_or_char_no_selection_deletes_forward() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.clear_selection();
+
+        app.delete_selection_or_char();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "ello");
+    }
+
+    #[test]
+    fn test_delete_selection_or_char_multi_cursor() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("aabbcc");
+        // Select "aa"
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.position = Position::new(0, 2);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        // Select "cc"
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.position = Position::new(0, 6);
+        sc.selection_anchor = Some(Position::new(0, 4));
+        doc.secondary_cursors.push(sc);
+
+        app.delete_selection_or_char();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "bb");
+    }
+
+    // ── Vertical (multi-cursor) selection operations ────────────────
+
+    #[test]
+    fn test_convert_case_multi_cursor_vertical_selection() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("hello world\nfoo bar\nbaz qux");
+        // Simulate vertical selection: select "hello" on line 0, "foo" on line 1
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.selection_anchor = Some(Position::new(1, 0));
+        sc.position = Position::new(1, 3);
+        doc.secondary_cursors.push(sc);
+
+        app.convert_selection_case(CaseConversion::Upper);
+        let text = app.tabs.active_doc().buffer.to_string();
+        assert_eq!(text, "HELLO world\nFOO bar\nbaz qux");
+    }
+
+    #[test]
+    fn test_convert_case_scoped_selection_multi_cursor() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("abc\ndef\nghi");
+        // Vertical selection: "abc" on line 0, "def" on line 1
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 3), &doc.buffer);
+
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.selection_anchor = Some(Position::new(1, 0));
+        sc.position = Position::new(1, 3);
+        doc.secondary_cursors.push(sc);
+
+        app.convert_case_scoped(CaseConversion::Upper, OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "ABC\nDEF\nghi");
+    }
+
+    #[test]
+    fn test_sort_lines_scoped_selection_multi_cursor_vertical() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("delta\ncherry\napple\nbanana");
+        // Vertical cursors on lines 1 and 2 (no selections, just cursor positions)
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.position = Position::new(1, 0);
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.position = Position::new(2, 0);
+        doc.secondary_cursors.push(sc);
+
+        app.sort_lines_scoped(SortOrder::Ascending, OperationScope::Selection);
+        // Lines 1-2 should be sorted: "apple\ncherry"
+        assert_eq!(
+            app.tabs.active_doc().buffer.to_string(),
+            "delta\napple\ncherry\nbanana"
+        );
+    }
+
+    #[test]
+    fn test_remove_duplicates_scoped_selection_multi_cursor_vertical() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("x\na\nb\na\ny");
+        // Vertical cursors spanning lines 1-3
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.position = Position::new(1, 0);
+        let mut sc1 = rust_pad_core::cursor::Cursor::new();
+        sc1.position = Position::new(2, 0);
+        doc.secondary_cursors.push(sc1);
+        let mut sc2 = rust_pad_core::cursor::Cursor::new();
+        sc2.position = Position::new(3, 0);
+        doc.secondary_cursors.push(sc2);
+
+        app.remove_duplicate_lines_scoped(OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "x\na\nb\ny");
+    }
+
+    #[test]
+    fn test_remove_empty_lines_scoped_selection_multi_cursor_vertical() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("x\na\n\nb\ny");
+        // Vertical cursors spanning lines 1-3
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.position = Position::new(1, 0);
+        let mut sc1 = rust_pad_core::cursor::Cursor::new();
+        sc1.position = Position::new(2, 0);
+        doc.secondary_cursors.push(sc1);
+        let mut sc2 = rust_pad_core::cursor::Cursor::new();
+        sc2.position = Position::new(3, 0);
+        doc.secondary_cursors.push(sc2);
+
+        app.remove_empty_lines_scoped(OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "x\na\nb\ny");
+    }
+
+    // ── selection_line_range with multi-cursor ──────────────────────
+
+    #[test]
+    fn test_selection_line_range_single_cursor_no_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc\nd");
+        app.tabs.active_doc_mut().cursor.position = Position::new(2, 0);
+        let doc = app.tabs.active_doc();
+        let (start, end) = super::editing::selection_line_range(doc);
+        assert_eq!(start, 2);
+        assert_eq!(end, 3);
+    }
+
+    #[test]
+    fn test_selection_line_range_single_cursor_with_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc\nd");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(1, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(2, 1), &doc.buffer);
+        let doc = app.tabs.active_doc();
+        let (start, end) = super::editing::selection_line_range(doc);
+        assert_eq!(start, 1);
+        assert_eq!(end, 3);
+    }
+
+    #[test]
+    fn test_selection_line_range_multi_cursor_spans_all_lines() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc\nd\ne");
+        // Primary on line 1, secondary on line 3
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.position = Position::new(1, 0);
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.position = Position::new(3, 0);
+        doc.secondary_cursors.push(sc);
+
+        let doc = app.tabs.active_doc();
+        let (start, end) = super::editing::selection_line_range(doc);
+        assert_eq!(start, 1);
+        assert_eq!(end, 4);
+    }
+
+    #[test]
+    fn test_selection_line_range_multi_cursor_with_selections() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc\nd\ne");
+        // Primary selects line 0 content
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 1), &doc.buffer);
+        // Secondary selects across lines 3-4
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.selection_anchor = Some(Position::new(3, 0));
+        sc.position = Position::new(4, 1);
+        doc.secondary_cursors.push(sc);
+
+        let doc = app.tabs.active_doc();
+        let (start, end) = super::editing::selection_line_range(doc);
+        assert_eq!(start, 0);
+        assert_eq!(end, 5);
+    }
+
+    // ── sort_lines delegates to scoped ──────────────────────────────
+
+    #[test]
+    fn test_sort_lines_delegates_to_global_scope() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("cherry\napple\nbanana");
+        // sort_lines delegates to sort_lines_scoped(_, Global)
+        app.sort_lines(SortOrder::Ascending);
+        assert_eq!(
+            app.tabs.active_doc().buffer.to_string(),
+            "apple\nbanana\ncherry"
+        );
+    }
+
+    #[test]
+    fn test_remove_duplicate_lines_delegates_to_global_scope() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\na\nc\nb");
+        app.remove_duplicate_lines();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
+    }
+
+    #[test]
+    fn test_remove_empty_lines_delegates_to_global_scope() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\n\nb\n\nc");
+        app.remove_empty_lines();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
+    }
+
+    // ── Invert selection edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_invert_selection_empty_doc() {
+        let mut app = test_app();
+        // Empty doc, no selection → select all (which is empty)
+        app.invert_selection();
+        // Should not crash; selection anchor should be set by select_all
+        assert!(app.tabs.active_doc().cursor.selection_anchor.is_some());
+    }
+
+    #[test]
+    fn test_invert_selection_single_char_doc() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("x");
+        // Select "x"
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.select_all(&doc.buffer);
+
+        app.invert_selection();
+        // Entire doc selected → should clear
+        assert!(app.tabs.active_doc().cursor.selection_anchor.is_none());
+    }
+
+    // ── Selection preservation after Selection Operations ───────────
+
+    #[test]
+    fn test_convert_case_selection_preserves_selection_single_cursor() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        // Select "hello" (chars 0..5)
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        app.convert_case_scoped(CaseConversion::Upper, OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "HELLO world");
+        // Selection must be preserved
+        let doc = app.tabs.active_doc();
+        assert!(
+            doc.cursor.selection_anchor.is_some(),
+            "selection should be preserved after case conversion"
+        );
+        assert_eq!(doc.selected_text(), Some("HELLO".to_string()));
+    }
+
+    #[test]
+    fn test_convert_case_selection_preserves_selection_multi_cursor() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("hello world\nfoo bar");
+        // Select "hello" on line 0, "foo" on line 1
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.selection_anchor = Some(Position::new(1, 0));
+        sc.position = Position::new(1, 3);
+        doc.secondary_cursors.push(sc);
+
+        app.convert_case_scoped(CaseConversion::Upper, OperationScope::Selection);
+        assert_eq!(
+            app.tabs.active_doc().buffer.to_string(),
+            "HELLO world\nFOO bar"
+        );
+        // Primary selection preserved
+        let doc = app.tabs.active_doc();
+        assert!(
+            doc.cursor.selection_anchor.is_some(),
+            "primary selection should be preserved"
+        );
+        // Secondary cursors preserved
+        assert_eq!(
+            doc.secondary_cursors.len(),
+            1,
+            "secondary cursor should be preserved"
+        );
+        assert!(
+            doc.secondary_cursors[0].selection_anchor.is_some(),
+            "secondary selection should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_sort_lines_selection_preserves_selection() {
+        let mut app = test_app();
+        app.tabs
+            .active_doc_mut()
+            .insert_text("delta\ncherry\napple\nbanana");
+        // Select lines 1-2 ("cherry\napple")
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(1, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(2, 5), &doc.buffer);
+
+        app.sort_lines_scoped(SortOrder::Ascending, OperationScope::Selection);
+        assert_eq!(
+            app.tabs.active_doc().buffer.to_string(),
+            "delta\napple\ncherry\nbanana"
+        );
+        // Selection preserved
+        let doc = app.tabs.active_doc();
+        assert!(
+            doc.cursor.selection_anchor.is_some(),
+            "selection should be preserved after sort"
+        );
+    }
+
+    #[test]
+    fn test_remove_duplicate_lines_selection_preserves_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("x\na\nb\na\ny");
+        // Select lines 1-3 ("a\nb\na")
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(1, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(3, 1), &doc.buffer);
+
+        app.remove_duplicate_lines_scoped(OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "x\na\nb\ny");
+        // Selection preserved (clamped to valid range)
+        let doc = app.tabs.active_doc();
+        assert!(
+            doc.cursor.selection_anchor.is_some(),
+            "selection should be preserved after remove duplicates"
+        );
+    }
+
+    #[test]
+    fn test_remove_empty_lines_selection_preserves_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("x\na\n\nb\ny");
+        // Select lines 1-3 ("a\n\nb")
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(1, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(3, 1), &doc.buffer);
+
+        app.remove_empty_lines_scoped(OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "x\na\nb\ny");
+        // Selection preserved (clamped to valid range)
+        let doc = app.tabs.active_doc();
+        assert!(
+            doc.cursor.selection_anchor.is_some(),
+            "selection should be preserved after remove empty lines"
+        );
+    }
+
+    #[test]
+    fn test_remove_duplicates_selection_clamps_cursor_beyond_buffer() {
+        let mut app = test_app();
+        // All 3 selected lines are duplicates → 2 get removed
+        app.tabs.active_doc_mut().insert_text("a\na\na");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(2, 1), &doc.buffer);
+
+        app.remove_duplicate_lines_scoped(OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a");
+        // Cursor clamped to valid position
+        let doc = app.tabs.active_doc();
+        assert!(doc.cursor.position.line < doc.buffer.len_lines());
+        assert!(doc.cursor.selection_anchor.is_some());
+    }
+
+    #[test]
+    fn test_remove_empty_lines_multi_cursor_preserves_cursors() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("x\na\n\nb\ny");
+        // Vertical cursors spanning lines 1-3
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.position = Position::new(1, 0);
+        doc.cursor.start_selection();
+        doc.cursor.position = Position::new(1, 1);
+        let mut sc1 = rust_pad_core::cursor::Cursor::new();
+        sc1.position = Position::new(2, 0);
+        doc.secondary_cursors.push(sc1);
+        let mut sc2 = rust_pad_core::cursor::Cursor::new();
+        sc2.position = Position::new(3, 0);
+        doc.secondary_cursors.push(sc2);
+
+        app.remove_empty_lines_scoped(OperationScope::Selection);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "x\na\nb\ny");
+        // Primary selection preserved
+        let doc = app.tabs.active_doc();
+        assert!(
+            doc.cursor.selection_anchor.is_some(),
+            "primary selection should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_convert_case_selection_noop_preserves_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("HELLO world");
+        // Select "HELLO" which is already uppercase
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+
+        app.convert_case_scoped(CaseConversion::Upper, OperationScope::Selection);
+        // No change, but selection should still be there
+        let doc = app.tabs.active_doc();
+        assert!(
+            doc.cursor.selection_anchor.is_some(),
+            "selection should be preserved even when case conversion is noop"
+        );
+        assert_eq!(doc.selected_text(), Some("HELLO".to_string()));
     }
 }

@@ -6,6 +6,7 @@ use eframe::egui;
 use rust_pad_core::encoding::{LineEnding, TextEncoding};
 use rust_pad_core::line_ops::{CaseConversion, SortOrder};
 
+use super::context_menu::OperationScope;
 use super::{App, ThemeMode};
 
 impl App {
@@ -113,15 +114,15 @@ impl App {
     fn show_convert_case_submenu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Convert Case", |ui| {
             if ui.button("UPPERCASE").clicked() {
-                self.convert_selection_case(CaseConversion::Upper);
+                self.convert_case_scoped(CaseConversion::Upper, OperationScope::Selection);
                 ui.close();
             }
             if ui.button("lowercase").clicked() {
-                self.convert_selection_case(CaseConversion::Lower);
+                self.convert_case_scoped(CaseConversion::Lower, OperationScope::Selection);
                 ui.close();
             }
             if ui.button("Title Case").clicked() {
-                self.convert_selection_case(CaseConversion::TitleCase);
+                self.convert_case_scoped(CaseConversion::TitleCase, OperationScope::Selection);
                 ui.close();
             }
         });

@@ -406,6 +406,25 @@ impl<'a> EditorWidget<'a> {
         if response.double_clicked() {
             self.doc.cursor.select_word(&self.doc.buffer);
         }
+        // Right-click: position cursor if clicking outside existing selection
+        if response.secondary_clicked() && !pointer_on_scrollbar {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if layout.text_area.contains(pos) {
+                    let click_pos = self.screen_to_position(
+                        pos,
+                        layout.text_area,
+                        layout.line_height,
+                        layout.char_width,
+                        wrap_map,
+                    );
+                    if !self.is_position_in_selection(click_pos) {
+                        self.doc.clear_secondary_cursors();
+                        self.doc.cursor.clear_selection();
+                        self.doc.cursor.move_to(click_pos, &self.doc.buffer);
+                    }
+                }
+            }
+        }
     }
 
     fn handle_mouse_click(
@@ -695,6 +714,20 @@ impl<'a> EditorWidget<'a> {
             }
         }
         ranges
+    }
+
+    /// Returns true if the given document position falls within any active selection.
+    fn is_position_in_selection(&self, pos: Position) -> bool {
+        use rust_pad_core::cursor::pos_to_char;
+        let Ok(char_idx) = pos_to_char(&self.doc.buffer, pos) else {
+            return false;
+        };
+        for range in &self.collect_selection_ranges() {
+            if char_idx >= range.0 && char_idx < range.1 {
+                return true;
+            }
+        }
+        false
     }
 
     /// Collects all lines that have a cursor on them.
@@ -1926,5 +1959,104 @@ mod tests {
         // screen_to_position doesn't clamp — cursor clamping happens elsewhere
         let pos = widget.screen_to_position(Pos2::new(50.0, 500.0), text_area, 20.0, 10.0, None);
         assert!(pos.line > 1);
+    }
+
+    // ── is_position_in_selection ─────────────────────────────────────
+
+    #[test]
+    fn is_position_in_selection_no_selection() {
+        let mut doc = Document::default();
+        doc.buffer = "hello world".into();
+        doc.cursor.position = Position::new(0, 3);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        assert!(!widget.is_position_in_selection(Position::new(0, 5)));
+    }
+
+    #[test]
+    fn is_position_in_selection_inside() {
+        let mut doc = Document::default();
+        doc.buffer = "hello world".into();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        assert!(widget.is_position_in_selection(Position::new(0, 3)));
+    }
+
+    #[test]
+    fn is_position_in_selection_outside() {
+        let mut doc = Document::default();
+        doc.buffer = "hello world".into();
+        doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        assert!(!widget.is_position_in_selection(Position::new(0, 7)));
+    }
+
+    #[test]
+    fn is_position_in_selection_at_boundary_start() {
+        let mut doc = Document::default();
+        doc.buffer = "hello world".into();
+        doc.cursor.move_to(Position::new(0, 2), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 7), &doc.buffer);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        // Position at start of selection should be inside
+        assert!(widget.is_position_in_selection(Position::new(0, 2)));
+    }
+
+    #[test]
+    fn is_position_in_selection_at_boundary_end() {
+        let mut doc = Document::default();
+        doc.buffer = "hello world".into();
+        doc.cursor.move_to(Position::new(0, 2), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(0, 7), &doc.buffer);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        // Position at end of selection (exclusive) should be outside
+        assert!(!widget.is_position_in_selection(Position::new(0, 7)));
+    }
+
+    #[test]
+    fn is_position_in_selection_secondary_cursor() {
+        let mut doc = Document::default();
+        doc.buffer = "hello world foo".into();
+        // Primary cursor: no selection
+        doc.cursor.position = Position::new(0, 0);
+        // Secondary cursor: selects "world" (6..11)
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.selection_anchor = Some(Position::new(0, 6));
+        sc.position = Position::new(0, 11);
+        doc.secondary_cursors.push(sc);
+
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        // Inside secondary selection
+        assert!(widget.is_position_in_selection(Position::new(0, 8)));
+        // Outside both selections
+        assert!(!widget.is_position_in_selection(Position::new(0, 3)));
+    }
+
+    #[test]
+    fn is_position_in_selection_multiline() {
+        let mut doc = Document::default();
+        doc.buffer = "hello\nworld\nfoo".into();
+        doc.cursor.move_to(Position::new(0, 2), &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(Position::new(1, 3), &doc.buffer);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        // Position on line 0, col 4 should be inside (selection spans line 0 col 2 to line 1 col 3)
+        assert!(widget.is_position_in_selection(Position::new(0, 4)));
+        // Position on line 1, col 1 should be inside
+        assert!(widget.is_position_in_selection(Position::new(1, 1)));
+        // Position on line 2 should be outside
+        assert!(!widget.is_position_in_selection(Position::new(2, 0)));
     }
 }
