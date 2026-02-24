@@ -1,6 +1,6 @@
 //! In-app settings dialog for configuring all application preferences.
 //!
-//! Provides a tabbed interface for General, Editor, File Dialogs, and Auto-Save settings.
+//! Provides a two-column interface: a left navigation sidebar and a right content panel.
 
 use eframe::egui;
 use rust_pad_config::RecentFilesCleanup;
@@ -18,6 +18,9 @@ pub(crate) enum SettingsTab {
     History,
 }
 
+/// Fixed width for the navigation sidebar (in logical pixels).
+const SIDEBAR_WIDTH: f32 = 130.0;
+
 impl App {
     /// Renders the settings dialog window.
     ///
@@ -31,32 +34,67 @@ impl App {
         egui::Window::new("Settings")
             .collapsible(false)
             .resizable(true)
-            .default_width(500.0)
+            .default_size([620.0, 420.0])
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                // Tab strip
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.settings_tab, SettingsTab::General, "General");
-                    ui.selectable_value(&mut self.settings_tab, SettingsTab::Editor, "Editor");
-                    ui.selectable_value(
-                        &mut self.settings_tab,
-                        SettingsTab::FileDialogs,
-                        "File Dialogs",
+                // Pin both panels to the full available height so the window
+                // stays the same size regardless of which section is active.
+                let panel_height = ui.available_height();
+
+                ui.horizontal_top(|ui| {
+                    // ── Left navigation sidebar ──────────────────────
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(SIDEBAR_WIDTH, panel_height),
+                        egui::Layout::top_down_justified(egui::Align::LEFT),
+                        |ui| {
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::General,
+                                "General",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::Editor,
+                                "Editor",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::FileDialogs,
+                                "File Dialogs",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::AutoSave,
+                                "Auto-Save",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::History,
+                                "History",
+                            );
+                        },
                     );
-                    ui.selectable_value(&mut self.settings_tab, SettingsTab::AutoSave, "Auto-Save");
-                    ui.selectable_value(&mut self.settings_tab, SettingsTab::History, "History");
+
+                    ui.separator();
+
+                    // ── Right content panel ──────────────────────────
+                    // Explicit top-down layout prevents inheriting the
+                    // horizontal direction from the parent.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), panel_height),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| match self.settings_tab {
+                                SettingsTab::General => self.settings_general(ui, ctx),
+                                SettingsTab::Editor => self.settings_editor(ui),
+                                SettingsTab::FileDialogs => self.settings_file_dialogs(ui),
+                                SettingsTab::AutoSave => self.settings_auto_save(ui),
+                                SettingsTab::History => self.settings_history(ui),
+                            });
+                        },
+                    );
                 });
-
-                ui.separator();
-
-                match self.settings_tab {
-                    SettingsTab::General => self.settings_general(ui, ctx),
-                    SettingsTab::Editor => self.settings_editor(ui),
-                    SettingsTab::FileDialogs => self.settings_file_dialogs(ui),
-                    SettingsTab::AutoSave => self.settings_auto_save(ui),
-                    SettingsTab::History => self.settings_history(ui),
-                }
             });
 
         if !open {
