@@ -58,3 +58,75 @@ impl LiveMonitorController {
         self.last_check = Instant::now();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_creates_controller() {
+        let ctrl = LiveMonitorController::new();
+        // Just verify it constructs without panic; last_check is private
+        assert!(ctrl.last_check.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_tick_skips_non_monitored_docs() {
+        let mut ctrl = LiveMonitorController::new();
+        // Set last_check far in the past to bypass the 1-second throttle
+        ctrl.last_check = Instant::now() - Duration::from_secs(5);
+        let mut tabs = TabManager::new();
+        assert!(!tabs.active_doc().live_monitoring);
+        // Should be a no-op — no panic, no changes
+        ctrl.tick(&mut tabs);
+    }
+
+    #[test]
+    fn test_tick_skips_doc_without_filepath() {
+        let mut ctrl = LiveMonitorController::new();
+        ctrl.last_check = Instant::now() - Duration::from_secs(5);
+        let mut tabs = TabManager::new();
+        tabs.active_doc_mut().live_monitoring = true;
+        // No file_path — tick should skip
+        ctrl.tick(&mut tabs);
+    }
+
+    #[test]
+    fn test_tick_throttled_within_one_second() {
+        let mut ctrl = LiveMonitorController::new();
+        // last_check is just now — tick should not run
+        let mut tabs = TabManager::new();
+        tabs.active_doc_mut().live_monitoring = true;
+        ctrl.tick(&mut tabs);
+        // No crash, and because of throttling, nothing actually ran
+    }
+
+    #[test]
+    fn test_tick_detects_file_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.log");
+        std::fs::write(&file, "line1\n").unwrap();
+
+        let mut tabs = TabManager::new();
+        tabs.open_file(&file).unwrap();
+        tabs.active_doc_mut().live_monitoring = true;
+        // Record the mtime so the controller has a baseline
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        tabs.active_doc_mut().last_known_mtime = Some(mtime);
+
+        // Wait a moment and modify the file
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&file, "line1\nline2\n").unwrap();
+
+        let mut ctrl = LiveMonitorController::new();
+        ctrl.last_check = Instant::now() - Duration::from_secs(5);
+        ctrl.tick(&mut tabs);
+
+        // The document should have been reloaded with new content
+        let content = tabs.active_doc().buffer.to_string();
+        assert!(
+            content.contains("line2"),
+            "Expected reloaded content with 'line2', got: {content}"
+        );
+    }
+}

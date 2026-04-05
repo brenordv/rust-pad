@@ -56,3 +56,121 @@ impl AutoSaveController {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── new() ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_new_stores_fields() {
+        let ctrl = AutoSaveController::new(true, 60);
+        assert!(ctrl.enabled);
+        assert_eq!(ctrl.interval_secs, 60);
+    }
+
+    #[test]
+    fn test_new_disabled() {
+        let ctrl = AutoSaveController::new(false, 30);
+        assert!(!ctrl.enabled);
+    }
+
+    // ── repaint_interval() ──────────────────────────────────────────
+
+    #[test]
+    fn test_repaint_interval_when_enabled() {
+        let ctrl = AutoSaveController::new(true, 45);
+        assert_eq!(ctrl.repaint_interval(), Some(Duration::from_secs(45)));
+    }
+
+    #[test]
+    fn test_repaint_interval_when_disabled() {
+        let ctrl = AutoSaveController::new(false, 45);
+        assert_eq!(ctrl.repaint_interval(), None);
+    }
+
+    // ── tick() ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tick_returns_false_when_disabled() {
+        let mut ctrl = AutoSaveController::new(false, 0);
+        let mut tabs = TabManager::new();
+        assert!(!ctrl.tick(&mut tabs));
+    }
+
+    #[test]
+    fn test_tick_returns_false_before_interval_elapsed() {
+        let mut ctrl = AutoSaveController::new(true, 3600);
+        let mut tabs = TabManager::new();
+        // Interval is 1 hour — tick should return false immediately
+        assert!(!ctrl.tick(&mut tabs));
+    }
+
+    #[test]
+    fn test_tick_returns_true_when_interval_elapsed() {
+        let mut ctrl = AutoSaveController::new(true, 0);
+        let mut tabs = TabManager::new();
+        // interval_secs=0 means the interval has already elapsed
+        assert!(ctrl.tick(&mut tabs));
+    }
+
+    #[test]
+    fn test_tick_saves_modified_file_backed_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "original").unwrap();
+
+        let mut tabs = TabManager::new();
+        tabs.open_file(&file).unwrap();
+        let doc = tabs.active_doc_mut();
+        doc.insert_text(" modified");
+        assert!(doc.modified);
+
+        let mut ctrl = AutoSaveController::new(true, 0);
+        let saved = ctrl.tick(&mut tabs);
+        assert!(saved);
+        // Document should no longer be marked as modified after save
+        assert!(!tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_tick_skips_unmodified_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let mut tabs = TabManager::new();
+        tabs.open_file(&file).unwrap();
+        assert!(!tabs.active_doc().modified);
+
+        let mut ctrl = AutoSaveController::new(true, 0);
+        let saved = ctrl.tick(&mut tabs);
+        // tick returns true (it ran), but nothing was actually saved
+        assert!(saved);
+        assert!(!tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_tick_skips_unsaved_doc_without_filepath() {
+        let mut tabs = TabManager::new();
+        tabs.active_doc_mut().insert_text("unsaved content");
+        tabs.active_doc_mut().modified = true;
+
+        let mut ctrl = AutoSaveController::new(true, 0);
+        ctrl.tick(&mut tabs);
+        // Doc has no file_path, so it should still be modified
+        assert!(tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_tick_resets_timer() {
+        let mut ctrl = AutoSaveController::new(true, 0);
+        let mut tabs = TabManager::new();
+        // First tick succeeds (interval=0 means always elapsed)
+        assert!(ctrl.tick(&mut tabs));
+        // Second tick with interval_secs=3600 should fail (timer just reset)
+        ctrl.interval_secs = 3600;
+        assert!(!ctrl.tick(&mut tabs));
+    }
+}

@@ -153,7 +153,7 @@ mod tests {
     fn test_galley() -> Arc<Galley> {
         let ctx = egui::Context::default();
         // Must call run() once to initialize fonts
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
         ctx.fonts_mut(|fonts| {
             let job = egui::text::LayoutJob::simple_singleline(
                 "test".to_string(),

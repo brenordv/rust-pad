@@ -184,3 +184,111 @@ impl ThemeController {
         self.zoom_level = 1.0;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editor::EditorTheme;
+
+    /// Helper: create a ThemeController for unit-testing (no egui context needed).
+    fn test_theme_ctrl() -> ThemeController {
+        ThemeController {
+            theme: EditorTheme::default(),
+            theme_mode: ThemeMode::dark(),
+            available_themes: vec![
+                rust_pad_config::theme::builtin_dark(),
+                rust_pad_config::theme::builtin_light(),
+            ],
+            accent_color: Color32::from_rgb(80, 180, 200),
+            syntax_highlighter: SyntaxHighlighter::new(),
+            zoom_level: 1.0,
+            max_zoom_level: 15.0,
+        }
+    }
+
+    // ── zoom_in() ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_zoom_in_increments() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_in();
+        assert!((ctrl.zoom_level - 1.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_zoom_in_clamps_at_max() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_level = 14.95;
+        ctrl.zoom_in();
+        assert!((ctrl.zoom_level - 15.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_zoom_in_does_not_exceed_max() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_level = 15.0;
+        ctrl.zoom_in();
+        assert!((ctrl.zoom_level - 15.0).abs() < f32::EPSILON);
+    }
+
+    // ── zoom_out() ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_zoom_out_decrements() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_out();
+        assert!((ctrl.zoom_level - 0.9).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_zoom_out_clamps_at_min() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_level = 0.55;
+        ctrl.zoom_out();
+        assert!((ctrl.zoom_level - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_zoom_out_does_not_go_below_min() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_level = 0.5;
+        ctrl.zoom_out();
+        assert!((ctrl.zoom_level - 0.5).abs() < f32::EPSILON);
+    }
+
+    // ── zoom_reset() ────────────────────────────────────────────────
+
+    #[test]
+    fn test_zoom_reset_from_high() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_level = 5.0;
+        ctrl.zoom_reset();
+        assert!((ctrl.zoom_level - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_zoom_reset_from_low() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_level = 0.5;
+        ctrl.zoom_reset();
+        assert!((ctrl.zoom_level - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_zoom_reset_already_at_default() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.zoom_reset();
+        assert!((ctrl.zoom_level - 1.0).abs() < f32::EPSILON);
+    }
+
+    // ── zoom with custom max ────────────────────────────────────────
+
+    #[test]
+    fn test_zoom_in_respects_custom_max() {
+        let mut ctrl = test_theme_ctrl();
+        ctrl.max_zoom_level = 2.0;
+        ctrl.zoom_level = 1.95;
+        ctrl.zoom_in();
+        assert!((ctrl.zoom_level - 2.0).abs() < 0.01);
+    }
+}
