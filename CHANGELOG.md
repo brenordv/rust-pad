@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-05
+
+### Added
+
+#### Context Menu
+- Right-click the context menu in the editor area with clipboard actions (Cut, Copy, Paste, Delete), selection actions (Select All, Invert Selection), and scoped text operations.
+- Scoped operations: Convert Case and Line Operations (sort, remove duplicates, remove empty lines) can now target either the entire document or just the current selection.
+- Invert Selection: toggles selection (no selection → select all, full selection → clear, partial → invert to unselected regions).
+
+#### Vertical Selection Improvements
+- Alt+Shift+Up/Down now supports shrink behavior: pressing the opposite direction removes the furthest cursor instead of always adding.
+- New vertical cursors inherit the primary cursor's selection column range.
+
+#### Recent Files
+- Recent files history with configurable max count (1–50, default 10).
+- Automatic cleanup of non-existent files with three strategies: On Startup, When Menu Opens, or Both.
+- "Open Recent" submenu in the File menu with tooltip showing full path.
+- Recent files list persisted in the application configuration.
+
+#### Settings Dialog
+- Redesigned settings dialog with a two-column layout: left navigation sidebar and right scrollable content panel.
+- New "History" settings tab for configuring recent files behavior.
+
+### Changed
+- Menu bar buttons now use `shortcut_text()` for consistent keyboard shortcut display.
+- Editor widget returns a `Response` to support context menu attachment.
+- `merge_overlapping_cursors` visibility changed from `pub(crate)` to `pub`.
+- Find/Replace shortcut (Ctrl+H) added to the Edit menu in addition to the Search menu.
+- Updated dependencies.
+
+
 ## [1.0.0] - 2026-02-15
 
 ### Added

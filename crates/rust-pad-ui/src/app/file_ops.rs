@@ -10,6 +10,17 @@ use rust_pad_config::session::generate_session_id;
 use super::{App, DialogState};
 
 impl App {
+    /// Adds a path to the recent files list, deduplicating and capping at max count.
+    pub(crate) fn track_recent_file(&mut self, path: &Path) {
+        if !self.recent_files_enabled {
+            return;
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.recent_files.retain(|p| p != &canonical);
+        self.recent_files.insert(0, canonical);
+        self.recent_files.truncate(self.recent_files_max_count);
+    }
+
     /// Opens a file dialog and loads the selected file into a new tab.
     pub(crate) fn open_file_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new().set_title("Open File");
@@ -20,6 +31,8 @@ impl App {
             self.update_last_used_folder(&path);
             if let Err(e) = self.tabs.open_file(&path) {
                 tracing::error!("Failed to open file: {e:#}");
+            } else {
+                self.track_recent_file(&path);
             }
         }
     }
@@ -53,6 +66,7 @@ impl App {
                 tracing::error!("Failed to save: {e:#}");
             } else {
                 doc.session_id = None;
+                self.track_recent_file(&path);
             }
         }
     }

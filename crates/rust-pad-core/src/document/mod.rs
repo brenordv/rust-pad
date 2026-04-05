@@ -432,7 +432,7 @@ impl Document {
     }
 
     /// Merges cursors that overlap or are at the same position.
-    pub(crate) fn merge_overlapping_cursors(&mut self) {
+    pub fn merge_overlapping_cursors(&mut self) {
         // Collect all cursor positions (as char indices) to detect duplicates
         let primary_idx = pos_to_char(&self.buffer, self.cursor.position).unwrap_or(0);
         self.secondary_cursors.retain(|sc| {

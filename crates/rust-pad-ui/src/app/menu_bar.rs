@@ -3,9 +3,11 @@
 //! Contains the File, Edit, Search, Encoding, View, Settings, Window, and Help menus.
 
 use eframe::egui;
+use rust_pad_config::RecentFilesCleanup;
 use rust_pad_core::encoding::{LineEnding, TextEncoding};
 use rust_pad_core::line_ops::{CaseConversion, SortOrder};
 
+use super::context_menu::OperationScope;
 use super::{App, ThemeMode};
 
 impl App {
@@ -25,25 +27,46 @@ impl App {
 
     fn show_file_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.menu_button("File", |ui| {
-            if ui.button("New                  Ctrl+N").clicked() {
+            ui.set_min_width(220.0);
+            if ui
+                .add(egui::Button::new("New").shortcut_text("Ctrl+N"))
+                .clicked()
+            {
                 self.new_tab();
                 ui.close();
             }
-            if ui.button("Open...              Ctrl+O").clicked() {
+            if ui
+                .add(egui::Button::new("Open...").shortcut_text("Ctrl+O"))
+                .clicked()
+            {
                 self.open_file_dialog();
                 ui.close();
             }
+
+            if self.recent_files_enabled {
+                self.show_recent_files_submenu(ui);
+            }
+
             ui.separator();
-            if ui.button("Save                 Ctrl+S").clicked() {
+            if ui
+                .add(egui::Button::new("Save").shortcut_text("Ctrl+S"))
+                .clicked()
+            {
                 self.save_active();
                 ui.close();
             }
-            if ui.button("Save As...     Ctrl+Shift+S").clicked() {
+            if ui
+                .add(egui::Button::new("Save As...").shortcut_text("Ctrl+Shift+S"))
+                .clicked()
+            {
                 self.save_as_dialog();
                 ui.close();
             }
             ui.separator();
-            if ui.button("Close Tab            Ctrl+W").clicked() {
+            if ui
+                .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
+                .clicked()
+            {
                 self.request_close_tab(self.tabs.active);
                 ui.close();
             }
@@ -55,42 +78,105 @@ impl App {
         });
     }
 
+    fn show_recent_files_submenu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Open Recent", |ui| {
+            ui.set_min_width(220.0);
+
+            // Filter dead files if cleanup mode requires it
+            if matches!(
+                self.recent_files_cleanup,
+                RecentFilesCleanup::OnMenuOpen | RecentFilesCleanup::Both
+            ) {
+                self.recent_files.retain(|p| p.is_file());
+            }
+
+            if self.recent_files.is_empty() {
+                ui.add_enabled(false, egui::Button::new("No Recent Files"));
+            } else {
+                // Clone paths to avoid borrow issues
+                let paths: Vec<std::path::PathBuf> = self.recent_files.clone();
+                for path in &paths {
+                    let file_name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                    let full_path = path.to_string_lossy().into_owned();
+                    if ui.button(&file_name).on_hover_text(&full_path).clicked() {
+                        if let Err(e) = self.tabs.open_file(path) {
+                            tracing::error!("Failed to open recent file: {e:#}");
+                        } else {
+                            self.track_recent_file(path);
+                        }
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Clear Recent Files List").clicked() {
+                    self.recent_files.clear();
+                    ui.close();
+                }
+            }
+        });
+    }
+
     fn show_edit_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Edit", |ui| {
+            ui.set_min_width(220.0);
             let can_undo = self.tabs.active_doc().history.can_undo();
             let can_redo = self.tabs.active_doc().history.can_redo();
 
             if ui
-                .add_enabled(can_undo, egui::Button::new("Undo            Ctrl+Z"))
+                .add_enabled(can_undo, egui::Button::new("Undo").shortcut_text("Ctrl+Z"))
                 .clicked()
             {
                 self.tabs.active_doc_mut().undo();
                 ui.close();
             }
             if ui
-                .add_enabled(can_redo, egui::Button::new("Redo            Ctrl+Y"))
+                .add_enabled(can_redo, egui::Button::new("Redo").shortcut_text("Ctrl+Y"))
                 .clicked()
             {
                 self.tabs.active_doc_mut().redo();
                 ui.close();
             }
             ui.separator();
-            if ui.button("Cut              Ctrl+X").clicked() {
+            if ui
+                .add(egui::Button::new("Cut").shortcut_text("Ctrl+X"))
+                .clicked()
+            {
                 self.cut();
                 ui.close();
             }
-            if ui.button("Copy             Ctrl+C").clicked() {
+            if ui
+                .add(egui::Button::new("Copy").shortcut_text("Ctrl+C"))
+                .clicked()
+            {
                 self.copy();
                 ui.close();
             }
-            if ui.button("Paste            Ctrl+V").clicked() {
+            if ui
+                .add(egui::Button::new("Paste").shortcut_text("Ctrl+V"))
+                .clicked()
+            {
                 self.paste();
                 ui.close();
             }
             ui.separator();
-            if ui.button("Select All       Ctrl+A").clicked() {
+            if ui
+                .add(egui::Button::new("Select All").shortcut_text("Ctrl+A"))
+                .clicked()
+            {
                 let doc = self.tabs.active_doc_mut();
                 doc.cursor.select_all(&doc.buffer);
+                ui.close();
+            }
+            ui.separator();
+
+            if ui
+                .add(egui::Button::new("Find/Replace").shortcut_text("Ctrl+H"))
+                .clicked()
+            {
+                self.find_replace.open();
                 ui.close();
             }
             ui.separator();
@@ -99,11 +185,17 @@ impl App {
             self.show_line_operations_submenu(ui);
 
             ui.separator();
-            if ui.button("Increase Indent  Tab").clicked() {
+            if ui
+                .add(egui::Button::new("Increase Indent").shortcut_text("Tab"))
+                .clicked()
+            {
                 self.indent_selection(true);
                 ui.close();
             }
-            if ui.button("Decrease Indent  Shift+Tab").clicked() {
+            if ui
+                .add(egui::Button::new("Decrease Indent").shortcut_text("Shift+Tab"))
+                .clicked()
+            {
                 self.indent_selection(false);
                 ui.close();
             }
@@ -113,15 +205,15 @@ impl App {
     fn show_convert_case_submenu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Convert Case", |ui| {
             if ui.button("UPPERCASE").clicked() {
-                self.convert_selection_case(CaseConversion::Upper);
+                self.convert_case_scoped(CaseConversion::Upper, OperationScope::Selection);
                 ui.close();
             }
             if ui.button("lowercase").clicked() {
-                self.convert_selection_case(CaseConversion::Lower);
+                self.convert_case_scoped(CaseConversion::Lower, OperationScope::Selection);
                 ui.close();
             }
             if ui.button("Title Case").clicked() {
-                self.convert_selection_case(CaseConversion::TitleCase);
+                self.convert_case_scoped(CaseConversion::TitleCase, OperationScope::Selection);
                 ui.close();
             }
         });
@@ -129,15 +221,22 @@ impl App {
 
     fn show_line_operations_submenu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Line Operations", |ui| {
+            ui.set_min_width(220.0);
             if ui.button("Duplicate Line").clicked() {
                 self.duplicate_current_line();
                 ui.close();
             }
-            if ui.button("Move Line Up     Alt+Up").clicked() {
+            if ui
+                .add(egui::Button::new("Move Line Up").shortcut_text("Alt+Up"))
+                .clicked()
+            {
                 self.move_current_line_up();
                 ui.close();
             }
-            if ui.button("Move Line Down   Alt+Down").clicked() {
+            if ui
+                .add(egui::Button::new("Move Line Down").shortcut_text("Alt+Down"))
+                .clicked()
+            {
                 self.move_current_line_down();
                 ui.close();
             }
@@ -164,30 +263,49 @@ impl App {
 
     fn show_search_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Search", |ui| {
-            if ui.button("Find/Replace     Ctrl+H").clicked() {
+            ui.set_min_width(220.0);
+            if ui
+                .add(egui::Button::new("Find/Replace").shortcut_text("Ctrl+H"))
+                .clicked()
+            {
                 self.find_replace.open();
                 ui.close();
             }
-            if ui.button("Find             Ctrl+F").clicked() {
+            if ui
+                .add(egui::Button::new("Find").shortcut_text("Ctrl+F"))
+                .clicked()
+            {
                 self.find_replace.open();
                 ui.close();
             }
             ui.separator();
-            if ui.button("Go to Line       Ctrl+G").clicked() {
+            if ui
+                .add(egui::Button::new("Go to Line").shortcut_text("Ctrl+G"))
+                .clicked()
+            {
                 self.go_to_line.open();
                 ui.close();
             }
             ui.separator();
-            if ui.button("Toggle Bookmark  Ctrl+F2").clicked() {
+            if ui
+                .add(egui::Button::new("Toggle Bookmark").shortcut_text("Ctrl+F2"))
+                .clicked()
+            {
                 let line = self.tabs.active_doc().cursor.position.line;
                 self.bookmarks.toggle(line);
                 ui.close();
             }
-            if ui.button("Next Bookmark    F2").clicked() {
+            if ui
+                .add(egui::Button::new("Next Bookmark").shortcut_text("F2"))
+                .clicked()
+            {
                 self.goto_next_bookmark();
                 ui.close();
             }
-            if ui.button("Prev Bookmark    Shift+F2").clicked() {
+            if ui
+                .add(egui::Button::new("Prev Bookmark").shortcut_text("Shift+F2"))
+                .clicked()
+            {
                 self.goto_prev_bookmark();
                 ui.close();
             }
@@ -233,15 +351,25 @@ impl App {
 
     fn show_view_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.menu_button("View", |ui| {
-            if ui.button("Zoom In          Ctrl++").clicked() {
+            ui.set_min_width(220.0);
+            if ui
+                .add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"))
+                .clicked()
+            {
                 self.zoom_level = (self.zoom_level + 0.1).min(self.max_zoom_level);
                 ui.close();
             }
-            if ui.button("Zoom Out         Ctrl+-").clicked() {
+            if ui
+                .add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-"))
+                .clicked()
+            {
                 self.zoom_level = (self.zoom_level - 0.1).max(0.5);
                 ui.close();
             }
-            if ui.button("Reset Zoom       Ctrl+0").clicked() {
+            if ui
+                .add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0"))
+                .clicked()
+            {
                 self.zoom_level = 1.0;
                 ui.close();
             }
@@ -327,21 +455,34 @@ impl App {
 
     fn show_window_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Window", |ui| {
-            if ui.button("New Tab              Ctrl+N").clicked() {
+            ui.set_min_width(220.0);
+            if ui
+                .add(egui::Button::new("New Tab").shortcut_text("Ctrl+N"))
+                .clicked()
+            {
                 self.new_tab();
                 ui.close();
             }
-            if ui.button("Close Tab            Ctrl+W").clicked() {
+            if ui
+                .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
+                .clicked()
+            {
                 self.request_close_tab(self.tabs.active);
                 ui.close();
             }
             ui.separator();
-            if ui.button("Next Tab           Ctrl+Tab").clicked() {
+            if ui
+                .add(egui::Button::new("Next Tab").shortcut_text("Ctrl+Tab"))
+                .clicked()
+            {
                 let next = (self.tabs.active + 1) % self.tabs.tab_count();
                 self.tabs.switch_to(next);
                 ui.close();
             }
-            if ui.button("Previous Tab  Ctrl+Shift+Tab").clicked() {
+            if ui
+                .add(egui::Button::new("Previous Tab").shortcut_text("Ctrl+Shift+Tab"))
+                .clicked()
+            {
                 let count = self.tabs.tab_count();
                 let prev = (self.tabs.active + count - 1) % count;
                 self.tabs.switch_to(prev);

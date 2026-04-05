@@ -1,8 +1,9 @@
 //! In-app settings dialog for configuring all application preferences.
 //!
-//! Provides a tabbed interface for General, Editor, File Dialogs, and Auto-Save settings.
+//! Provides a two-column interface: a left navigation sidebar and a right content panel.
 
 use eframe::egui;
+use rust_pad_config::RecentFilesCleanup;
 
 use super::App;
 
@@ -14,7 +15,11 @@ pub(crate) enum SettingsTab {
     Editor,
     FileDialogs,
     AutoSave,
+    History,
 }
+
+/// Fixed width for the navigation sidebar (in logical pixels).
+const SIDEBAR_WIDTH: f32 = 130.0;
 
 impl App {
     /// Renders the settings dialog window.
@@ -29,30 +34,67 @@ impl App {
         egui::Window::new("Settings")
             .collapsible(false)
             .resizable(true)
-            .default_width(500.0)
+            .default_size([620.0, 420.0])
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                // Tab strip
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.settings_tab, SettingsTab::General, "General");
-                    ui.selectable_value(&mut self.settings_tab, SettingsTab::Editor, "Editor");
-                    ui.selectable_value(
-                        &mut self.settings_tab,
-                        SettingsTab::FileDialogs,
-                        "File Dialogs",
+                // Pin both panels to the full available height so the window
+                // stays the same size regardless of which section is active.
+                let panel_height = ui.available_height();
+
+                ui.horizontal_top(|ui| {
+                    // ── Left navigation sidebar ──────────────────────
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(SIDEBAR_WIDTH, panel_height),
+                        egui::Layout::top_down_justified(egui::Align::LEFT),
+                        |ui| {
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::General,
+                                "General",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::Editor,
+                                "Editor",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::FileDialogs,
+                                "File Dialogs",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::AutoSave,
+                                "Auto-Save",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::History,
+                                "History",
+                            );
+                        },
                     );
-                    ui.selectable_value(&mut self.settings_tab, SettingsTab::AutoSave, "Auto-Save");
+
+                    ui.separator();
+
+                    // ── Right content panel ──────────────────────────
+                    // Explicit top-down layout prevents inheriting the
+                    // horizontal direction from the parent.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), panel_height),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| match self.settings_tab {
+                                SettingsTab::General => self.settings_general(ui, ctx),
+                                SettingsTab::Editor => self.settings_editor(ui),
+                                SettingsTab::FileDialogs => self.settings_file_dialogs(ui),
+                                SettingsTab::AutoSave => self.settings_auto_save(ui),
+                                SettingsTab::History => self.settings_history(ui),
+                            });
+                        },
+                    );
                 });
-
-                ui.separator();
-
-                match self.settings_tab {
-                    SettingsTab::General => self.settings_general(ui, ctx),
-                    SettingsTab::Editor => self.settings_editor(ui),
-                    SettingsTab::FileDialogs => self.settings_file_dialogs(ui),
-                    SettingsTab::AutoSave => self.settings_auto_save(ui),
-                }
             });
 
         if !open {
@@ -195,6 +237,67 @@ impl App {
                     self.auto_save_interval_secs = (interval as u64).max(5);
                 }
             });
+        });
+    }
+
+    fn settings_history(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Recent Files");
+        ui.add_space(4.0);
+
+        ui.checkbox(
+            &mut self.recent_files_enabled,
+            "Enable recent files history",
+        );
+
+        ui.add_space(8.0);
+
+        ui.add_enabled_ui(self.recent_files_enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Max files to show:");
+                let mut count = self.recent_files_max_count as f64;
+                if ui
+                    .add(egui::DragValue::new(&mut count).range(1.0..=50.0))
+                    .changed()
+                {
+                    self.recent_files_max_count = (count as usize).clamp(1, 50);
+                    self.recent_files.truncate(self.recent_files_max_count);
+                }
+            });
+
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label("Remove unavailable files:");
+                egui::ComboBox::from_id_salt("recent_files_cleanup")
+                    .selected_text(match self.recent_files_cleanup {
+                        RecentFilesCleanup::OnStartup => "On Startup",
+                        RecentFilesCleanup::OnMenuOpen => "When Menu Opens",
+                        RecentFilesCleanup::Both => "Both",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.recent_files_cleanup,
+                            RecentFilesCleanup::OnStartup,
+                            "On Startup",
+                        );
+                        ui.selectable_value(
+                            &mut self.recent_files_cleanup,
+                            RecentFilesCleanup::OnMenuOpen,
+                            "When Menu Opens",
+                        );
+                        ui.selectable_value(
+                            &mut self.recent_files_cleanup,
+                            RecentFilesCleanup::Both,
+                            "Both",
+                        );
+                    });
+            });
+
+            ui.add_space(8.0);
+
+            if ui.button("Clear Recent Files List Now").clicked() {
+                self.recent_files.clear();
+            }
         });
     }
 }

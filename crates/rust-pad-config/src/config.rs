@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::{builtin_dark, builtin_light, sample_wacky, ThemeDefinition};
 
+/// When to remove dead (non-existent) files from the recent files list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RecentFilesCleanup {
+    #[default]
+    OnStartup,
+    OnMenuOpen,
+    Both,
+}
+
 /// Top-level application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,6 +39,14 @@ pub struct AppConfig {
     pub auto_save_enabled: bool,
     /// Interval in seconds between auto-saves (minimum 5).
     pub auto_save_interval_secs: u64,
+    /// Whether the recent files feature is enabled.
+    pub recent_files_enabled: bool,
+    /// Maximum number of recent files to remember.
+    pub recent_files_max_count: usize,
+    /// When to prune dead files from the recent list.
+    pub recent_files_cleanup: RecentFilesCleanup,
+    /// Most-recently-opened file paths (most recent first).
+    pub recent_files: Vec<String>,
     pub themes: Vec<ThemeDefinition>,
 }
 
@@ -51,6 +68,10 @@ impl Default for AppConfig {
             last_used_folder: String::new(),
             auto_save_enabled: false,
             auto_save_interval_secs: 30,
+            recent_files_enabled: true,
+            recent_files_max_count: 10,
+            recent_files_cleanup: RecentFilesCleanup::default(),
+            recent_files: Vec::new(),
             themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
         }
     }
@@ -165,6 +186,8 @@ impl AppConfig {
             self.current_theme = "System".to_string();
         }
         self.auto_save_interval_secs = self.auto_save_interval_secs.max(5);
+        self.recent_files_max_count = self.recent_files_max_count.clamp(1, 50);
+        self.recent_files.truncate(self.recent_files_max_count);
     }
 }
 
@@ -332,5 +355,70 @@ mod tests {
         let parsed: AppConfig = serde_json::from_str(json).unwrap();
         assert!(!parsed.auto_save_enabled);
         assert_eq!(parsed.auto_save_interval_secs, 30);
+    }
+
+    // ── Recent files configuration tests ────────────────────────────
+
+    #[test]
+    fn test_recent_files_defaults() {
+        let config = AppConfig::default();
+        assert!(config.recent_files_enabled);
+        assert_eq!(config.recent_files_max_count, 10);
+        assert_eq!(config.recent_files_cleanup, RecentFilesCleanup::OnStartup);
+        assert!(config.recent_files.is_empty());
+    }
+
+    #[test]
+    fn test_recent_files_serde_round_trip() {
+        let mut config = AppConfig::default();
+        config.recent_files_enabled = false;
+        config.recent_files_max_count = 25;
+        config.recent_files_cleanup = RecentFilesCleanup::Both;
+        config.recent_files = vec!["/tmp/a.txt".to_string(), "/tmp/b.rs".to_string()];
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(!parsed.recent_files_enabled);
+        assert_eq!(parsed.recent_files_max_count, 25);
+        assert_eq!(parsed.recent_files_cleanup, RecentFilesCleanup::Both);
+        assert_eq!(parsed.recent_files.len(), 2);
+    }
+
+    #[test]
+    fn test_sanitize_clamps_recent_files_max_count() {
+        let mut config = AppConfig::default();
+        config.recent_files_max_count = 0;
+        config.sanitize();
+        assert_eq!(config.recent_files_max_count, 1);
+
+        config.recent_files_max_count = 100;
+        config.sanitize();
+        assert_eq!(config.recent_files_max_count, 50);
+    }
+
+    #[test]
+    fn test_sanitize_truncates_recent_files() {
+        let mut config = AppConfig::default();
+        config.recent_files_max_count = 3;
+        config.recent_files = vec![
+            "a.txt".to_string(),
+            "b.txt".to_string(),
+            "c.txt".to_string(),
+            "d.txt".to_string(),
+            "e.txt".to_string(),
+        ];
+        config.sanitize();
+        assert_eq!(config.recent_files.len(), 3);
+    }
+
+    #[test]
+    fn test_recent_files_missing_fields_get_defaults() {
+        let json = r#"{"current_theme": "Dark"}"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.recent_files_enabled);
+        assert_eq!(parsed.recent_files_max_count, 10);
+        assert_eq!(parsed.recent_files_cleanup, RecentFilesCleanup::OnStartup);
+        assert!(parsed.recent_files.is_empty());
     }
 }
