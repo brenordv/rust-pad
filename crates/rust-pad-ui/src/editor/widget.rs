@@ -544,6 +544,16 @@ impl<'a> EditorWidget<'a> {
             .map(|needle| self.find_occurrence_ranges(&needle, &all_selection_ranges))
             .unwrap_or_default();
 
+        // Bracket matching: find matched pair for primary cursor position.
+        let bracket_positions = {
+            use rust_pad_core::bracket::find_matching_bracket;
+            use rust_pad_core::cursor::pos_to_char;
+            let cursor_char = pos_to_char(&self.doc.buffer, self.doc.cursor.position).unwrap_or(0);
+            find_matching_bracket(&self.doc.buffer, cursor_char)
+                .map(|pair| [(pair.open, pair.open + 1), (pair.close, pair.close + 1)])
+                .unwrap_or_default()
+        };
+
         {
             let cache = get_render_cache(&mut self.doc.render_cache);
             cache.validate(self.doc.content_version, layout.effective_font_size);
@@ -564,6 +574,7 @@ impl<'a> EditorWidget<'a> {
                 last_visual,
                 &all_selection_ranges,
                 &occurrence_ranges,
+                &bracket_positions,
                 &cursor_lines,
                 wm,
             );
@@ -594,6 +605,7 @@ impl<'a> EditorWidget<'a> {
                 last_visible_line,
                 &all_selection_ranges,
                 &occurrence_ranges,
+                &bracket_positions,
                 &cursor_lines,
             );
             self.render_cursors(
@@ -813,6 +825,7 @@ impl<'a> EditorWidget<'a> {
         info: &LineSegmentInfo<'_>,
         all_selection_ranges: &[(usize, usize)],
         occurrence_ranges: &[(usize, usize)],
+        bracket_positions: &[(usize, usize)],
     ) {
         let badge_char_width = char_width * 0.7;
         let has_badges = self.show_special_chars && Self::line_has_badges(info.content);
@@ -833,6 +846,16 @@ impl<'a> EditorWidget<'a> {
             text_area,
             info,
             occurrence_ranges,
+            x_positions.as_deref(),
+        );
+
+        self.render_bracket_highlights(
+            painter,
+            line_height,
+            char_width,
+            text_area,
+            info,
+            bracket_positions,
             x_positions.as_deref(),
         );
 
@@ -920,6 +943,36 @@ impl<'a> EditorWidget<'a> {
                     Pos2::new(x_end.min(text_area.max.x), info.line_y + line_height),
                 );
                 painter.rect_filled(occ_rect, 0.0, self.theme.occurrence_highlight_color);
+            }
+        }
+    }
+
+    /// Draws bracket-highlight rectangles for matched bracket positions within a segment.
+    #[allow(clippy::too_many_arguments)]
+    fn render_bracket_highlights(
+        &self,
+        painter: &egui::Painter,
+        line_height: f32,
+        char_width: f32,
+        text_area: &Rect,
+        info: &LineSegmentInfo<'_>,
+        bracket_positions: &[(usize, usize)],
+        x_positions: Option<&[f32]>,
+    ) {
+        let seg_len = info.segment_char_end - info.segment_char_start;
+        for &(br_start, br_end) in bracket_positions {
+            if br_start < info.segment_char_end && br_end > info.segment_char_start {
+                let col_start = br_start.saturating_sub(info.segment_char_start);
+                let col_end = br_end.saturating_sub(info.segment_char_start).min(seg_len);
+                let x_start = text_area.min.x + Self::col_to_x(x_positions, col_start, char_width)
+                    - info.scroll_x;
+                let x_end = text_area.min.x + Self::col_to_x(x_positions, col_end, char_width)
+                    - info.scroll_x;
+                let br_rect = Rect::from_min_max(
+                    Pos2::new(x_start.max(text_area.min.x), info.line_y),
+                    Pos2::new(x_end.min(text_area.max.x), info.line_y + line_height),
+                );
+                painter.rect_filled(br_rect, 0.0, self.theme.matching_bracket_color);
             }
         }
     }
@@ -1152,6 +1205,7 @@ impl<'a> EditorWidget<'a> {
         last_visible: usize,
         all_selection_ranges: &[(usize, usize)],
         occurrence_ranges: &[(usize, usize)],
+        bracket_positions: &[(usize, usize)],
         cursor_lines: &[usize],
     ) {
         // Clip text and selection rendering to the text area so horizontally
@@ -1217,6 +1271,7 @@ impl<'a> EditorWidget<'a> {
                 &info,
                 all_selection_ranges,
                 occurrence_ranges,
+                bracket_positions,
             );
         }
     }
@@ -1341,6 +1396,7 @@ impl<'a> EditorWidget<'a> {
         last_visual: usize,
         all_selection_ranges: &[(usize, usize)],
         occurrence_ranges: &[(usize, usize)],
+        bracket_positions: &[(usize, usize)],
         cursor_lines: &[usize],
         wm: &WrapMap,
     ) {
@@ -1433,6 +1489,7 @@ impl<'a> EditorWidget<'a> {
                 &info,
                 all_selection_ranges,
                 occurrence_ranges,
+                bracket_positions,
             );
         }
     }

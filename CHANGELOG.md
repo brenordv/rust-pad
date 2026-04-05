@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.2.0] - 2026-04-05
 
+### Added
+
+#### Auto-Indent on Enter
+- Pressing Enter now inherits the leading whitespace (spaces or tabs) from the current line, matching the behavior of VS Code and Notepad++.
+- Works with multi-cursor editing: each cursor inherits indent from its own line.
+
+#### Bracket Matching Highlights
+- When the cursor is on or adjacent to a bracket (`(`, `)`, `[`, `]`, `{`, `}`), both the bracket and its matching counterpart are highlighted with a background color.
+- Supports nested and mixed bracket types. Search is capped at 10,000 characters to avoid freezing on large files.
+- Highlight color is theme-aware and configurable via the `matching_bracket_color` field in custom themes.
+
 ### Changed
 
 #### Dependencies

@@ -219,6 +219,27 @@ impl TextBuffer {
         Ok(self.rope.byte_to_char(byte_idx))
     }
 
+    /// Returns the leading whitespace of the given line as a `String`.
+    ///
+    /// Scans from the start of the line until the first non-whitespace character
+    /// (or end of line). Tabs and spaces are preserved as-is.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the line index is out of bounds.
+    pub fn leading_whitespace(&self, line_idx: usize) -> Result<String> {
+        let line = self.line(line_idx)?;
+        let mut ws = String::new();
+        for ch in line.chars() {
+            if ch == ' ' || ch == '\t' {
+                ws.push(ch);
+            } else {
+                break;
+            }
+        }
+        Ok(ws)
+    }
+
     /// Replaces text in the given char range with new text.
     ///
     /// # Errors
@@ -581,5 +602,45 @@ mod tests {
         assert_eq!(buf.line_to_char(0).unwrap(), 0);
         assert_eq!(buf.line_to_char(1).unwrap(), 4);
         assert_eq!(buf.line_to_char(2).unwrap(), 8);
+    }
+
+    // ── leading_whitespace ──────────────────────────────────────────
+
+    #[test]
+    fn test_leading_whitespace_spaces() {
+        let buf = TextBuffer::from("    hello\nworld");
+        assert_eq!(buf.leading_whitespace(0).unwrap(), "    ");
+        assert_eq!(buf.leading_whitespace(1).unwrap(), "");
+    }
+
+    #[test]
+    fn test_leading_whitespace_tabs() {
+        let buf = TextBuffer::from("\t\thello\n\tworld");
+        assert_eq!(buf.leading_whitespace(0).unwrap(), "\t\t");
+        assert_eq!(buf.leading_whitespace(1).unwrap(), "\t");
+    }
+
+    #[test]
+    fn test_leading_whitespace_mixed() {
+        let buf = TextBuffer::from(" \t hello");
+        assert_eq!(buf.leading_whitespace(0).unwrap(), " \t ");
+    }
+
+    #[test]
+    fn test_leading_whitespace_all_whitespace_line() {
+        let buf = TextBuffer::from("   \nhello");
+        assert_eq!(buf.leading_whitespace(0).unwrap(), "   ");
+    }
+
+    #[test]
+    fn test_leading_whitespace_empty_line() {
+        let buf = TextBuffer::from("hello\n\nworld");
+        assert_eq!(buf.leading_whitespace(1).unwrap(), "");
+    }
+
+    #[test]
+    fn test_leading_whitespace_out_of_bounds() {
+        let buf = TextBuffer::from("hello");
+        assert!(buf.leading_whitespace(5).is_err());
     }
 }

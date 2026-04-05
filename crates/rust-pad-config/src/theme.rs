@@ -22,17 +22,19 @@ pub struct EditorColors {
     pub scrollbar_thumb_hover: HexColor,
     pub scrollbar_thumb_active: HexColor,
     pub occurrence_highlight_color: HexColor,
+    pub matching_bracket_color: HexColor,
     pub special_char_color: HexColor,
 }
 
 impl EditorColors {
-    /// Constructs from an ordered array of 16 colors.
+    /// Constructs from an ordered array of 17 colors.
     ///
     /// Order: bg, text, cursor, selection, line\_number, line\_number\_bg,
     /// current\_line\_highlight, modified\_line, saved\_line, gutter\_separator,
     /// scrollbar\_track, scrollbar\_thumb\_idle, scrollbar\_thumb\_hover,
-    /// scrollbar\_thumb\_active, occurrence\_highlight, special\_char.
-    fn from_palette(c: [HexColor; 16]) -> Self {
+    /// scrollbar\_thumb\_active, occurrence\_highlight, matching\_bracket,
+    /// special\_char.
+    fn from_palette(c: [HexColor; 17]) -> Self {
         Self {
             bg_color: c[0],
             text_color: c[1],
@@ -49,7 +51,8 @@ impl EditorColors {
             scrollbar_thumb_hover: c[12],
             scrollbar_thumb_active: c[13],
             occurrence_highlight_color: c[14],
-            special_char_color: c[15],
+            matching_bracket_color: c[15],
+            special_char_color: c[16],
         }
     }
 }
@@ -72,6 +75,7 @@ impl Default for EditorColors {
             HexColor::rgb(110, 110, 110),       // scrollbar_thumb_hover
             HexColor::rgb(140, 140, 140),       // scrollbar_thumb_active
             HexColor::rgba(100, 100, 50, 80),   // occurrence_highlight
+            HexColor::rgba(180, 160, 60, 90),   // matching_bracket
             HexColor::rgba(100, 100, 100, 180), // special_char
         ])
     }
@@ -152,7 +156,7 @@ impl ThemeDefinition {
         name: &str,
         dark_mode: bool,
         syntax_theme: &str,
-        editor: [HexColor; 16],
+        editor: [HexColor; 17],
         ui: [HexColor; 9],
     ) -> Self {
         Self {
@@ -198,6 +202,7 @@ pub fn builtin_light() -> ThemeDefinition {
             HexColor::rgb(160, 160, 160),       // scrollbar_thumb_hover
             HexColor::rgb(130, 130, 130),       // scrollbar_thumb_active
             HexColor::rgba(255, 210, 80, 80),   // occurrence_highlight
+            HexColor::rgba(60, 120, 200, 90),   // matching_bracket
             HexColor::rgba(170, 170, 170, 180), // special_char
         ],
         [
@@ -236,6 +241,7 @@ pub fn sample_wacky() -> ThemeDefinition {
             HexColor::rgb(205, 133, 63),        // scrollbar_thumb_hover — peru
             HexColor::rgb(255, 69, 0),          // scrollbar_thumb_active — orange-red
             HexColor::rgba(255, 0, 255, 80),    // occurrence_highlight — magenta
+            HexColor::rgba(255, 215, 0, 100),   // matching_bracket — gold
             HexColor::rgba(255, 105, 180, 180), // special_char — hot pink
         ],
         [
