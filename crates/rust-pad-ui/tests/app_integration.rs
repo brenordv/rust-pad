@@ -771,7 +771,7 @@ fn test_enter_inserts_newline() {
 }
 
 #[test]
-fn test_enter_no_auto_indent() {
+fn test_enter_auto_indent() {
     let mut harness = create_harness();
     harness
         .state_mut()
@@ -783,13 +783,14 @@ fn test_enter_no_auto_indent() {
     harness.run();
 
     let doc = harness.state().tabs.active_doc();
-    assert_eq!(doc.buffer.to_string(), "    code\n");
+    // Auto-indent: new line inherits 4-space indent
+    assert_eq!(doc.buffer.to_string(), "    code\n    ");
     assert_eq!(doc.cursor.position.line, 1);
-    assert_eq!(doc.cursor.position.col, 0);
+    assert_eq!(doc.cursor.position.col, 4);
 }
 
 #[test]
-fn test_enter_in_middle_of_line_splits_correctly() {
+fn test_enter_in_middle_of_line_auto_indents() {
     let mut harness = create_harness();
     harness
         .state_mut()
@@ -808,14 +809,14 @@ fn test_enter_in_middle_of_line_splits_correctly() {
     harness.run();
 
     let doc = harness.state().tabs.active_doc();
-    // Plain newline: "    hello" + "\n" + " world"
-    assert_eq!(doc.buffer.to_string(), "    hello\n world");
+    // Auto-indent: inherits 4-space indent
+    assert_eq!(doc.buffer.to_string(), "    hello\n     world");
     assert_eq!(doc.cursor.position.line, 1);
-    assert_eq!(doc.cursor.position.col, 0);
+    assert_eq!(doc.cursor.position.col, 4);
 }
 
 #[test]
-fn test_enter_multiple_times_no_indent() {
+fn test_enter_multiple_times_inherits_indent() {
     let mut harness = create_harness();
     harness
         .state_mut()
@@ -829,9 +830,10 @@ fn test_enter_multiple_times_no_indent() {
     harness.run();
 
     let doc = harness.state().tabs.active_doc();
-    assert_eq!(doc.buffer.to_string(), "    start\n\n");
+    // Each newline inherits indent from its current line
+    assert_eq!(doc.buffer.to_string(), "    start\n    \n    ");
     assert_eq!(doc.cursor.position.line, 2);
-    assert_eq!(doc.cursor.position.col, 0);
+    assert_eq!(doc.cursor.position.col, 4);
 }
 
 #[test]
@@ -847,7 +849,7 @@ fn test_enter_on_empty_line() {
 }
 
 #[test]
-fn test_enter_with_tab_indent_no_copy() {
+fn test_enter_with_tab_indent_inherits() {
     let mut harness = create_harness();
     harness
         .state_mut()
@@ -859,9 +861,10 @@ fn test_enter_with_tab_indent_no_copy() {
     harness.run();
 
     let doc = harness.state().tabs.active_doc();
-    assert_eq!(doc.buffer.to_string(), "\thello\n");
+    // Auto-indent: inherits tab
+    assert_eq!(doc.buffer.to_string(), "\thello\n\t");
     assert_eq!(doc.cursor.position.line, 1);
-    assert_eq!(doc.cursor.position.col, 0);
+    assert_eq!(doc.cursor.position.col, 1);
 }
 
 // ── O. Double-click on empty tab bar space creates new tab ──────────
