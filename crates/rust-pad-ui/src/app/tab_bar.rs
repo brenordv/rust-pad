@@ -86,7 +86,7 @@ impl App {
                     egui::Pos2::new(tab_rect.min.x, tab_rect.min.y),
                     egui::Pos2::new(tab_rect.max.x, tab_rect.min.y),
                 ],
-                Stroke::new(2.0, self.accent_color),
+                Stroke::new(2.0, self.theme_ctrl.accent_color),
             );
         }
 

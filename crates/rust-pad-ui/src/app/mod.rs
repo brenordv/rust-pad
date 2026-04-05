@@ -1,31 +1,40 @@
 //! Top-level application tying together tabs, editor, menus, and status bar.
 
 mod about_dialog;
+mod auto_save;
 mod clipboard;
 mod context_menu;
 mod editing;
+mod file_dialog_state;
 mod file_ops;
+mod live_monitor;
 mod menu_bar;
+mod recent_files;
 mod search;
 mod settings_dialog;
 mod shortcuts;
 mod status_bar;
 mod tab_bar;
+mod theme_controller;
+
+pub use auto_save::AutoSaveController;
+pub use file_dialog_state::FileDialogState;
+pub use live_monitor::LiveMonitorController;
+pub use recent_files::RecentFilesManager;
+pub use theme_controller::ThemeController;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use egui::Color32;
-
 use rust_pad_config::session::{generate_session_id, SessionData, SessionStore, SessionTabEntry};
-use rust_pad_config::{AppConfig, RecentFilesCleanup, ThemeDefinition, UiColors};
+use rust_pad_config::AppConfig;
 use rust_pad_core::bookmarks::BookmarkManager;
 use rust_pad_core::cursor::Position;
 use rust_pad_core::history::{HistoryConfig, PersistenceLayer};
 
 use crate::dialogs::{FindReplaceDialog, GoToLineDialog};
-use crate::editor::{EditorTheme, EditorWidget, SyntaxHighlighter};
+use crate::editor::EditorWidget;
 use crate::tabs::TabManager;
 
 /// How often to flush undo history to disk (in seconds).
@@ -88,39 +97,25 @@ impl ThemeMode {
 /// The main application state.
 pub struct App {
     pub tabs: TabManager,
-    pub theme: EditorTheme,
-    pub theme_mode: ThemeMode,
-    pub zoom_level: f32,
-    pub max_zoom_level: f32,
+    pub theme_ctrl: ThemeController,
     pub word_wrap: bool,
     pub show_special_chars: bool,
     pub show_line_numbers: bool,
     pub restore_open_files: bool,
     pub show_full_path_in_title: bool,
-    pub default_extension: String,
-    pub remember_last_folder: bool,
-    pub default_work_folder: String,
-    pub last_used_folder: Option<PathBuf>,
-    pub auto_save_enabled: bool,
-    pub auto_save_interval_secs: u64,
-    last_auto_save: Instant,
-    pub recent_files_enabled: bool,
-    pub recent_files_max_count: usize,
-    pub recent_files_cleanup: RecentFilesCleanup,
-    pub recent_files: Vec<PathBuf>,
-    pub available_themes: Vec<ThemeDefinition>,
-    accent_color: Color32,
+    pub file_dialog: FileDialogState,
+    pub auto_save: AutoSaveController,
+    pub recent_files: RecentFilesManager,
     config_path: PathBuf,
     clipboard: Option<arboard::Clipboard>,
     dialog_state: DialogState,
     pub find_replace: FindReplaceDialog,
     pub go_to_line: GoToLineDialog,
     bookmarks: BookmarkManager,
-    syntax_highlighter: SyntaxHighlighter,
     last_flush: Instant,
     session_store: Option<SessionStore>,
     last_window_title: String,
-    last_file_check: Instant,
+    live_monitor: LiveMonitorController,
     pub(crate) settings_open: bool,
     pub(crate) settings_tab: settings_dialog::SettingsTab,
     pub(crate) about_open: bool,
@@ -144,34 +139,14 @@ impl App {
         let config_path = AppConfig::config_path();
         let app_config = AppConfig::load_or_create(&config_path);
 
-        let mut theme_mode = ThemeMode(app_config.current_theme.clone());
-        let resolved_name = theme_mode.resolve().to_string();
-        let font_size = app_config.font_size;
-
-        // Resolve theme definition; fall back to System if the theme doesn't exist
-        let theme_def = match app_config.find_theme(&resolved_name).cloned() {
-            Some(def) => def,
-            None => {
-                tracing::warn!(
-                    "Theme '{}' not found, falling back to System",
-                    resolved_name
-                );
-                theme_mode = ThemeMode::system();
-                let fallback_name = theme_mode.resolve().to_string();
-                app_config
-                    .find_theme(&fallback_name)
-                    .cloned()
-                    .unwrap_or_else(rust_pad_config::theme::builtin_dark)
-            }
-        };
-
-        let editor_theme = EditorTheme::from_config(&theme_def.editor, font_size);
-        Self::apply_theme_visuals(&cc.egui_ctx, &theme_def.ui, theme_def.dark_mode);
-        let ac = theme_def.ui.accent_color;
-        let accent_color = Color32::from_rgba_premultiplied(ac.r, ac.g, ac.b, ac.a);
-
-        let mut syntax_highlighter = SyntaxHighlighter::new();
-        syntax_highlighter.set_theme(&theme_def.syntax_theme);
+        let theme_ctrl = ThemeController::new(
+            &app_config.current_theme,
+            app_config.font_size,
+            app_config.current_zoom_level,
+            app_config.max_zoom_level,
+            app_config.themes.clone(),
+            &cc.egui_ctx,
+        );
 
         let history_config = HistoryConfig::default();
         let mut tabs = match PersistenceLayer::open(&history_config.data_dir) {
@@ -204,53 +179,42 @@ impl App {
 
         Self {
             tabs,
-            theme: editor_theme,
-            theme_mode,
-            zoom_level: app_config.current_zoom_level,
-            max_zoom_level: app_config.max_zoom_level,
+            theme_ctrl,
             word_wrap: app_config.word_wrap,
             show_special_chars: app_config.show_special_chars,
             show_line_numbers: app_config.show_line_numbers,
             restore_open_files: app_config.restore_open_files,
             show_full_path_in_title: app_config.show_full_path_in_title,
-            default_extension: app_config.default_extension,
-            remember_last_folder: app_config.remember_last_folder,
-            default_work_folder: app_config.default_work_folder,
-            last_used_folder: if app_config.last_used_folder.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(app_config.last_used_folder))
+            file_dialog: FileDialogState {
+                remember_last_folder: app_config.remember_last_folder,
+                default_work_folder: app_config.default_work_folder,
+                last_used_folder: if app_config.last_used_folder.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(app_config.last_used_folder))
+                },
+                default_extension: app_config.default_extension.clone(),
             },
-            auto_save_enabled: app_config.auto_save_enabled,
-            auto_save_interval_secs: app_config.auto_save_interval_secs,
-            last_auto_save: Instant::now(),
-            recent_files_enabled: app_config.recent_files_enabled,
-            recent_files_max_count: app_config.recent_files_max_count,
-            recent_files_cleanup: app_config.recent_files_cleanup,
-            recent_files: {
-                let mut files: Vec<PathBuf> =
-                    app_config.recent_files.iter().map(PathBuf::from).collect();
-                if matches!(
-                    app_config.recent_files_cleanup,
-                    RecentFilesCleanup::OnStartup | RecentFilesCleanup::Both
-                ) {
-                    files.retain(|p| p.is_file());
-                }
-                files
-            },
-            available_themes: app_config.themes,
-            accent_color,
+            auto_save: AutoSaveController::new(
+                app_config.auto_save_enabled,
+                app_config.auto_save_interval_secs,
+            ),
+            recent_files: RecentFilesManager::new(
+                app_config.recent_files_enabled,
+                app_config.recent_files_max_count,
+                app_config.recent_files_cleanup,
+                app_config.recent_files,
+            ),
             config_path,
             clipboard: arboard::Clipboard::new().ok(),
             dialog_state: DialogState::None,
             find_replace: FindReplaceDialog::new(),
             go_to_line: GoToLineDialog::new(),
             bookmarks: BookmarkManager::new(),
-            syntax_highlighter,
             last_flush: Instant::now(),
             session_store,
             last_window_title: String::new(),
-            last_file_check: Instant::now(),
+            live_monitor: LiveMonitorController::new(),
             settings_open: false,
             settings_tab: settings_dialog::SettingsTab::default(),
             about_open: false,
@@ -338,61 +302,6 @@ impl App {
         }
     }
 
-    /// Applies egui visuals from config UI colors.
-    fn apply_theme_visuals(ctx: &egui::Context, ui_colors: &UiColors, dark_mode: bool) {
-        let hex = |c: rust_pad_config::HexColor| -> Color32 {
-            Color32::from_rgba_premultiplied(c.r, c.g, c.b, c.a)
-        };
-        let mut visuals = if dark_mode {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
-
-        // Fill colors
-        visuals.panel_fill = hex(ui_colors.panel_fill);
-        visuals.window_fill = hex(ui_colors.window_fill);
-        visuals.faint_bg_color = hex(ui_colors.faint_bg_color);
-        visuals.extreme_bg_color = hex(ui_colors.extreme_bg_color);
-        visuals.widgets.noninteractive.bg_fill = hex(ui_colors.widget_noninteractive_bg);
-        visuals.widgets.inactive.bg_fill = hex(ui_colors.widget_inactive_bg);
-        visuals.widgets.hovered.bg_fill = hex(ui_colors.widget_hovered_bg);
-        visuals.widgets.active.bg_fill = hex(ui_colors.widget_active_bg);
-
-        // Widget rounding — consistent 4px on all states
-        let widget_rounding = egui::CornerRadius::same(4);
-        visuals.widgets.noninteractive.corner_radius = widget_rounding;
-        visuals.widgets.inactive.corner_radius = widget_rounding;
-        visuals.widgets.hovered.corner_radius = widget_rounding;
-        visuals.widgets.active.corner_radius = widget_rounding;
-        visuals.widgets.open.corner_radius = widget_rounding;
-
-        // Window/menu rounding
-        visuals.window_corner_radius = egui::CornerRadius::same(6);
-        visuals.menu_corner_radius = egui::CornerRadius::same(4);
-
-        // Clean borders
-        visuals.widgets.noninteractive.bg_stroke.width = 0.0;
-        visuals.window_stroke.width = 1.0;
-
-        // Popup shadow — minimal
-        visuals.popup_shadow = egui::Shadow {
-            offset: [0, 2],
-            blur: 8,
-            spread: 0,
-            color: Color32::from_black_alpha(40),
-        };
-
-        ctx.set_visuals(visuals);
-
-        // Spacing
-        ctx.global_style_mut(|style| {
-            style.spacing.item_spacing = egui::Vec2::new(8.0, 6.0);
-            style.spacing.button_padding = egui::Vec2::new(8.0, 4.0);
-            style.spacing.window_margin = egui::Margin::same(12);
-        });
-    }
-
     /// Updates the OS window title to show the active document name.
     ///
     /// Only sends the viewport command when the title actually changes,
@@ -414,41 +323,6 @@ impl App {
             self.last_window_title.clone_from(&title);
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         }
-    }
-
-    /// Switches to a new theme mode and applies all theme changes.
-    pub fn set_theme_mode(&mut self, mode: ThemeMode, ctx: &egui::Context) {
-        self.theme_mode = mode;
-        let resolved_name = self.theme_mode.resolve().to_string();
-
-        // Fall back to System if the resolved theme doesn't exist
-        let theme_def = match self
-            .available_themes
-            .iter()
-            .find(|t| t.name == resolved_name)
-            .cloned()
-        {
-            Some(def) => def,
-            None => {
-                tracing::warn!(
-                    "Theme '{}' not found, falling back to System",
-                    resolved_name
-                );
-                self.theme_mode = ThemeMode::system();
-                let fallback_name = self.theme_mode.resolve().to_string();
-                self.available_themes
-                    .iter()
-                    .find(|t| t.name == fallback_name)
-                    .cloned()
-                    .unwrap_or_else(rust_pad_config::theme::builtin_dark)
-            }
-        };
-
-        self.theme = EditorTheme::from_config(&theme_def.editor, self.theme.font_size);
-        Self::apply_theme_visuals(ctx, &theme_def.ui, theme_def.dark_mode);
-        let ac = theme_def.ui.accent_color;
-        self.accent_color = Color32::from_rgba_premultiplied(ac.r, ac.g, ac.b, ac.a);
-        self.syntax_highlighter.set_theme(&theme_def.syntax_theme);
     }
 
     /// Shows all dialog windows.
@@ -580,15 +454,15 @@ impl eframe::App for App {
         // Editor area
         let dialog_open = self.is_dialog_open();
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(self.theme.bg_color))
+            .frame(egui::Frame::NONE.fill(self.theme_ctrl.theme.bg_color))
             .show_inside(ui, |ui| {
                 let (response, zoom_request) = {
                     let doc = self.tabs.active_doc_mut();
                     let mut editor = EditorWidget::new(
                         doc,
-                        &self.theme,
-                        self.zoom_level,
-                        Some(&self.syntax_highlighter),
+                        &self.theme_ctrl.theme,
+                        self.theme_ctrl.zoom_level,
+                        Some(&self.theme_ctrl.syntax_highlighter),
                     );
                     editor.word_wrap = self.word_wrap;
                     editor.show_special_chars = self.show_special_chars;
@@ -603,8 +477,8 @@ impl eframe::App for App {
                 });
 
                 if zoom_request != 1.0 {
-                    self.zoom_level =
-                        (self.zoom_level * zoom_request).clamp(0.5, self.max_zoom_level);
+                    self.theme_ctrl.zoom_level = (self.theme_ctrl.zoom_level * zoom_request)
+                        .clamp(0.5, self.theme_ctrl.max_zoom_level);
                 }
             });
 
@@ -612,10 +486,7 @@ impl eframe::App for App {
         self.show_dialogs(&ctx);
 
         // Live file monitoring: check for external changes every second
-        if self.last_file_check.elapsed() >= Duration::from_secs(1) {
-            self.check_live_monitored_files();
-            self.last_file_check = Instant::now();
-        }
+        self.live_monitor.tick(&mut self.tabs);
 
         // Periodic flush of undo history to disk
         if self.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
@@ -624,18 +495,13 @@ impl eframe::App for App {
         }
 
         // Auto-save file-backed documents
-        if self.auto_save_enabled
-            && self.last_auto_save.elapsed() >= Duration::from_secs(self.auto_save_interval_secs)
-        {
-            self.auto_save_all();
-            self.last_auto_save = Instant::now();
-        }
+        self.auto_save.tick(&mut self.tabs);
 
         let has_live_monitoring = self.tabs.documents.iter().any(|d| d.live_monitoring);
         let next_repaint = if has_live_monitoring {
             Duration::from_secs(1)
-        } else if self.auto_save_enabled {
-            Duration::from_secs(self.auto_save_interval_secs.min(FLUSH_INTERVAL_SECS))
+        } else if let Some(interval) = self.auto_save.repaint_interval() {
+            interval.min(Duration::from_secs(FLUSH_INTERVAL_SECS))
         } else {
             Duration::from_secs(FLUSH_INTERVAL_SECS)
         };
@@ -676,34 +542,31 @@ impl eframe::App for App {
 
         // Save current preferences to config file
         let config = AppConfig {
-            current_theme: self.theme_mode.0.clone(),
-            current_zoom_level: self.zoom_level,
-            max_zoom_level: self.max_zoom_level,
+            current_theme: self.theme_ctrl.theme_mode.0.clone(),
+            current_zoom_level: self.theme_ctrl.zoom_level,
+            max_zoom_level: self.theme_ctrl.max_zoom_level,
             word_wrap: self.word_wrap,
             show_special_chars: self.show_special_chars,
             show_line_numbers: self.show_line_numbers,
             restore_open_files: self.restore_open_files,
             show_full_path_in_title: self.show_full_path_in_title,
-            font_size: self.theme.font_size,
-            default_extension: self.default_extension.clone(),
-            remember_last_folder: self.remember_last_folder,
-            default_work_folder: self.default_work_folder.clone(),
+            font_size: self.theme_ctrl.theme.font_size,
+            default_extension: self.file_dialog.default_extension.clone(),
+            remember_last_folder: self.file_dialog.remember_last_folder,
+            default_work_folder: self.file_dialog.default_work_folder.clone(),
             last_used_folder: self
+                .file_dialog
                 .last_used_folder
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            auto_save_enabled: self.auto_save_enabled,
-            auto_save_interval_secs: self.auto_save_interval_secs,
-            recent_files_enabled: self.recent_files_enabled,
-            recent_files_max_count: self.recent_files_max_count,
-            recent_files_cleanup: self.recent_files_cleanup,
-            recent_files: self
-                .recent_files
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
-            themes: self.available_themes.clone(),
+            auto_save_enabled: self.auto_save.enabled,
+            auto_save_interval_secs: self.auto_save.interval_secs,
+            recent_files_enabled: self.recent_files.enabled,
+            recent_files_max_count: self.recent_files.max_count,
+            recent_files_cleanup: self.recent_files.cleanup,
+            recent_files: self.recent_files.to_config_strings(),
+            themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
             tracing::warn!("Failed to save config on exit: {e}");
@@ -715,6 +578,9 @@ impl eframe::App for App {
 mod tests {
     use super::*;
     use crate::dialogs::{FindReplaceAction, SearchScope};
+    use crate::editor::{EditorTheme, SyntaxHighlighter};
+    use egui::Color32;
+    use rust_pad_config::RecentFilesCleanup;
     use rust_pad_core::encoding::{LineEnding, TextEncoding};
     use rust_pad_core::line_ops::{CaseConversion, SortOrder};
 
@@ -722,43 +588,47 @@ mod tests {
     fn test_app() -> App {
         App {
             tabs: TabManager::new(),
-            theme: EditorTheme::default(),
-            theme_mode: ThemeMode::dark(),
-            zoom_level: 1.0,
-            max_zoom_level: 15.0,
+            theme_ctrl: ThemeController {
+                theme: EditorTheme::default(),
+                theme_mode: ThemeMode::dark(),
+                zoom_level: 1.0,
+                max_zoom_level: 15.0,
+                available_themes: vec![
+                    rust_pad_config::theme::builtin_dark(),
+                    rust_pad_config::theme::builtin_light(),
+                    rust_pad_config::theme::sample_wacky(),
+                ],
+                accent_color: Color32::from_rgb(80, 180, 200),
+                syntax_highlighter: SyntaxHighlighter::new(),
+            },
             word_wrap: false,
             show_special_chars: false,
             show_line_numbers: true,
             restore_open_files: true,
             show_full_path_in_title: true,
-            default_extension: String::new(),
-            remember_last_folder: true,
-            default_work_folder: String::new(),
-            last_used_folder: None,
-            auto_save_enabled: false,
-            auto_save_interval_secs: 30,
-            last_auto_save: Instant::now(),
-            recent_files_enabled: true,
-            recent_files_max_count: 10,
-            recent_files_cleanup: RecentFilesCleanup::default(),
-            recent_files: Vec::new(),
-            available_themes: vec![
-                rust_pad_config::theme::builtin_dark(),
-                rust_pad_config::theme::builtin_light(),
-                rust_pad_config::theme::sample_wacky(),
-            ],
-            accent_color: Color32::from_rgb(80, 180, 200),
+            file_dialog: FileDialogState {
+                remember_last_folder: true,
+                default_work_folder: String::new(),
+                last_used_folder: None,
+                default_extension: String::new(),
+            },
+            auto_save: AutoSaveController::new(false, 30),
+            recent_files: RecentFilesManager {
+                enabled: true,
+                max_count: 10,
+                cleanup: RecentFilesCleanup::default(),
+                files: Vec::new(),
+            },
             config_path: std::path::PathBuf::from("rust-pad.json"),
             clipboard: None,
             dialog_state: DialogState::None,
             find_replace: FindReplaceDialog::new(),
             go_to_line: GoToLineDialog::new(),
             bookmarks: BookmarkManager::new(),
-            syntax_highlighter: SyntaxHighlighter::new(),
             last_flush: Instant::now(),
             session_store: None,
             last_window_title: String::new(),
-            last_file_check: Instant::now(),
+            live_monitor: LiveMonitorController::new(),
             settings_open: false,
             settings_tab: settings_dialog::SettingsTab::default(),
             about_open: false,
@@ -795,17 +665,17 @@ mod tests {
     #[test]
     fn test_zoom_level_clamps_at_max() {
         let mut app = test_app();
-        app.zoom_level = 14.95;
-        app.zoom_level = (app.zoom_level + 0.1).min(app.max_zoom_level);
-        assert!((app.zoom_level - 15.0).abs() < 0.01);
+        app.theme_ctrl.zoom_level = 14.95;
+        app.theme_ctrl.zoom_in();
+        assert!((app.theme_ctrl.zoom_level - 15.0).abs() < 0.01);
     }
 
     #[test]
     fn test_zoom_level_clamps_min() {
         let mut app = test_app();
-        app.zoom_level = 0.55;
-        app.zoom_level = (app.zoom_level - 0.1).max(0.5);
-        assert!((app.zoom_level - 0.5).abs() < 0.01);
+        app.theme_ctrl.zoom_level = 0.55;
+        app.theme_ctrl.zoom_out();
+        assert!((app.theme_ctrl.zoom_level - 0.5).abs() < 0.01);
     }
 
     // -- Cut = copy + delete --
@@ -1463,7 +1333,7 @@ mod tests {
     #[test]
     fn test_app_initial_theme_mode() {
         let app = test_app();
-        assert_eq!(app.theme_mode, ThemeMode::dark());
+        assert_eq!(app.theme_ctrl.theme_mode, ThemeMode::dark());
     }
 
     // -- Go to Line dialog state --
@@ -1766,11 +1636,12 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_save_skips_unmodified() {
+    fn test_auto_save_skips_when_disabled() {
         let mut app = test_app();
-        // Doc is unmodified and has no file_path — auto_save should be a no-op
-        assert!(!app.tabs.active_doc().modified);
-        app.auto_save_all(); // Should not panic
+        // auto_save is disabled by default in test_app
+        assert!(!app.auto_save.enabled);
+        let saved = app.auto_save.tick(&mut app.tabs);
+        assert!(!saved);
     }
 
     #[test]
@@ -1778,9 +1649,10 @@ mod tests {
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("unsaved content");
         app.tabs.active_doc_mut().modified = true;
-        // No file_path, so auto_save should skip
-        app.auto_save_all();
-        // Doc should still be modified (wasn't saved)
+        app.auto_save.enabled = true;
+        app.auto_save.interval_secs = 0; // trigger immediately
+        let _saved = app.auto_save.tick(&mut app.tabs);
+        // No file_path, so auto_save should skip — doc still modified
         assert!(app.tabs.active_doc().modified);
     }
 
@@ -1789,7 +1661,7 @@ mod tests {
         let mut app = test_app();
         assert!(!app.tabs.active_doc().live_monitoring);
         // Should be a no-op, no crash
-        app.check_live_monitored_files();
+        app.live_monitor.tick(&mut app.tabs);
     }
 
     #[test]

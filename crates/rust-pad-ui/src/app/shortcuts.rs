@@ -142,13 +142,9 @@ impl App {
             return false;
         }
         match key {
-            egui::Key::Plus => {
-                self.zoom_level = (self.zoom_level + 0.1).min(self.max_zoom_level);
-            }
-            egui::Key::Minus => {
-                self.zoom_level = (self.zoom_level - 0.1).max(0.5);
-            }
-            egui::Key::Num0 => self.zoom_level = 1.0,
+            egui::Key::Plus => self.theme_ctrl.zoom_in(),
+            egui::Key::Minus => self.theme_ctrl.zoom_out(),
+            egui::Key::Num0 => self.theme_ctrl.zoom_reset(),
             _ => return false,
         }
         true
