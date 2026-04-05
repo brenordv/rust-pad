@@ -386,7 +386,7 @@ impl App {
         ctx.set_visuals(visuals);
 
         // Spacing
-        ctx.style_mut(|style| {
+        ctx.global_style_mut(|style| {
             style.spacing.item_spacing = egui::Vec2::new(8.0, 6.0);
             style.spacing.button_padding = egui::Vec2::new(8.0, 4.0);
             style.spacing.window_margin = egui::Margin::same(12);
@@ -528,50 +528,52 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         // Prevent egui's built-in Ctrl+scroll zoom — we handle zoom ourselves
         ctx.set_zoom_factor(1.0);
 
-        self.handle_global_shortcuts(ctx);
+        self.handle_global_shortcuts(&ctx);
 
         // Update the OS window title to reflect the active document
-        self.update_window_title(ctx);
+        self.update_window_title(&ctx);
 
         // Menu bar
-        let panel_fill = ctx.style().visuals.panel_fill;
-        let faint_bg = ctx.style().visuals.faint_bg_color;
-        let extreme_bg = ctx.style().visuals.extreme_bg_color;
+        let panel_fill = ctx.global_style().visuals.panel_fill;
+        let faint_bg = ctx.global_style().visuals.faint_bg_color;
+        let extreme_bg = ctx.global_style().visuals.extreme_bg_color;
 
-        egui::TopBottomPanel::top("menu_bar")
+        egui::Panel::top("menu_bar")
             .frame(
                 egui::Frame::new()
                     .fill(panel_fill)
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
-            .show(ctx, |ui| {
-                self.show_menu_bar(ui, ctx);
+            .show_inside(ui, |ui| {
+                self.show_menu_bar(ui, &ctx);
             });
 
         // Tab bar
-        egui::TopBottomPanel::top("tab_bar")
+        egui::Panel::top("tab_bar")
             .frame(
                 egui::Frame::new()
                     .fill(faint_bg)
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 self.show_tab_bar(ui);
             });
 
         // Status bar
-        egui::TopBottomPanel::bottom("status_bar")
-            .max_height(24.0)
+        egui::Panel::bottom("status_bar")
+            .max_size(24.0)
             .frame(
                 egui::Frame::new()
                     .fill(extreme_bg)
                     .inner_margin(egui::Margin::symmetric(8, 3)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 self.show_status_bar(ui);
             });
 
@@ -579,7 +581,7 @@ impl eframe::App for App {
         let dialog_open = self.is_dialog_open();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme.bg_color))
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 let (response, zoom_request) = {
                     let doc = self.tabs.active_doc_mut();
                     let mut editor = EditorWidget::new(
@@ -607,7 +609,7 @@ impl eframe::App for App {
             });
 
         // Dialogs
-        self.show_dialogs(ctx);
+        self.show_dialogs(&ctx);
 
         // Live file monitoring: check for external changes every second
         if self.last_file_check.elapsed() >= Duration::from_secs(1) {
@@ -640,7 +642,7 @@ impl eframe::App for App {
         ctx.request_repaint_after(next_repaint);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.tabs.flush_all_history();
 
         // Save session state (tab list + unsaved content) to redb

@@ -706,7 +706,7 @@ fn test_theme_switch_updates_egui_visuals() {
     harness.run();
 
     // egui visuals should be in light mode
-    let dark_mode = ctx.style().visuals.dark_mode;
+    let dark_mode = ctx.global_style().visuals.dark_mode;
     assert!(!dark_mode, "Expected light mode visuals");
 }
 

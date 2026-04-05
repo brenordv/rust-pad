@@ -93,9 +93,9 @@ pub fn detect_encoding(bytes: &[u8]) -> TextEncoding {
     }
 
     // Use chardetng for other encodings
-    let mut detector = chardetng::EncodingDetector::new();
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
     detector.feed(bytes, true);
-    let encoding = detector.guess(None, true);
+    let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);
     TextEncoding::Legacy(encoding.name())
 }
 
