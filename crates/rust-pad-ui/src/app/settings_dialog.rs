@@ -122,21 +122,26 @@ impl App {
         ui.add_space(4.0);
 
         let theme_names: Vec<String> = std::iter::once("System".to_string())
-            .chain(self.available_themes.iter().map(|t| t.name.clone()))
+            .chain(
+                self.theme_ctrl
+                    .available_themes
+                    .iter()
+                    .map(|t| t.name.clone()),
+            )
             .collect();
 
-        let current_label = self.theme_mode.0.clone();
+        let current_label = self.theme_ctrl.theme_mode.0.clone();
         egui::ComboBox::from_label("Theme")
             .selected_text(&current_label)
             .show_ui(ui, |ui| {
                 let ctx_clone = ctx.clone();
                 for name in &theme_names {
                     if ui
-                        .selectable_value(&mut self.theme_mode.0, name.clone(), name)
+                        .selectable_value(&mut self.theme_ctrl.theme_mode.0, name.clone(), name)
                         .changed()
                     {
-                        self.set_theme_mode(
-                            super::ThemeMode(self.theme_mode.0.clone()),
+                        self.theme_ctrl.set_mode(
+                            super::ThemeMode(self.theme_ctrl.theme_mode.0.clone()),
                             &ctx_clone,
                         );
                     }
@@ -152,12 +157,12 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.label("Font size:");
-            ui.add(egui::DragValue::new(&mut self.theme.font_size).range(6.0..=72.0));
+            ui.add(egui::DragValue::new(&mut self.theme_ctrl.theme.font_size).range(6.0..=72.0));
         });
 
         ui.horizontal(|ui| {
             ui.label("Max zoom level:");
-            ui.add(egui::DragValue::new(&mut self.max_zoom_level).range(1.0..=50.0));
+            ui.add(egui::DragValue::new(&mut self.theme_ctrl.max_zoom_level).range(1.0..=50.0));
         });
     }
 
@@ -178,10 +183,12 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.label("Extension for new tabs:");
-            let response =
-                ui.add(egui::TextEdit::singleline(&mut self.default_extension).desired_width(80.0));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.file_dialog.default_extension)
+                    .desired_width(80.0),
+            );
             if response.changed() {
-                self.tabs.default_extension = self.default_extension.clone();
+                self.tabs.default_extension = self.file_dialog.default_extension.clone();
             }
         });
         ui.label(
@@ -195,13 +202,19 @@ impl App {
         ui.heading("File Dialogs");
         ui.add_space(4.0);
 
-        ui.checkbox(&mut self.remember_last_folder, "Remember last used folder");
+        ui.checkbox(
+            &mut self.file_dialog.remember_last_folder,
+            "Remember last used folder",
+        );
 
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
             ui.label("Default work folder:");
-            ui.add(egui::TextEdit::singleline(&mut self.default_work_folder).desired_width(300.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.file_dialog.default_work_folder)
+                    .desired_width(300.0),
+            );
         });
         ui.label(
             egui::RichText::new("Leave empty to use the home directory")
@@ -215,7 +228,7 @@ impl App {
         ui.add_space(4.0);
 
         ui.checkbox(
-            &mut self.auto_save_enabled,
+            &mut self.auto_save.enabled,
             "Enable auto-save for file-backed documents",
         );
         ui.label(
@@ -226,15 +239,15 @@ impl App {
 
         ui.add_space(8.0);
 
-        ui.add_enabled_ui(self.auto_save_enabled, |ui| {
+        ui.add_enabled_ui(self.auto_save.enabled, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Save interval (seconds):");
-                let mut interval = self.auto_save_interval_secs as f64;
+                let mut interval = self.auto_save.interval_secs as f64;
                 if ui
                     .add(egui::DragValue::new(&mut interval).range(5.0..=3600.0))
                     .changed()
                 {
-                    self.auto_save_interval_secs = (interval as u64).max(5);
+                    self.auto_save.interval_secs = (interval as u64).max(5);
                 }
             });
         });
@@ -245,22 +258,24 @@ impl App {
         ui.add_space(4.0);
 
         ui.checkbox(
-            &mut self.recent_files_enabled,
+            &mut self.recent_files.enabled,
             "Enable recent files history",
         );
 
         ui.add_space(8.0);
 
-        ui.add_enabled_ui(self.recent_files_enabled, |ui| {
+        ui.add_enabled_ui(self.recent_files.enabled, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Max files to show:");
-                let mut count = self.recent_files_max_count as f64;
+                let mut count = self.recent_files.max_count as f64;
                 if ui
                     .add(egui::DragValue::new(&mut count).range(1.0..=50.0))
                     .changed()
                 {
-                    self.recent_files_max_count = (count as usize).clamp(1, 50);
-                    self.recent_files.truncate(self.recent_files_max_count);
+                    self.recent_files.max_count = (count as usize).clamp(1, 50);
+                    self.recent_files
+                        .files
+                        .truncate(self.recent_files.max_count);
                 }
             });
 
@@ -269,24 +284,24 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label("Remove unavailable files:");
                 egui::ComboBox::from_id_salt("recent_files_cleanup")
-                    .selected_text(match self.recent_files_cleanup {
+                    .selected_text(match self.recent_files.cleanup {
                         RecentFilesCleanup::OnStartup => "On Startup",
                         RecentFilesCleanup::OnMenuOpen => "When Menu Opens",
                         RecentFilesCleanup::Both => "Both",
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
-                            &mut self.recent_files_cleanup,
+                            &mut self.recent_files.cleanup,
                             RecentFilesCleanup::OnStartup,
                             "On Startup",
                         );
                         ui.selectable_value(
-                            &mut self.recent_files_cleanup,
+                            &mut self.recent_files.cleanup,
                             RecentFilesCleanup::OnMenuOpen,
                             "When Menu Opens",
                         );
                         ui.selectable_value(
-                            &mut self.recent_files_cleanup,
+                            &mut self.recent_files.cleanup,
                             RecentFilesCleanup::Both,
                             "Both",
                         );
@@ -296,7 +311,7 @@ impl App {
             ui.add_space(8.0);
 
             if ui.button("Clear Recent Files List Now").clicked() {
-                self.recent_files.clear();
+                self.recent_files.files.clear();
             }
         });
     }

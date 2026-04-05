@@ -42,8 +42,8 @@ fn test_editor_multiline_text() {
 #[test]
 fn test_editor_zoom_changes_effective_font() {
     let harness = create_harness();
-    let base_font_size = harness.state().theme.font_size;
-    let zoom = harness.state().zoom_level;
+    let base_font_size = harness.state().theme_ctrl.theme.font_size;
+    let zoom = harness.state().theme_ctrl.zoom_level;
     let effective = base_font_size * zoom;
     // Default zoom is 1.0, so effective == base
     assert!((effective - base_font_size).abs() < f32::EPSILON);
@@ -52,13 +52,14 @@ fn test_editor_zoom_changes_effective_font() {
 #[test]
 fn test_editor_zoom_scales_font_at_different_levels() {
     let mut harness = create_harness();
-    let base = harness.state().theme.font_size;
+    let base = harness.state().theme_ctrl.theme.font_size;
 
     // Zoom to 2.0
-    harness.state_mut().zoom_level = 2.0;
+    harness.state_mut().theme_ctrl.zoom_level = 2.0;
     harness.run();
 
-    let effective = harness.state().theme.font_size * harness.state().zoom_level;
+    let effective =
+        harness.state().theme_ctrl.theme.font_size * harness.state().theme_ctrl.zoom_level;
     assert!((effective - base * 2.0).abs() < f32::EPSILON);
 }
 

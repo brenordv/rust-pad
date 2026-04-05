@@ -16,7 +16,7 @@ fn test_app_initial_state() {
     let harness = create_harness();
     let app = harness.state();
     assert_eq!(app.tabs.tab_count(), 1);
-    assert!((app.zoom_level - 1.0).abs() < f32::EPSILON);
+    assert!((app.theme_ctrl.zoom_level - 1.0).abs() < f32::EPSILON);
     assert!(!app.word_wrap);
     assert!(!app.show_special_chars);
 }
@@ -185,7 +185,7 @@ fn test_zoom_in_changes_zoom_level() {
     harness.run();
 
     let app = harness.state();
-    assert!((app.zoom_level - 1.1).abs() < 0.01);
+    assert!((app.theme_ctrl.zoom_level - 1.1).abs() < 0.01);
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn test_zoom_out_changes_zoom_level() {
     harness.run();
 
     let app = harness.state();
-    assert!((app.zoom_level - 0.9).abs() < 0.01);
+    assert!((app.theme_ctrl.zoom_level - 0.9).abs() < 0.01);
 }
 
 #[test]
@@ -214,11 +214,11 @@ fn test_zoom_reset() {
     harness.run();
     harness.key_press_modifiers(ctrl, Key::Plus);
     harness.run();
-    assert!((harness.state().zoom_level - 1.2).abs() < 0.01);
+    assert!((harness.state().theme_ctrl.zoom_level - 1.2).abs() < 0.01);
     // Reset
     harness.key_press_modifiers(ctrl, Key::Num0);
     harness.run();
-    assert!((harness.state().zoom_level - 1.0).abs() < f32::EPSILON);
+    assert!((harness.state().theme_ctrl.zoom_level - 1.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -233,8 +233,8 @@ fn test_zoom_max_limit() {
         harness.key_press_modifiers(ctrl, Key::Plus);
         harness.run();
     }
-    assert!(harness.state().zoom_level <= 15.0);
-    assert!((harness.state().zoom_level - 15.0).abs() < 0.01);
+    assert!(harness.state().theme_ctrl.zoom_level <= 15.0);
+    assert!((harness.state().theme_ctrl.zoom_level - 15.0).abs() < 0.01);
 }
 
 #[test]
@@ -249,8 +249,8 @@ fn test_zoom_min_limit() {
         harness.key_press_modifiers(ctrl, Key::Minus);
         harness.run();
     }
-    assert!(harness.state().zoom_level >= 0.5);
-    assert!((harness.state().zoom_level - 0.5).abs() < 0.01);
+    assert!(harness.state().theme_ctrl.zoom_level >= 0.5);
+    assert!((harness.state().theme_ctrl.zoom_level - 0.5).abs() < 0.01);
 }
 
 // ── D. Tab Management ──────────────────────────────────────────────────────
@@ -659,7 +659,10 @@ fn test_alt_shift_period_no_text_insertion() {
 #[test]
 fn test_initial_theme_mode_is_system() {
     let harness = create_harness();
-    assert_eq!(harness.state().theme_mode, rust_pad_ui::ThemeMode::system());
+    assert_eq!(
+        harness.state().theme_ctrl.theme_mode,
+        rust_pad_ui::ThemeMode::system()
+    );
 }
 
 #[test]
@@ -668,13 +671,17 @@ fn test_theme_switch_to_light() {
     let ctx = harness.ctx.clone();
     harness
         .state_mut()
-        .set_theme_mode(rust_pad_ui::ThemeMode::light(), &ctx);
+        .theme_ctrl
+        .set_mode(rust_pad_ui::ThemeMode::light(), &ctx);
     harness.run();
 
     let app = harness.state();
-    assert_eq!(app.theme_mode, rust_pad_ui::ThemeMode::light());
+    assert_eq!(app.theme_ctrl.theme_mode, rust_pad_ui::ThemeMode::light());
     // Light theme should have white background
-    assert_eq!(app.theme.bg_color, egui::Color32::from_rgb(255, 255, 255));
+    assert_eq!(
+        app.theme_ctrl.theme.bg_color,
+        egui::Color32::from_rgb(255, 255, 255)
+    );
 }
 
 #[test]
@@ -684,16 +691,21 @@ fn test_theme_switch_to_dark() {
     // First switch to light, then back to dark
     harness
         .state_mut()
-        .set_theme_mode(rust_pad_ui::ThemeMode::light(), &ctx);
+        .theme_ctrl
+        .set_mode(rust_pad_ui::ThemeMode::light(), &ctx);
     harness.run();
     harness
         .state_mut()
-        .set_theme_mode(rust_pad_ui::ThemeMode::dark(), &ctx);
+        .theme_ctrl
+        .set_mode(rust_pad_ui::ThemeMode::dark(), &ctx);
     harness.run();
 
     let app = harness.state();
-    assert_eq!(app.theme_mode, rust_pad_ui::ThemeMode::dark());
-    assert_eq!(app.theme.bg_color, egui::Color32::from_rgb(30, 30, 30));
+    assert_eq!(app.theme_ctrl.theme_mode, rust_pad_ui::ThemeMode::dark());
+    assert_eq!(
+        app.theme_ctrl.theme.bg_color,
+        egui::Color32::from_rgb(30, 30, 30)
+    );
 }
 
 #[test]
@@ -702,7 +714,8 @@ fn test_theme_switch_updates_egui_visuals() {
     let ctx = harness.ctx.clone();
     harness
         .state_mut()
-        .set_theme_mode(rust_pad_ui::ThemeMode::light(), &ctx);
+        .theme_ctrl
+        .set_mode(rust_pad_ui::ThemeMode::light(), &ctx);
     harness.run();
 
     // egui visuals should be in light mode

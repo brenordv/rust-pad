@@ -180,11 +180,11 @@ impl App {
             byte_size: doc.buffer.len_bytes(),
             last_saved: doc.last_saved_at,
             live_monitoring: doc.live_monitoring,
-            auto_save: self.auto_save_enabled,
+            auto_save: self.auto_save.enabled,
             file_path_display: doc.file_path.as_ref().map(|p| p.display().to_string()),
             match_info,
             bookmark_count: self.bookmarks.count(),
-            zoom_level: self.zoom_level,
+            zoom_level: self.theme_ctrl.zoom_level,
         }
     }
 
