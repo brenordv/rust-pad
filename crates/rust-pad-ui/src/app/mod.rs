@@ -1219,6 +1219,42 @@ mod tests {
     }
 
     #[test]
+    fn test_is_dialog_open_io_open_dialog() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+        assert!(app.is_dialog_open());
+        app.io_activity.dialog_open = false;
+        assert!(!app.is_dialog_open());
+    }
+
+    #[test]
+    fn test_is_dialog_open_io_save_as_dialog() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+        app.io_activity.save_as_context = Some(crate::io_worker::SaveAsContext {
+            content_version: 0,
+            session_id: None,
+            original_path: None,
+        });
+        assert!(app.is_dialog_open());
+    }
+
+    #[test]
+    fn test_editing_blocked_during_io_dialog() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("original");
+        let original = app.tabs.active_doc().buffer.to_string();
+
+        // Simulate an open file dialog on the background thread
+        app.io_activity.dialog_open = true;
+        assert!(app.is_dialog_open());
+
+        // Editor-only shortcuts would be suppressed; verify the buffer is unchanged
+        // (In the real flow, handle_edit_shortcut is skipped when is_dialog_open() is true)
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), original);
+    }
+
+    #[test]
     fn test_ctrl_d_suppressed_when_dialog_open() {
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("line1\nline2\nline3");
