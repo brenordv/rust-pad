@@ -1,9 +1,12 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+## [1.3.0] - 2026-04-06
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+### Fixed
+
+#### Tab Bar Width Jitter
+- Tab width no longer shifts when hovering or switching between active and inactive tabs. Each tab is now rendered as a single allocated rect with a fixed layout (`padding + title + gap + close_area + padding`), replacing the previous two-widget approach (separate `Button` for title and conditional `Button` for close).
+- The close button (`×`) is now drawn inside the tab background. It is visible on the active tab and on hover of inactive tabs, matching VS Code behavior. The close button area is always reserved in the layout so that tab width stays constant regardless of state.
 
 ## [1.2.0] - 2026-04-05
 
