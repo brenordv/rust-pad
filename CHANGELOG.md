@@ -2,6 +2,14 @@
 
 ## [1.3.0] - 2026-04-06
 
+### Added
+
+#### Tab Bar Horizontal Scrolling
+- When open tabs exceed the available width, the tab bar now scrolls horizontally. Mouse wheel over the tab area scrolls tabs left/right, matching Notepad++ behavior.
+- Left (`◀`) and right (`▶`) arrow buttons appear at the right side of the tab bar when tabs overflow. Buttons are disabled (faded) when at the scroll boundary.
+- Auto-scroll: switching tabs (click, Ctrl+Tab, keyboard), opening files, or creating new tabs automatically scrolls the tab bar to keep the active tab visible.
+- Closing tabs adjusts the scroll offset to avoid blank space at the end.
+
 ### Fixed
 
 #### Tab Bar Width Jitter
