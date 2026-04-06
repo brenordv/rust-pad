@@ -122,6 +122,8 @@ pub struct App {
     pub settings_tab: SettingsTab,
     pub(crate) about_open: bool,
     pub(crate) about_logo: Option<egui::TextureHandle>,
+    io_worker: crate::io_worker::IoWorker,
+    pub(crate) io_activity: crate::io_worker::IoActivity,
 }
 
 #[derive(Debug, Default)]
@@ -222,6 +224,8 @@ impl App {
             settings_tab: settings_dialog::SettingsTab::default(),
             about_open: false,
             about_logo: None,
+            io_worker: crate::io_worker::IoWorker::new(),
+            io_activity: crate::io_worker::IoActivity::default(),
         }
     }
 
@@ -326,6 +330,120 @@ impl App {
             self.last_window_title.clone_from(&title);
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         }
+    }
+
+    /// Processes completed background I/O responses.
+    fn handle_io_responses(&mut self) {
+        use crate::io_worker::IoResponse;
+
+        while let Some(response) = self.io_worker.poll() {
+            match response {
+                IoResponse::DialogFileOpened { path, bytes } => {
+                    self.io_activity.dialog_open = false;
+                    self.file_dialog.update_last_folder(&path);
+                    if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
+                        tracing::error!("Failed to open file: {e:#}");
+                    } else {
+                        self.recent_files.track(&path);
+                    }
+                }
+                IoResponse::FileRead { path, bytes } => {
+                    self.io_activity.pending_reads =
+                        self.io_activity.pending_reads.saturating_sub(1);
+                    if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
+                        tracing::error!("Failed to open file: {e:#}");
+                    } else {
+                        self.recent_files.track(&path);
+                    }
+                }
+                IoResponse::DialogFileSavedAs { path } => {
+                    self.io_activity.dialog_open = false;
+                    self.file_dialog.update_last_folder(&path);
+
+                    if let Some(ctx) = self.io_activity.save_as_context.take() {
+                        // Find the tab that initiated the save-as
+                        let tab_idx = self.find_save_as_tab(&ctx);
+
+                        if let Some(idx) = tab_idx {
+                            // Clean up session content before transitioning to file-backed
+                            if let Some(sid) = &self.tabs.documents[idx].session_id {
+                                if let Some(store) = &self.session_store {
+                                    let _ = store.delete_content(sid);
+                                }
+                            }
+                            let doc = &mut self.tabs.documents[idx];
+                            doc.mark_saved(&path, ctx.content_version);
+                            doc.session_id = None;
+                            self.recent_files.track(&path);
+                        }
+                    }
+                }
+                IoResponse::FileSaved { path } => {
+                    if let Some(pos) = self
+                        .io_activity
+                        .pending_saves
+                        .iter()
+                        .position(|s| s.path == path)
+                    {
+                        let pending = self.io_activity.pending_saves.remove(pos);
+                        if let Some(doc) = self
+                            .tabs
+                            .documents
+                            .iter_mut()
+                            .find(|d| d.file_path.as_deref() == Some(path.as_path()))
+                        {
+                            doc.mark_saved(&path, pending.content_version);
+                        }
+                    }
+                }
+                IoResponse::DialogCancelled => {
+                    self.io_activity.dialog_open = false;
+                    self.io_activity.save_as_context = None;
+                }
+                IoResponse::Error { path, message } => {
+                    tracing::error!("I/O error: {message}");
+                    // Clean up dialog state if it was a dialog error
+                    if self.io_activity.dialog_open {
+                        self.io_activity.dialog_open = false;
+                        self.io_activity.save_as_context = None;
+                    }
+                    // Clean up pending save if it was a save error
+                    if let Some(p) = &path {
+                        self.io_activity.pending_saves.retain(|s| s.path != *p);
+                        self.io_activity.pending_reads =
+                            self.io_activity.pending_reads.saturating_sub(1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Finds the tab that initiated a save-as operation.
+    fn find_save_as_tab(&self, ctx: &crate::io_worker::SaveAsContext) -> Option<usize> {
+        // Try by session_id first (untitled tabs)
+        if let Some(sid) = &ctx.session_id {
+            if let Some(idx) = self
+                .tabs
+                .documents
+                .iter()
+                .position(|d| d.session_id.as_deref() == Some(sid.as_str()))
+            {
+                return Some(idx);
+            }
+        }
+        // Try by original path (file-backed tabs doing "Save As")
+        if let Some(path) = &ctx.original_path {
+            if let Some(idx) = self
+                .tabs
+                .documents
+                .iter()
+                .position(|d| d.file_path.as_deref() == Some(path.as_path()))
+            {
+                return Some(idx);
+            }
+        }
+        // Fall back to active tab
+        Some(self.tabs.active)
     }
 
     /// Shows all dialog windows.
@@ -488,6 +606,9 @@ impl eframe::App for App {
         // Dialogs
         self.show_dialogs(&ctx);
 
+        // Process completed background I/O operations
+        self.handle_io_responses();
+
         // Live file monitoring: check for external changes every second
         self.live_monitor.tick(&mut self.tabs);
 
@@ -501,7 +622,11 @@ impl eframe::App for App {
         self.auto_save.tick(&mut self.tabs);
 
         let has_live_monitoring = self.tabs.documents.iter().any(|d| d.live_monitoring);
-        let next_repaint = if has_live_monitoring {
+        let has_pending_io = self.io_activity.is_busy();
+        let next_repaint = if has_pending_io {
+            // Poll more frequently while I/O is in flight
+            Duration::from_millis(100)
+        } else if has_live_monitoring {
             Duration::from_secs(1)
         } else if let Some(interval) = self.auto_save.repaint_interval() {
             interval.min(Duration::from_secs(FLUSH_INTERVAL_SECS))
@@ -650,6 +775,8 @@ mod tests {
             settings_tab: settings_dialog::SettingsTab::default(),
             about_open: false,
             about_logo: None,
+            io_worker: crate::io_worker::IoWorker::new(),
+            io_activity: crate::io_worker::IoActivity::default(),
         }
     }
 

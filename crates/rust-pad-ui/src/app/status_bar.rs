@@ -131,6 +131,7 @@ struct StatusBarData {
     match_info: Option<(usize, usize)>,
     bookmark_count: usize,
     zoom_level: f32,
+    io_status: Option<String>,
 }
 
 impl App {
@@ -185,6 +186,7 @@ impl App {
             match_info,
             bookmark_count: self.bookmarks.count(),
             zoom_level: self.theme_ctrl.zoom_level,
+            io_status: self.io_activity.status_message().map(String::from),
         }
     }
 
@@ -289,8 +291,17 @@ impl App {
         );
     }
 
-    /// Renders conditional indicators: match count, bookmarks, live monitoring, auto-save.
+    /// Renders conditional indicators: I/O status, match count, bookmarks, live monitoring, auto-save.
     fn status_bar_indicators(ui: &mut egui::Ui, data: &StatusBarData) {
+        if let Some(ref status) = data.io_status {
+            ui.separator();
+            ui.add(
+                egui::Label::new(RichText::new(status).color(Color32::from_rgb(255, 200, 50)))
+                    .selectable(false),
+            );
+            ui.spinner();
+        }
+
         if let Some((current, total)) = data.match_info {
             ui.separator();
             ui.add(egui::Label::new(format!("Match {current}/{total}")).selectable(false));

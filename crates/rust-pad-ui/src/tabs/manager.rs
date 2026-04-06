@@ -143,6 +143,28 @@ impl TabManager {
         Ok(())
     }
 
+    /// Creates a document from pre-read bytes and adds it as a new tab.
+    ///
+    /// Used by the async I/O path when file bytes arrive from a background
+    /// thread. Handles duplicate detection the same way as `open_file`.
+    pub fn open_from_bytes(&mut self, path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+        // Check if this file is already open
+        for (idx, doc) in self.documents.iter().enumerate() {
+            if doc.file_path.as_deref() == Some(path) {
+                self.active = idx;
+                return Ok(());
+            }
+        }
+
+        let doc = match &self.persistence {
+            Some(pl) => Document::from_bytes(bytes, path, Some((Arc::clone(pl), &self.config)))?,
+            None => Document::from_bytes(bytes, path, None)?,
+        };
+        self.documents.push(doc);
+        self.active = self.documents.len() - 1;
+        Ok(())
+    }
+
     /// Closes the active tab. Returns true if the tab was closed.
     /// The caller should check for unsaved changes before calling this.
     pub fn close_active(&mut self) -> bool {
@@ -579,5 +601,69 @@ mod tests {
     fn test_default_extension_empty_by_default() {
         let tm = TabManager::new();
         assert!(tm.default_extension.is_empty());
+    }
+
+    // ── open_from_bytes ─────────────────────────────────────────────
+
+    #[test]
+    fn test_open_from_bytes_creates_tab() {
+        let dir = std::env::temp_dir().join("rust_pad_test_from_bytes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.txt");
+        let content = b"hello from bytes";
+
+        let mut tm = TabManager::new();
+        tm.open_from_bytes(&path, content).unwrap();
+        assert_eq!(tm.tab_count(), 2);
+        assert_eq!(tm.active, 1);
+        assert_eq!(tm.active_doc().buffer.to_string(), "hello from bytes");
+        assert_eq!(tm.active_doc().title, "test.txt");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_open_from_bytes_duplicate_switches() {
+        let dir = std::env::temp_dir().join("rust_pad_test_from_bytes_dup");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut tm = TabManager::new();
+        // First open via normal path
+        tm.open_file(&path).unwrap();
+        assert_eq!(tm.tab_count(), 2);
+
+        // Switch away
+        tm.switch_to(0);
+        assert_eq!(tm.active, 0);
+
+        // Open same file via from_bytes — should switch, not add
+        tm.open_from_bytes(&path, b"original").unwrap();
+        assert_eq!(tm.tab_count(), 2); // no new tab
+        assert_eq!(tm.active, 1); // switched to existing
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_open_from_bytes_equivalent_to_open_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("equiv.txt");
+        std::fs::write(&path, "hello\nworld").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+
+        let mut tm1 = TabManager::new();
+        tm1.open_file(&path).unwrap();
+
+        let mut tm2 = TabManager::new();
+        tm2.open_from_bytes(&path, &bytes).unwrap();
+
+        assert_eq!(
+            tm1.active_doc().buffer.to_string(),
+            tm2.active_doc().buffer.to_string()
+        );
+        assert_eq!(tm1.active_doc().encoding, tm2.active_doc().encoding);
+        assert_eq!(tm1.active_doc().line_ending, tm2.active_doc().line_ending);
     }
 }

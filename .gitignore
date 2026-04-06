@@ -1,3 +1,4 @@
+.test-files/
 .claude/settings.local.json
 .idea/
 .task-manager/*

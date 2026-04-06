@@ -42,16 +42,22 @@ impl Document {
         Self::open_internal(path, Some((persistence, config)))
     }
 
-    /// Internal open shared by `open()` and `open_with_persistence()`.
-    fn open_internal(
+    /// Creates a document from raw file bytes with encoding auto-detection.
+    ///
+    /// Handles encoding detection, decoding, line-ending normalization, and
+    /// indent detection. Used by both synchronous file open and the async
+    /// I/O path when file bytes arrive from a background thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decoding fails or history loading fails.
+    pub fn from_bytes(
+        bytes: &[u8],
         path: &std::path::Path,
         persistence: Option<(Arc<PersistenceLayer>, &HistoryConfig)>,
     ) -> Result<Self> {
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("failed to read file: {}", path.display()))?;
-
-        let encoding = detect_encoding(&bytes);
-        let raw_text = decode_bytes(&bytes, encoding)
+        let encoding = detect_encoding(bytes);
+        let raw_text = decode_bytes(bytes, encoding)
             .with_context(|| format!("failed to decode file: {}", path.display()))?;
 
         let line_ending = detect_line_ending(&raw_text);
@@ -102,6 +108,16 @@ impl Document {
         })
     }
 
+    /// Internal open shared by `open()` and `open_with_persistence()`.
+    fn open_internal(
+        path: &std::path::Path,
+        persistence: Option<(Arc<PersistenceLayer>, &HistoryConfig)>,
+    ) -> Result<Self> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read file: {}", path.display()))?;
+        Self::from_bytes(&bytes, path, persistence)
+    }
+
     /// Saves the document to its file path.
     ///
     /// # Errors
@@ -147,6 +163,44 @@ impl Document {
         }
 
         Ok(())
+    }
+
+    /// Encodes the document content for saving: applies line endings and
+    /// encodes to bytes.
+    ///
+    /// Use this to prepare content for a background save via the I/O worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if encoding fails.
+    pub fn encode_for_save(&self) -> Result<Vec<u8>> {
+        let text = self.buffer.to_string();
+        let with_endings = apply_line_ending(&text, self.line_ending);
+        encode_string(&with_endings, self.encoding).context("failed to encode document for saving")
+    }
+
+    /// Updates document state after a successful background save.
+    ///
+    /// Only clears the modified flag if the document has not been edited since
+    /// the save was initiated (detected via `saved_version` matching the
+    /// current `content_version`).
+    pub fn mark_saved(&mut self, path: &std::path::Path, saved_version: u64) {
+        self.file_path = Some(path.to_path_buf());
+        self.title = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".to_string());
+        self.last_saved_at = Some(chrono::Local::now());
+        self.last_known_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+
+        if self.content_version == saved_version {
+            self.modified = false;
+            for change in &mut self.line_changes {
+                if *change == LineChangeState::Modified {
+                    *change = LineChangeState::Saved;
+                }
+            }
+        }
     }
 
     /// Reloads the document from disk, preserving metadata like live_monitoring.
@@ -207,5 +261,202 @@ impl Document {
     /// Returns the document's history identifier.
     pub fn doc_id(&self) -> &str {
         self.history.doc_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoding::{LineEnding, TextEncoding};
+
+    // ── from_bytes ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_from_bytes_utf8() {
+        let content = "hello world";
+        let bytes = content.as_bytes();
+        let path = std::path::Path::new("test.txt");
+        let doc = Document::from_bytes(bytes, path, None).unwrap();
+
+        assert_eq!(doc.buffer.to_string(), "hello world");
+        assert_eq!(doc.encoding, TextEncoding::Ascii);
+        assert_eq!(doc.title, "test.txt");
+        assert_eq!(doc.file_path.as_deref(), Some(path));
+        assert!(!doc.modified);
+    }
+
+    #[test]
+    fn test_from_bytes_detects_crlf() {
+        let content = "line1\r\nline2\r\n";
+        let bytes = content.as_bytes();
+        let doc = Document::from_bytes(bytes, std::path::Path::new("f.txt"), None).unwrap();
+
+        assert_eq!(doc.line_ending, LineEnding::CrLf);
+        // Internal buffer normalizes to LF
+        assert_eq!(doc.buffer.to_string(), "line1\nline2\n");
+    }
+
+    #[test]
+    fn test_from_bytes_utf8_bom() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("hello".as_bytes());
+        let doc = Document::from_bytes(&bytes, std::path::Path::new("bom.txt"), None).unwrap();
+
+        assert_eq!(doc.encoding, TextEncoding::Utf8Bom);
+        assert_eq!(doc.buffer.to_string(), "hello");
+    }
+
+    #[test]
+    fn test_from_bytes_equivalent_to_open() {
+        let dir = std::env::temp_dir().join("rust_pad_test_from_bytes_equiv");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.txt");
+        std::fs::write(&path, "hello\nworld").unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let doc_from_bytes = Document::from_bytes(&bytes, &path, None).unwrap();
+        let doc_from_open = Document::open(&path).unwrap();
+
+        assert_eq!(
+            doc_from_bytes.buffer.to_string(),
+            doc_from_open.buffer.to_string()
+        );
+        assert_eq!(doc_from_bytes.encoding, doc_from_open.encoding);
+        assert_eq!(doc_from_bytes.line_ending, doc_from_open.line_ending);
+        assert_eq!(doc_from_bytes.title, doc_from_open.title);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── encode_for_save ────────────────────────────────────────────────
+
+    #[test]
+    fn test_encode_for_save_utf8() {
+        let mut doc = Document::new();
+        doc.insert_text("hello");
+        doc.encoding = TextEncoding::Utf8;
+
+        let bytes = doc.encode_for_save().unwrap();
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn test_encode_for_save_applies_crlf() {
+        let mut doc = Document::new();
+        doc.insert_text("a\nb");
+        doc.line_ending = LineEnding::CrLf;
+
+        let bytes = doc.encode_for_save().unwrap();
+        assert_eq!(bytes, b"a\r\nb");
+    }
+
+    #[test]
+    fn test_encode_for_save_utf16le() {
+        let mut doc = Document::new();
+        doc.insert_text("A");
+        doc.encoding = TextEncoding::Utf16Le;
+
+        let bytes = doc.encode_for_save().unwrap();
+        // UTF-16 LE BOM + 'A' in UTF-16 LE
+        assert_eq!(&bytes[..2], &[0xFF, 0xFE]); // BOM
+        assert_eq!(&bytes[2..4], &[0x41, 0x00]); // 'A'
+    }
+
+    // ── mark_saved ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mark_saved_clears_modified_when_version_matches() {
+        let mut doc = Document::new();
+        doc.insert_text("hello");
+        assert!(doc.modified);
+        let version = doc.content_version;
+
+        let path = std::path::Path::new("saved.txt");
+        doc.mark_saved(path, version);
+
+        assert!(!doc.modified);
+        assert_eq!(doc.file_path.as_deref(), Some(path));
+        assert_eq!(doc.title, "saved.txt");
+        assert!(doc.last_saved_at.is_some());
+    }
+
+    #[test]
+    fn test_mark_saved_keeps_modified_when_version_differs() {
+        let mut doc = Document::new();
+        doc.insert_text("hello");
+        let old_version = doc.content_version;
+
+        // Simulate further edits
+        doc.insert_text(" world");
+        assert_ne!(doc.content_version, old_version);
+
+        let path = std::path::Path::new("saved.txt");
+        doc.mark_saved(path, old_version);
+
+        // modified should stay true because version changed
+        assert!(doc.modified);
+        // But path/title/timestamp should still be updated
+        assert_eq!(doc.file_path.as_deref(), Some(path));
+        assert_eq!(doc.title, "saved.txt");
+        assert!(doc.last_saved_at.is_some());
+    }
+
+    #[test]
+    fn test_mark_saved_updates_line_changes() {
+        let mut doc = Document::new();
+        doc.insert_text("line1\nline2");
+        let version = doc.content_version;
+
+        // Verify some lines are marked as Modified
+        let has_modified = doc
+            .line_changes
+            .iter()
+            .any(|c| *c == LineChangeState::Modified);
+        assert!(has_modified);
+
+        doc.mark_saved(std::path::Path::new("f.txt"), version);
+
+        // After save, Modified -> Saved
+        let has_modified = doc
+            .line_changes
+            .iter()
+            .any(|c| *c == LineChangeState::Modified);
+        assert!(!has_modified);
+        let has_saved = doc
+            .line_changes
+            .iter()
+            .any(|c| *c == LineChangeState::Saved);
+        assert!(has_saved);
+    }
+
+    // ── save round-trip ────────────────────────────────────────────────
+
+    #[test]
+    fn test_encode_then_from_bytes_roundtrip() {
+        let mut doc = Document::new();
+        doc.insert_text("hello\nworld");
+        doc.encoding = TextEncoding::Utf8;
+        doc.line_ending = LineEnding::Lf;
+
+        let bytes = doc.encode_for_save().unwrap();
+        let path = std::path::Path::new("round.txt");
+        let restored = Document::from_bytes(&bytes, path, None).unwrap();
+
+        assert_eq!(restored.buffer.to_string(), doc.buffer.to_string());
+    }
+
+    #[test]
+    fn test_encode_then_from_bytes_crlf_roundtrip() {
+        let mut doc = Document::new();
+        doc.insert_text("hello\nworld");
+        doc.encoding = TextEncoding::Utf8;
+        doc.line_ending = LineEnding::CrLf;
+
+        let bytes = doc.encode_for_save().unwrap();
+        let path = std::path::Path::new("round.txt");
+        let restored = Document::from_bytes(&bytes, path, None).unwrap();
+
+        assert_eq!(restored.buffer.to_string(), "hello\nworld");
+        assert_eq!(restored.line_ending, LineEnding::CrLf);
     }
 }
