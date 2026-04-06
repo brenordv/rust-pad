@@ -124,6 +124,14 @@ pub struct App {
     pub(crate) about_logo: Option<egui::TextureHandle>,
     io_worker: crate::io_worker::IoWorker,
     pub(crate) io_activity: crate::io_worker::IoActivity,
+    /// Horizontal scroll offset for the tab bar (pixels).
+    pub tab_scroll_offset: f32,
+    /// Whether the tab bar content overflows its visible area (previous frame).
+    pub tabs_overflow: bool,
+    /// Active tab index on the previous frame, used to detect tab changes.
+    prev_active_tab: usize,
+    /// Tab count on the previous frame, used to detect tab open/close.
+    prev_tab_count: usize,
 }
 
 #[derive(Debug, Default)]
@@ -226,6 +234,10 @@ impl App {
             about_logo: None,
             io_worker: crate::io_worker::IoWorker::new(),
             io_activity: crate::io_worker::IoActivity::default(),
+            tab_scroll_offset: 0.0,
+            tabs_overflow: false,
+            prev_active_tab: 0,
+            prev_tab_count: 0,
         }
     }
 
@@ -777,6 +789,10 @@ mod tests {
             about_logo: None,
             io_worker: crate::io_worker::IoWorker::new(),
             io_activity: crate::io_worker::IoActivity::default(),
+            tab_scroll_offset: 0.0,
+            tabs_overflow: false,
+            prev_active_tab: 0,
+            prev_tab_count: 0,
         }
     }
 
