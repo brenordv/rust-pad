@@ -33,6 +33,7 @@ pub struct EditorTheme {
     pub scrollbar_thumb_hover: Color32,
     pub scrollbar_thumb_active: Color32,
     pub occurrence_highlight_color: Color32,
+    pub matching_bracket_color: Color32,
     pub special_char_color: Color32,
 }
 
@@ -70,6 +71,7 @@ impl EditorTheme {
             scrollbar_thumb_hover: hex_to_color32(editor.scrollbar_thumb_hover),
             scrollbar_thumb_active: hex_to_color32(editor.scrollbar_thumb_active),
             occurrence_highlight_color: hex_to_color32(editor.occurrence_highlight_color),
+            matching_bracket_color: hex_to_color32(editor.matching_bracket_color),
             special_char_color: hex_to_color32(editor.special_char_color),
         }
     }

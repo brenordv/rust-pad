@@ -344,13 +344,33 @@ impl Document {
         self.finalize_multi_edit(false);
     }
 
-    /// Inserts a newline at all cursor positions.
+    /// Inserts a newline at all cursor positions, inheriting each cursor's
+    /// line leading whitespace (auto-indent).
     pub fn insert_newline_multi(&mut self) {
         if self.secondary_cursors.is_empty() {
             self.insert_newline();
             return;
         }
-        self.insert_text_multi("\n");
+
+        // Build a per-cursor newline+indent string.
+        // Index 0 = primary cursor, then one per secondary in order.
+        let mut texts: Vec<String> = Vec::with_capacity(1 + self.secondary_cursors.len());
+        let primary_indent = self
+            .buffer
+            .leading_whitespace(self.cursor.position.line)
+            .unwrap_or_default();
+        texts.push(format!("\n{primary_indent}"));
+
+        for sc in &self.secondary_cursors {
+            let indent = self
+                .buffer
+                .leading_whitespace(sc.position.line)
+                .unwrap_or_default();
+            texts.push(format!("\n{indent}"));
+        }
+
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        self.insert_text_per_cursor(&refs);
     }
 
     /// Returns selected text from all cursors, joined by newlines.
@@ -580,6 +600,28 @@ mod tests {
         doc.cursor.position = Position::new(0, 1);
         doc.insert_newline_multi();
         assert_eq!(doc.buffer.to_string(), "a\nb");
+    }
+
+    #[test]
+    fn insert_newline_multi_inherits_indent_per_cursor() {
+        // Line 0: "    aa", Line 1: "  bb"
+        let mut doc = doc_with("    aa\n  bb");
+        doc.cursor.position = Position::new(0, 6); // end of "    aa"
+        add_cursor(&mut doc, 1, 4); // end of "  bb"
+
+        doc.insert_newline_multi();
+        // Primary was on line 0 (4-space indent), secondary on line 1 (2-space indent)
+        assert_eq!(doc.buffer.to_string(), "    aa\n    \n  bb\n  ");
+    }
+
+    #[test]
+    fn insert_newline_multi_no_indent_lines() {
+        let mut doc = doc_with("aa\nbb");
+        doc.cursor.position = Position::new(0, 2);
+        add_cursor(&mut doc, 1, 2);
+
+        doc.insert_newline_multi();
+        assert_eq!(doc.buffer.to_string(), "aa\n\nbb\n");
     }
 
     // ── selected_text_multi ───────────────────────────────────────

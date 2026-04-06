@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-04-05
+
+### Added
+
+#### Auto-Indent on Enter
+- Pressing Enter now inherits the leading whitespace (spaces or tabs) from the current line, matching the behavior of VS Code and Notepad++.
+- Works with multi-cursor editing: each cursor inherits indent from its own line.
+
+#### Bracket Matching Highlights
+- When the cursor is on or adjacent to a bracket (`(`, `)`, `[`, `]`, `{`, `}`), both the bracket and its matching counterpart are highlighted with a background color.
+- Supports nested and mixed bracket types. Search is capped at 10,000 characters to avoid freezing on large files.
+- Highlight color is theme-aware and configurable via the `matching_bracket_color` field in custom themes.
+
+### Changed
+
+#### Galley Cache Granularity
+- The render cache no longer clears all cached galleys when the document content changes. Per-line content hashes already guard correctness, so unchanged lines now keep their cached galleys across edits.
+- Added periodic pruning of cached galleys outside the visible range (±50-line margin) to bound memory usage.
+- Net effect: editing a single line in a large file (50K+ lines) no longer forces re-highlighting of every visible line on the next frame.
+
+#### Dependencies
+- Updated `egui`/`eframe` to 0.34, `chardetng` to 1.0, and other dependencies. Adjusted API usage to align with upstream changes.
+
+#### Architecture: Decompose App Struct
+- Decomposed the monolithic `App` struct (which held ~40 fields and ~26 methods) into five focused, composable sub-structs. `App` is now a thin orchestrator that wires these components together in the update loop.
+  - **ThemeController** — owns editor theme, theme mode, available themes, accent color, syntax highlighter, and zoom level. Provides `set_mode()`, `zoom_in/out/reset()`, and `apply_theme_visuals()`.
+  - **RecentFilesManager** — owns the recent files list, enabled flag, max count, and cleanup strategy. Provides `track()`, `cleanup_on_menu_open()`, and config serialization.
+  - **FileDialogState** — owns remember-last-folder preference, default work folder, last-used folder, and default extension. Provides `resolve_directory()` and `update_last_folder()`.
+  - **AutoSaveController** — owns enabled flag, interval, and timer. Provides `tick(&mut TabManager)` which checks timing and saves all modified file-backed documents.
+  - **LiveMonitorController** — owns the file-check timer. Provides `tick(&mut TabManager)` which polls for external file changes and reloads live-monitored documents.
+
 ## [1.1.0] - 2026-04-05
 
 ### Added

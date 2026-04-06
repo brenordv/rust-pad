@@ -3,7 +3,6 @@
 //! Contains the File, Edit, Search, Encoding, View, Settings, Window, and Help menus.
 
 use eframe::egui;
-use rust_pad_config::RecentFilesCleanup;
 use rust_pad_core::encoding::{LineEnding, TextEncoding};
 use rust_pad_core::line_ops::{CaseConversion, SortOrder};
 
@@ -43,7 +42,7 @@ impl App {
                 ui.close();
             }
 
-            if self.recent_files_enabled {
+            if self.recent_files.enabled {
                 self.show_recent_files_submenu(ui);
             }
 
@@ -83,18 +82,13 @@ impl App {
             ui.set_min_width(220.0);
 
             // Filter dead files if cleanup mode requires it
-            if matches!(
-                self.recent_files_cleanup,
-                RecentFilesCleanup::OnMenuOpen | RecentFilesCleanup::Both
-            ) {
-                self.recent_files.retain(|p| p.is_file());
-            }
+            self.recent_files.cleanup_on_menu_open();
 
-            if self.recent_files.is_empty() {
+            if self.recent_files.files.is_empty() {
                 ui.add_enabled(false, egui::Button::new("No Recent Files"));
             } else {
                 // Clone paths to avoid borrow issues
-                let paths: Vec<std::path::PathBuf> = self.recent_files.clone();
+                let paths: Vec<std::path::PathBuf> = self.recent_files.files.clone();
                 for path in &paths {
                     let file_name = path
                         .file_name()
@@ -105,14 +99,14 @@ impl App {
                         if let Err(e) = self.tabs.open_file(path) {
                             tracing::error!("Failed to open recent file: {e:#}");
                         } else {
-                            self.track_recent_file(path);
+                            self.recent_files.track(path);
                         }
                         ui.close();
                     }
                 }
                 ui.separator();
                 if ui.button("Clear Recent Files List").clicked() {
-                    self.recent_files.clear();
+                    self.recent_files.files.clear();
                     ui.close();
                 }
             }
@@ -356,21 +350,21 @@ impl App {
                 .add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"))
                 .clicked()
             {
-                self.zoom_level = (self.zoom_level + 0.1).min(self.max_zoom_level);
+                self.theme_ctrl.zoom_in();
                 ui.close();
             }
             if ui
                 .add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-"))
                 .clicked()
             {
-                self.zoom_level = (self.zoom_level - 0.1).max(0.5);
+                self.theme_ctrl.zoom_out();
                 ui.close();
             }
             if ui
                 .add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0"))
                 .clicked()
             {
-                self.zoom_level = 1.0;
+                self.theme_ctrl.zoom_reset();
                 ui.close();
             }
             ui.separator();
@@ -422,22 +416,27 @@ impl App {
             let ctx_clone = ctx.clone();
 
             // "System" entry
-            if ui.radio(self.theme_mode.is_system(), "System").clicked() {
-                self.set_theme_mode(ThemeMode::system(), &ctx_clone);
+            if ui
+                .radio(self.theme_ctrl.theme_mode.is_system(), "System")
+                .clicked()
+            {
+                self.theme_ctrl.set_mode(ThemeMode::system(), &ctx_clone);
                 ui.close();
             }
             ui.separator();
 
             // Dynamic theme entries
             let theme_names: Vec<String> = self
+                .theme_ctrl
                 .available_themes
                 .iter()
                 .map(|t| t.name.clone())
                 .collect();
             for name in theme_names {
-                let is_selected = !self.theme_mode.is_system() && self.theme_mode.0 == name;
+                let is_selected =
+                    !self.theme_ctrl.theme_mode.is_system() && self.theme_ctrl.theme_mode.0 == name;
                 if ui.radio(is_selected, &name).clicked() {
-                    self.set_theme_mode(ThemeMode(name), &ctx_clone);
+                    self.theme_ctrl.set_mode(ThemeMode(name), &ctx_clone);
                     ui.close();
                 }
             }

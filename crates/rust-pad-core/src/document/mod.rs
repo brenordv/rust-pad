@@ -232,9 +232,19 @@ impl Document {
         }
     }
 
-    /// Inserts a newline at the current cursor position.
+    /// Inserts a newline at the current cursor position, inheriting the
+    /// leading whitespace of the current line (auto-indent).
     pub fn insert_newline(&mut self) {
-        self.insert_text("\n");
+        let indent = self
+            .buffer
+            .leading_whitespace(self.cursor.position.line)
+            .unwrap_or_default();
+        if indent.is_empty() {
+            self.insert_text("\n");
+        } else {
+            let text = format!("\n{indent}");
+            self.insert_text(&text);
+        }
     }
 
     /// Deletes the selected text.
@@ -716,13 +726,73 @@ mod tests {
         assert_eq!(doc.selected_text(), Some("hello".to_string()));
     }
 
+    // ── Auto-indent on Enter ──────────────────────────────────────
+
     #[test]
-    fn test_insert_newline_no_auto_indent() {
+    fn test_insert_newline_inherits_indent() {
         let mut doc = Document::new();
         doc.insert_text("    hello");
         doc.insert_newline();
-        assert_eq!(doc.buffer.to_string(), "    hello\n");
+        assert_eq!(doc.buffer.to_string(), "    hello\n    ");
+        assert_eq!(doc.cursor.position, Position::new(1, 4));
+    }
+
+    #[test]
+    fn test_insert_newline_no_indent() {
+        let mut doc = Document::new();
+        doc.insert_text("hello");
+        doc.insert_newline();
+        assert_eq!(doc.buffer.to_string(), "hello\n");
         assert_eq!(doc.cursor.position, Position::new(1, 0));
+    }
+
+    #[test]
+    fn test_insert_newline_mid_word_inherits_indent() {
+        let mut doc = Document::new();
+        doc.insert_text("  hello world");
+        doc.cursor.position = Position::new(0, 7); // between "o" and " "
+        doc.insert_newline();
+        assert_eq!(doc.buffer.to_string(), "  hello\n   world");
+        assert_eq!(doc.cursor.position, Position::new(1, 2));
+    }
+
+    #[test]
+    fn test_insert_newline_tab_indent() {
+        let mut doc = Document::new();
+        doc.insert_text("\t\thello");
+        doc.insert_newline();
+        assert_eq!(doc.buffer.to_string(), "\t\thello\n\t\t");
+        assert_eq!(doc.cursor.position, Position::new(1, 2));
+    }
+
+    #[test]
+    fn test_insert_newline_all_whitespace_line() {
+        let mut doc = Document::new();
+        doc.insert_text("   ");
+        doc.insert_newline();
+        assert_eq!(doc.buffer.to_string(), "   \n   ");
+        assert_eq!(doc.cursor.position, Position::new(1, 3));
+    }
+
+    #[test]
+    fn test_insert_newline_empty_line() {
+        let mut doc = Document::new();
+        doc.insert_text("hello\n");
+        doc.cursor.position = Position::new(1, 0);
+        doc.insert_newline();
+        assert_eq!(doc.buffer.to_string(), "hello\n\n");
+        assert_eq!(doc.cursor.position, Position::new(2, 0));
+    }
+
+    #[test]
+    fn test_insert_newline_undo_reverts_all() {
+        let mut doc = Document::new();
+        doc.insert_text("    hello");
+        doc.history.force_group_break();
+        doc.insert_newline();
+        assert_eq!(doc.buffer.to_string(), "    hello\n    ");
+        doc.undo();
+        assert_eq!(doc.buffer.to_string(), "    hello");
     }
 
     #[test]
@@ -1061,8 +1131,9 @@ mod tests {
         doc.insert_text("    hello");
         assert_eq!(doc.cursor.position, Position::new(0, 9));
         doc.insert_newline();
-        assert_eq!(doc.buffer.to_string(), "    hello\n");
-        assert_eq!(doc.cursor.position, Position::new(1, 0));
+        // Auto-indent: new line inherits 4-space indent
+        assert_eq!(doc.buffer.to_string(), "    hello\n    ");
+        assert_eq!(doc.cursor.position, Position::new(1, 4));
     }
 
     #[test]
@@ -1081,8 +1152,9 @@ mod tests {
         doc.insert_text("    hello world");
         doc.cursor.position = Position::new(0, 9);
         doc.insert_newline();
-        assert_eq!(doc.buffer.to_string(), "    hello\n world");
-        assert_eq!(doc.cursor.position, Position::new(1, 0));
+        // Auto-indent: inherits 4-space indent
+        assert_eq!(doc.buffer.to_string(), "    hello\n     world");
+        assert_eq!(doc.cursor.position, Position::new(1, 4));
     }
 
     #[test]
@@ -1091,8 +1163,9 @@ mod tests {
         doc.insert_text("    hello");
         doc.cursor.position = Position::new(0, 0);
         doc.insert_newline();
-        assert_eq!(doc.buffer.to_string(), "\n    hello");
-        assert_eq!(doc.cursor.position, Position::new(1, 0));
+        // Cursor at col 0: line has 4-space indent, auto-indent inserts it
+        assert_eq!(doc.buffer.to_string(), "\n        hello");
+        assert_eq!(doc.cursor.position, Position::new(1, 4));
     }
 
     #[test]
@@ -1100,18 +1173,20 @@ mod tests {
         let mut doc = Document::new();
         assert_eq!(doc.cursor.position, Position::new(0, 0));
         doc.insert_newline();
+        // Empty line has no indent
         assert_eq!(doc.buffer.to_string(), "\n");
         assert_eq!(doc.cursor.position, Position::new(1, 0));
     }
 
     #[test]
-    fn test_newline_no_tab_indent_copy() {
+    fn test_newline_tab_indent_inherits() {
         let mut doc = Document::new();
         doc.insert_text("\thello");
         assert_eq!(doc.cursor.position, Position::new(0, 6));
         doc.insert_newline();
-        assert_eq!(doc.buffer.to_string(), "\thello\n");
-        assert_eq!(doc.cursor.position, Position::new(1, 0));
+        // Auto-indent: inherits tab
+        assert_eq!(doc.buffer.to_string(), "\thello\n\t");
+        assert_eq!(doc.cursor.position, Position::new(1, 1));
     }
 
     #[test]
@@ -1120,8 +1195,9 @@ mod tests {
         doc.insert_text("    line1\n    line2");
         doc.cursor.position = Position::new(0, 9);
         doc.insert_newline();
-        assert_eq!(doc.buffer.to_string(), "    line1\n\n    line2");
-        assert_eq!(doc.cursor.position, Position::new(1, 0));
+        // Auto-indent: inherits 4-space indent from line 0
+        assert_eq!(doc.buffer.to_string(), "    line1\n    \n    line2");
+        assert_eq!(doc.cursor.position, Position::new(1, 4));
     }
 
     #[test]
@@ -1129,10 +1205,12 @@ mod tests {
         let mut doc = Document::new();
         doc.insert_text("    code");
         doc.insert_newline();
-        assert_eq!(doc.cursor.position, Position::new(1, 0));
+        // First newline: on line with 4-space indent
+        assert_eq!(doc.cursor.position, Position::new(1, 4));
         doc.insert_newline();
-        assert_eq!(doc.cursor.position, Position::new(2, 0));
-        assert_eq!(doc.buffer.to_string(), "    code\n\n");
+        // Second newline: on line "    " (all whitespace), inherits 4-space indent
+        assert_eq!(doc.cursor.position, Position::new(2, 4));
+        assert_eq!(doc.buffer.to_string(), "    code\n    \n    ");
     }
 
     #[test]
@@ -1143,9 +1221,9 @@ mod tests {
         doc.cursor.position = Position::new(0, 15);
         doc.cursor.selection_anchor = Some(Position::new(0, 10));
         doc.insert_newline();
-        // "world" deleted, then plain newline inserted (no auto-indent)
-        assert_eq!(doc.buffer.to_string(), "    hello \n");
-        assert_eq!(doc.cursor.position, Position::new(1, 0));
+        // "world" deleted, then newline with auto-indent from line's leading ws
+        assert_eq!(doc.buffer.to_string(), "    hello \n    ");
+        assert_eq!(doc.cursor.position, Position::new(1, 4));
     }
 
     // ── session_id ───────────────────────────────────────────────────

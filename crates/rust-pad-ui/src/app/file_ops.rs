@@ -3,36 +3,23 @@
 //! Handles opening files, saving (including save-as), creating new tabs,
 //! session cleanup, and closing tabs with unsaved-change prompts.
 
-use std::path::Path;
-
 use rust_pad_config::session::generate_session_id;
 
 use super::{App, DialogState};
 
 impl App {
-    /// Adds a path to the recent files list, deduplicating and capping at max count.
-    pub(crate) fn track_recent_file(&mut self, path: &Path) {
-        if !self.recent_files_enabled {
-            return;
-        }
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        self.recent_files.retain(|p| p != &canonical);
-        self.recent_files.insert(0, canonical);
-        self.recent_files.truncate(self.recent_files_max_count);
-    }
-
     /// Opens a file dialog and loads the selected file into a new tab.
     pub(crate) fn open_file_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new().set_title("Open File");
-        if let Some(dir) = self.resolve_dialog_directory() {
+        if let Some(dir) = self.file_dialog.resolve_directory() {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_file() {
-            self.update_last_used_folder(&path);
+            self.file_dialog.update_last_folder(&path);
             if let Err(e) = self.tabs.open_file(&path) {
                 tracing::error!("Failed to open file: {e:#}");
             } else {
-                self.track_recent_file(&path);
+                self.recent_files.track(&path);
             }
         }
     }
@@ -54,11 +41,11 @@ impl App {
         let mut dialog = rfd::FileDialog::new()
             .set_title("Save As")
             .set_file_name(&self.tabs.active_doc().title);
-        if let Some(dir) = self.resolve_dialog_directory() {
+        if let Some(dir) = self.file_dialog.resolve_directory() {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.save_file() {
-            self.update_last_used_folder(&path);
+            self.file_dialog.update_last_folder(&path);
             // Clean up session content before saving (transitions unsaved -> file-backed)
             self.cleanup_session_for_tab(self.tabs.active);
             let doc = self.tabs.active_doc_mut();
@@ -66,7 +53,7 @@ impl App {
                 tracing::error!("Failed to save: {e:#}");
             } else {
                 doc.session_id = None;
-                self.track_recent_file(&path);
+                self.recent_files.track(&path);
             }
         }
     }
@@ -93,79 +80,6 @@ impl App {
         } else if idx < self.tabs.tab_count() {
             self.cleanup_session_for_tab(idx);
             self.tabs.close_tab(idx);
-        }
-    }
-
-    /// Returns the starting directory for file dialogs.
-    ///
-    /// Uses `last_used_folder` when remembering is enabled, falls back to
-    /// `default_work_folder`, then the user's home directory.
-    fn resolve_dialog_directory(&self) -> Option<std::path::PathBuf> {
-        if self.remember_last_folder {
-            if let Some(ref folder) = self.last_used_folder {
-                if folder.is_dir() {
-                    return Some(folder.clone());
-                }
-            }
-        }
-        if !self.default_work_folder.is_empty() {
-            let p = std::path::PathBuf::from(&self.default_work_folder);
-            if p.is_dir() {
-                return Some(p);
-            }
-        }
-        dirs::home_dir()
-    }
-
-    /// Checks all live-monitored documents for external file changes and reloads them.
-    pub(crate) fn check_live_monitored_files(&mut self) {
-        for doc in &mut self.tabs.documents {
-            if !doc.live_monitoring {
-                continue;
-            }
-            let path = match &doc.file_path {
-                Some(p) => p.clone(),
-                None => continue,
-            };
-            let current_mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let changed = match doc.last_known_mtime {
-                Some(known) => current_mtime > known,
-                None => true,
-            };
-            if changed {
-                if let Err(e) = doc.reload_from_disk() {
-                    tracing::warn!("Live reload failed for '{}': {e:#}", doc.title);
-                } else {
-                    // Scroll to the end of the file (tail behavior)
-                    let last_line = doc.buffer.len_lines().saturating_sub(1);
-                    doc.scroll_y = last_line as f32;
-                    doc.cursor.position = rust_pad_core::cursor::Position::new(last_line, 0);
-                    doc.scroll_to_cursor = true;
-                }
-            }
-        }
-    }
-
-    /// Auto-saves all modified file-backed documents.
-    pub(crate) fn auto_save_all(&mut self) {
-        for doc in &mut self.tabs.documents {
-            if doc.modified && doc.file_path.is_some() {
-                if let Err(e) = doc.save() {
-                    tracing::warn!("Auto-save failed for '{}': {e:#}", doc.title);
-                }
-            }
-        }
-    }
-
-    /// Updates `last_used_folder` from a file path's parent directory.
-    fn update_last_used_folder(&mut self, file_path: &Path) {
-        if self.remember_last_folder {
-            if let Some(parent) = file_path.parent() {
-                self.last_used_folder = Some(parent.to_path_buf());
-            }
         }
     }
 }
