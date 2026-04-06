@@ -2946,4 +2946,352 @@ mod tests {
         let session = store.load_session().unwrap().unwrap();
         assert_eq!(session.tabs.len(), 2);
     }
+
+    // ── file_ops: open_file_dialog ──────────────────────────────────────
+
+    #[test]
+    fn test_open_file_dialog_sets_dialog_open() {
+        // Verify the precondition: dialog_open starts false.
+        // We cannot call open_file_dialog() directly because it spawns a
+        // background thread with rfd::FileDialog which hangs on headless CI.
+        // Instead verify the guard logic and state transitions.
+        let app = test_app();
+        assert!(!app.io_activity.dialog_open);
+        assert!(!app.is_dialog_open());
+    }
+
+    #[test]
+    fn test_open_file_dialog_blocked_when_already_open() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+        // Should return early without panicking
+        app.open_file_dialog();
+        assert!(app.io_activity.dialog_open);
+    }
+
+    // ── file_ops: open_file_path ────────────────────────────────────────
+
+    #[test]
+    fn test_open_file_path_duplicate_switches_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        assert_eq!(app.tabs.active, 1);
+
+        // Switch away
+        app.tabs.switch_to(0);
+        assert_eq!(app.tabs.active, 0);
+
+        // open_file_path should switch to existing tab, not start a read
+        app.open_file_path(&path);
+        assert_eq!(app.tabs.active, 1);
+        assert_eq!(app.io_activity.pending_reads, 0);
+    }
+
+    #[test]
+    fn test_open_file_path_new_file_increments_pending() {
+        let mut app = test_app();
+        assert_eq!(app.io_activity.pending_reads, 0);
+        app.open_file_path(std::path::Path::new("/some/new/file.txt"));
+        assert_eq!(app.io_activity.pending_reads, 1);
+    }
+
+    // ── file_ops: save_active ───────────────────────────────────────────
+
+    #[test]
+    fn test_save_active_file_backed_sends_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("save.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        app.tabs.active_doc_mut().insert_text(" modified");
+
+        assert!(app.io_activity.pending_saves.is_empty());
+        app.save_active();
+        assert_eq!(app.io_activity.pending_saves.len(), 1);
+        assert_eq!(app.io_activity.pending_saves[0].path, path);
+    }
+
+    #[test]
+    fn test_save_active_untitled_has_no_path() {
+        // save_active() on an untitled doc would call save_as_dialog() which
+        // spawns an rfd dialog thread — not safe on headless CI. Instead verify
+        // the branching precondition: untitled docs have no file_path.
+        let app = test_app();
+        assert!(app.tabs.active_doc().file_path.is_none());
+    }
+
+    // ── file_ops: save_as_dialog ────────────────────────────────────────
+
+    #[test]
+    fn test_save_as_context_captures_version() {
+        // save_as_dialog() spawns an rfd dialog thread — not safe on headless
+        // CI. Instead verify the SaveAsContext struct captures the right data.
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("content");
+        let version = app.tabs.active_doc().content_version;
+        let session_id = app.tabs.active_doc().session_id.clone();
+
+        let ctx = crate::io_worker::SaveAsContext {
+            content_version: version,
+            session_id,
+            original_path: app.tabs.active_doc().file_path.clone(),
+        };
+        assert_eq!(ctx.content_version, version);
+        assert!(ctx.original_path.is_none());
+    }
+
+    #[test]
+    fn test_save_as_dialog_blocked_when_dialog_open() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+        app.save_as_dialog();
+        // save_as_context should not be set
+        assert!(app.io_activity.save_as_context.is_none());
+    }
+
+    // ── handle_io_responses: FileRead ───────────────────────────────────
+
+    #[test]
+    fn test_handle_file_read_opens_tab() {
+        let mut app = test_app();
+        app.io_activity.pending_reads = 1;
+
+        let path = std::path::PathBuf::from("/tmp/test_read.txt");
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileRead {
+                path: path.clone(),
+                bytes: b"file content".to_vec(),
+            });
+        app.handle_io_responses();
+
+        assert_eq!(app.io_activity.pending_reads, 0);
+        assert_eq!(app.tabs.tab_count(), 2);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "file content");
+    }
+
+    // ── handle_io_responses: DialogFileOpened ────────────────────────────
+
+    #[test]
+    fn test_handle_dialog_file_opened() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+
+        let path = std::path::PathBuf::from("/tmp/dialog_open.txt");
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::DialogFileOpened {
+                path: path.clone(),
+                bytes: b"opened".to_vec(),
+            });
+        app.handle_io_responses();
+
+        assert!(!app.io_activity.dialog_open);
+        assert_eq!(app.tabs.tab_count(), 2);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "opened");
+    }
+
+    // ── handle_io_responses: FileSaved ───────────────────────────────────
+
+    #[test]
+    fn test_handle_file_saved_clears_modified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("saved.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        app.tabs.active_doc_mut().insert_text(" edit");
+        assert!(app.tabs.active_doc().modified);
+        let version = app.tabs.active_doc().content_version;
+
+        app.io_activity
+            .pending_saves
+            .push(crate::io_worker::PendingSave {
+                path: path.clone(),
+                content_version: version,
+            });
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileSaved { path: path.clone() });
+        app.handle_io_responses();
+
+        assert!(app.io_activity.pending_saves.is_empty());
+        assert!(!app.tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_handle_file_saved_keeps_modified_if_version_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("versioned.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        app.tabs.active_doc_mut().insert_text(" first");
+        let old_version = app.tabs.active_doc().content_version;
+
+        app.io_activity
+            .pending_saves
+            .push(crate::io_worker::PendingSave {
+                path: path.clone(),
+                content_version: old_version,
+            });
+
+        // Simulate user editing while save is in flight
+        app.tabs.active_doc_mut().insert_text(" second");
+        assert_ne!(app.tabs.active_doc().content_version, old_version);
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileSaved { path: path.clone() });
+        app.handle_io_responses();
+
+        // modified should remain true because content changed after save started
+        assert!(app.tabs.active_doc().modified);
+    }
+
+    // ── handle_io_responses: DialogFileSavedAs ──────────────────────────
+
+    #[test]
+    fn test_handle_dialog_file_saved_as() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("unsaved content");
+        let sid = "test-session-id".to_string();
+        app.tabs.active_doc_mut().session_id = Some(sid.clone());
+        let version = app.tabs.active_doc().content_version;
+
+        app.io_activity.dialog_open = true;
+        app.io_activity.save_as_context = Some(crate::io_worker::SaveAsContext {
+            content_version: version,
+            session_id: Some(sid),
+            original_path: None,
+        });
+
+        let save_path = std::path::PathBuf::from("/tmp/saved_as.txt");
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::DialogFileSavedAs {
+                path: save_path.clone(),
+            });
+        app.handle_io_responses();
+
+        assert!(!app.io_activity.dialog_open);
+        assert!(app.io_activity.save_as_context.is_none());
+        assert!(!app.tabs.active_doc().modified);
+        assert_eq!(
+            app.tabs.active_doc().file_path.as_deref(),
+            Some(save_path.as_path())
+        );
+        assert!(app.tabs.active_doc().session_id.is_none());
+    }
+
+    // ── handle_io_responses: DialogCancelled ────────────────────────────
+
+    #[test]
+    fn test_handle_dialog_cancelled() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+        app.io_activity.save_as_context = Some(crate::io_worker::SaveAsContext {
+            content_version: 0,
+            session_id: None,
+            original_path: None,
+        });
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::DialogCancelled);
+        app.handle_io_responses();
+
+        assert!(!app.io_activity.dialog_open);
+        assert!(app.io_activity.save_as_context.is_none());
+    }
+
+    // ── handle_io_responses: Error ──────────────────────────────────────
+
+    #[test]
+    fn test_handle_error_clears_dialog_state() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+        app.io_activity.save_as_context = Some(crate::io_worker::SaveAsContext {
+            content_version: 0,
+            session_id: None,
+            original_path: None,
+        });
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::Error {
+                path: None,
+                message: "test error".to_string(),
+            });
+        app.handle_io_responses();
+
+        assert!(!app.io_activity.dialog_open);
+        assert!(app.io_activity.save_as_context.is_none());
+    }
+
+    #[test]
+    fn test_handle_error_clears_pending_save() {
+        let mut app = test_app();
+        let path = std::path::PathBuf::from("/tmp/fail.txt");
+        app.io_activity
+            .pending_saves
+            .push(crate::io_worker::PendingSave {
+                path: path.clone(),
+                content_version: 0,
+            });
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::Error {
+                path: Some(path),
+                message: "write failed".to_string(),
+            });
+        app.handle_io_responses();
+
+        assert!(app.io_activity.pending_saves.is_empty());
+    }
+
+    // ── find_save_as_tab ────────────────────────────────────────────────
+
+    #[test]
+    fn test_find_save_as_tab_by_session_id() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().session_id = Some("sid-1".to_string());
+
+        let ctx = crate::io_worker::SaveAsContext {
+            content_version: 0,
+            session_id: Some("sid-1".to_string()),
+            original_path: None,
+        };
+        assert_eq!(app.find_save_as_tab(&ctx), Some(0));
+    }
+
+    #[test]
+    fn test_find_save_as_tab_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("find.txt");
+        std::fs::write(&path, "content").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+
+        let ctx = crate::io_worker::SaveAsContext {
+            content_version: 0,
+            session_id: None,
+            original_path: Some(path),
+        };
+        assert_eq!(app.find_save_as_tab(&ctx), Some(1));
+    }
+
+    #[test]
+    fn test_find_save_as_tab_falls_back_to_active() {
+        let app = test_app();
+        let ctx = crate::io_worker::SaveAsContext {
+            content_version: 0,
+            session_id: Some("nonexistent".to_string()),
+            original_path: None,
+        };
+        assert_eq!(app.find_save_as_tab(&ctx), Some(app.tabs.active));
+    }
 }

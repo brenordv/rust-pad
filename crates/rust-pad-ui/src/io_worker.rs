@@ -152,6 +152,12 @@ impl IoWorker {
     pub fn poll(&self) -> Option<IoResponse> {
         self.rx.try_recv().ok()
     }
+
+    /// Injects a response directly into the channel for testing.
+    #[cfg(test)]
+    pub fn inject_response(&self, response: IoResponse) {
+        self.tx.send(response).expect("channel closed");
+    }
 }
 
 /// Processes a single I/O request on the calling thread.
