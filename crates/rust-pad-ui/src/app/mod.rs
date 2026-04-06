@@ -21,6 +21,7 @@ pub use auto_save::AutoSaveController;
 pub use file_dialog_state::FileDialogState;
 pub use live_monitor::LiveMonitorController;
 pub use recent_files::RecentFilesManager;
+pub use settings_dialog::SettingsTab;
 pub use theme_controller::ThemeController;
 
 use std::path::PathBuf;
@@ -114,10 +115,11 @@ pub struct App {
     bookmarks: BookmarkManager,
     last_flush: Instant,
     session_store: Option<SessionStore>,
+    session_content_max_kb: usize,
     last_window_title: String,
     live_monitor: LiveMonitorController,
-    pub(crate) settings_open: bool,
-    pub(crate) settings_tab: settings_dialog::SettingsTab,
+    pub settings_open: bool,
+    pub settings_tab: SettingsTab,
     pub(crate) about_open: bool,
     pub(crate) about_logo: Option<egui::TextureHandle>,
 }
@@ -213,6 +215,7 @@ impl App {
             bookmarks: BookmarkManager::new(),
             last_flush: Instant::now(),
             session_store,
+            session_content_max_kb: app_config.session_content_max_kb,
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -522,9 +525,21 @@ impl eframe::App for App {
                 } else {
                     let sid = doc.session_id.clone().unwrap_or_else(generate_session_id);
                     let content = doc.buffer.to_string();
-                    if let Err(e) = store.save_content(&sid, &content) {
+                    let content_bytes = content.len();
+                    let limit_bytes = self.session_content_max_kb * 1024;
+
+                    if self.session_content_max_kb > 0 && content_bytes > limit_bytes {
+                        let actual_kb = content_bytes / 1024;
+                        tracing::warn!(
+                            "Tab '{}' content ({} KB) exceeds session limit ({} KB), skipping content save",
+                            doc.title,
+                            actual_kb,
+                            self.session_content_max_kb,
+                        );
+                    } else if let Err(e) = store.save_content(&sid, &content) {
                         tracing::warn!("Failed to save session content: {e}");
                     }
+
                     tabs_list.push(SessionTabEntry::Unsaved {
                         session_id: sid,
                         title: doc.title.clone(),
@@ -566,6 +581,7 @@ impl eframe::App for App {
             recent_files_max_count: self.recent_files.max_count,
             recent_files_cleanup: self.recent_files.cleanup,
             recent_files: self.recent_files.to_config_strings(),
+            session_content_max_kb: self.session_content_max_kb,
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
@@ -627,6 +643,7 @@ mod tests {
             bookmarks: BookmarkManager::new(),
             last_flush: Instant::now(),
             session_store: None,
+            session_content_max_kb: 10_240,
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -2648,5 +2665,122 @@ mod tests {
         app.add_cursor_above();
         let doc = app.tabs.active_doc();
         assert_eq!(doc.secondary_cursors.len(), 0);
+    }
+
+    // ── Session content size limit tests ───────────────────────────
+
+    use eframe::App as _;
+    use rust_pad_config::session::SessionStore;
+
+    /// Helper: create a test app with a real session store backed by a temp dir.
+    /// Also redirects the config path into the temp dir so `on_exit()` doesn't
+    /// write a `rust-pad.json` into the repo root.
+    fn test_app_with_session(dir: &std::path::Path) -> App {
+        let db_path = dir.join("test-session.redb");
+        let store = SessionStore::open(&db_path).expect("open test session store");
+        let mut app = test_app();
+        app.session_store = Some(store);
+        app.config_path = dir.join("rust-pad.json");
+        app
+    }
+
+    #[test]
+    fn test_on_exit_saves_content_under_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test-session.redb");
+        {
+            let mut app = test_app_with_session(dir.path());
+            app.session_content_max_kb = 1;
+            app.tabs.active_doc_mut().insert_text("hello world");
+            app.tabs.active_doc_mut().session_id = Some("test-small".to_string());
+            app.on_exit();
+        }
+        // App dropped — reopen store to verify
+        let store = SessionStore::open(&db_path).expect("reopen store");
+        let loaded = store.load_content("test-small").unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_on_exit_skips_content_over_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test-session.redb");
+        {
+            let mut app = test_app_with_session(dir.path());
+            app.session_content_max_kb = 1;
+            let large_content = "x".repeat(1025);
+            app.tabs.active_doc_mut().insert_text(&large_content);
+            app.tabs.active_doc_mut().session_id = Some("test-large".to_string());
+            app.on_exit();
+        }
+        let store = SessionStore::open(&db_path).expect("reopen store");
+        // Content should NOT have been saved
+        assert!(store.load_content("test-large").unwrap().is_none());
+        // But the tab metadata should still be in the session
+        let session = store.load_session().unwrap().unwrap();
+        assert_eq!(session.tabs.len(), 1);
+        match &session.tabs[0] {
+            SessionTabEntry::Unsaved { session_id, .. } => {
+                assert_eq!(session_id, "test-large");
+            }
+            _ => panic!("expected Unsaved entry"),
+        }
+    }
+
+    #[test]
+    fn test_on_exit_unlimited_when_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test-session.redb");
+        {
+            let mut app = test_app_with_session(dir.path());
+            app.session_content_max_kb = 0;
+            let large_content = "x".repeat(50 * 1024);
+            app.tabs.active_doc_mut().insert_text(&large_content);
+            app.tabs.active_doc_mut().session_id = Some("test-unlimited".to_string());
+            app.on_exit();
+        }
+        let store = SessionStore::open(&db_path).expect("reopen store");
+        let loaded = store.load_content("test-unlimited").unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().len(), 50 * 1024);
+    }
+
+    #[test]
+    fn test_on_exit_content_exactly_at_limit_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test-session.redb");
+        {
+            let mut app = test_app_with_session(dir.path());
+            app.session_content_max_kb = 1;
+            let exact_content = "x".repeat(1024);
+            app.tabs.active_doc_mut().insert_text(&exact_content);
+            app.tabs.active_doc_mut().session_id = Some("test-exact".to_string());
+            app.on_exit();
+        }
+        let store = SessionStore::open(&db_path).expect("reopen store");
+        assert!(store.load_content("test-exact").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_on_exit_multiple_tabs_independent_limit_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test-session.redb");
+        {
+            let mut app = test_app_with_session(dir.path());
+            app.session_content_max_kb = 1;
+            app.tabs.active_doc_mut().insert_text("small");
+            app.tabs.active_doc_mut().session_id = Some("tab-small".to_string());
+            app.tabs.new_tab();
+            let large = "y".repeat(2048);
+            app.tabs.active_doc_mut().insert_text(&large);
+            app.tabs.active_doc_mut().session_id = Some("tab-large".to_string());
+            app.on_exit();
+        }
+        let store = SessionStore::open(&db_path).expect("reopen store");
+        assert!(store.load_content("tab-small").unwrap().is_some());
+        assert!(store.load_content("tab-large").unwrap().is_none());
+        let session = store.load_session().unwrap().unwrap();
+        assert_eq!(session.tabs.len(), 2);
     }
 }
