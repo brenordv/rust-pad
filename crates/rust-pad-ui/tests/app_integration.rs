@@ -1652,15 +1652,24 @@ fn test_ctrl_s_saves_file_backed_document() {
         ..Default::default()
     };
     harness.key_press_modifiers(ctrl, Key::S);
-    // Save is async — run enough frames for the background thread to write the
-    // file and for handle_io_responses to process the result.  The spinner shown
-    // during the save prevents harness.run() from settling, so use run_steps().
-    harness.run_steps(10);
+    // Save is async — run frames with brief pauses so the background thread
+    // has time to write the file and handle_io_responses can pick up the result.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        harness.run_steps(1);
+        if !harness.state().tabs.active_doc().modified {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Async save did not complete within 5 seconds"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     // File should be saved
     let contents = std::fs::read_to_string(&file_path).unwrap();
     assert!(contents.contains("original"));
-    assert!(!harness.state().tabs.active_doc().modified);
 }
 
 // ── Y. File open integration ──────────────────────────────────────────────
