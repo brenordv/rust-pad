@@ -1,10 +1,11 @@
 //! Tab bar rendering for the editor application.
 //!
 //! Handles the tab strip with active tab highlighting, close buttons,
-//! context menus, middle-click close, and new tab creation.
+//! context menus, middle-click close, new tab creation, and horizontal
+//! scrolling when tabs overflow the available width.
 
 use eframe::egui;
-use egui::{Color32, Rect, RichText, Sense, Stroke, Vec2, Visuals};
+use egui::{Color32, Rect, RichText, ScrollArea, Sense, Stroke, Vec2, Visuals};
 
 use super::App;
 
@@ -16,20 +17,80 @@ const TITLE_CLOSE_GAP: f32 = 4.0;
 const CLOSE_AREA_SIZE: f32 = 14.0;
 /// Fixed tab height.
 const TAB_HEIGHT: f32 = 32.0;
+/// Pixels to scroll per arrow button click.
+const SCROLL_STEP: f32 = 120.0;
+/// Width of each scroll arrow button.
+const ARROW_BUTTON_WIDTH: f32 = 20.0;
 
 impl App {
-    /// Renders the tab bar with active tab highlighting and close buttons.
+    /// Renders the tab bar with active tab highlighting, close buttons,
+    /// and horizontal scrolling when tabs overflow.
     pub(crate) fn show_tab_bar(&mut self, ui: &mut egui::Ui) {
         let visuals = ui.visuals().clone();
+
+        // Detect whether the active tab or tab count changed since last frame.
+        let active_changed = self.tabs.active != self.prev_active_tab;
+        let count_changed = self.tabs.tab_count() != self.prev_tab_count;
+        let need_auto_scroll = active_changed || count_changed;
+
+        // Update tracked state for next frame.
+        self.prev_active_tab = self.tabs.active;
+        self.prev_tab_count = self.tabs.tab_count();
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let mut tab_to_close: Option<usize> = None;
 
-            for idx in 0..self.tabs.tab_count() {
-                self.render_tab_button(ui, idx, &visuals, &mut tab_to_close);
+            // Collect tab rects for auto-scroll calculation.
+            let mut tab_rects: Vec<Rect> = Vec::with_capacity(self.tabs.tab_count());
+
+            // Reserve space for elements that render after the ScrollArea.
+            // Uses previous frame's overflow flag (one-frame lag is acceptable).
+            let arrows_width = if self.tabs_overflow {
+                ARROW_BUTTON_WIDTH * 2.0
+            } else {
+                0.0
+            };
+            let new_tab_btn_width = 24.0;
+            let reserved = arrows_width + new_tab_btn_width;
+            let scroll_max_width = (ui.available_width() - reserved).max(0.0);
+
+            // 1. Render scrollable tab area.
+            // Enable vertical-wheel → horizontal-scroll mapping so the user
+            // can scroll tabs with a normal mouse wheel.
+            ui.style_mut().always_scroll_the_only_direction = true;
+            let scroll_output = ScrollArea::horizontal()
+                .id_salt("tab_scroll")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .horizontal_scroll_offset(self.tab_scroll_offset)
+                .max_width(scroll_max_width)
+                .show(ui, |ui: &mut egui::Ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for idx in 0..self.tabs.tab_count() {
+                        let rect = self.render_tab_button(ui, idx, &visuals, &mut tab_to_close);
+                        tab_rects.push(rect);
+                    }
+                });
+
+            // 2. Update scroll state from ScrollArea output.
+            self.tab_scroll_offset = scroll_output.state.offset.x;
+            self.tabs_overflow = scroll_output.content_size.x > scroll_output.inner_rect.width();
+
+            // 3. Auto-scroll to the active tab if it changed.
+            if need_auto_scroll {
+                if let Some(active_rect) = tab_rects.get(self.tabs.active).copied() {
+                    self.auto_scroll_to_tab(active_rect, &scroll_output);
+                }
             }
 
+            // 4. Render scroll arrows (only when overflow).
+            if self.tabs_overflow {
+                let max_offset =
+                    (scroll_output.content_size.x - scroll_output.inner_rect.width()).max(0.0);
+                self.render_scroll_arrows(ui, &visuals, max_offset);
+            }
+
+            // 5. "+" button and empty area (unchanged).
             self.render_new_tab_button(ui, &visuals);
             self.render_empty_tab_bar_area(ui);
 
@@ -42,16 +103,14 @@ impl App {
     /// Renders a single tab as a unified rect with painted title, close button,
     /// accent line, separator, and context menu.
     ///
-    /// The tab width is: `pad + title_width + gap + close_area + pad`.
-    /// The close button area is always reserved so that tab width stays constant.
-    /// The close glyph is only drawn when the tab is active or hovered.
+    /// Returns the allocated tab rect for auto-scroll calculations.
     fn render_tab_button(
         &mut self,
         ui: &mut egui::Ui,
         idx: usize,
         visuals: &Visuals,
         tab_to_close: &mut Option<usize>,
-    ) {
+    ) -> Rect {
         let doc = &self.tabs.documents[idx];
         let is_active = idx == self.tabs.active;
 
@@ -92,7 +151,6 @@ impl App {
         let fill = if is_active {
             visuals.widgets.active.bg_fill
         } else if is_hovered {
-            // Slight highlight on hover for inactive tabs
             visuals.widgets.hovered.weak_bg_fill
         } else {
             visuals.faint_bg_color
@@ -142,7 +200,6 @@ impl App {
 
         // Draw the close glyph when tab is active or hovered
         if is_active || is_hovered {
-            // Highlight background on close button hover
             if pointer_in_close {
                 painter.rect_filled(close_rect, 2.0, visuals.widgets.hovered.bg_fill);
             }
@@ -183,6 +240,85 @@ impl App {
         }
 
         self.render_tab_context_menu(ui, idx, &response, tab_to_close);
+
+        tab_rect
+    }
+
+    /// Adjusts the scroll offset so that `target_rect` (in scroll content
+    /// coordinates) is fully visible within the scroll area.
+    fn auto_scroll_to_tab(
+        &mut self,
+        target_rect: Rect,
+        scroll_output: &egui::scroll_area::ScrollAreaOutput<()>,
+    ) {
+        let visible_min = scroll_output.state.offset.x;
+        let visible_width = scroll_output.inner_rect.width();
+        let visible_max = visible_min + visible_width;
+
+        // Convert the tab rect from screen coordinates to scroll content coordinates
+        // by subtracting the inner_rect origin and adding back the offset.
+        let content_left = target_rect.min.x - scroll_output.inner_rect.min.x + visible_min;
+        let content_right = target_rect.max.x - scroll_output.inner_rect.min.x + visible_min;
+
+        let padding = TAB_PADDING;
+
+        if content_left < visible_min {
+            // Tab is to the left of the visible area — scroll left.
+            self.tab_scroll_offset = (content_left - padding).max(0.0);
+        } else if content_right > visible_max {
+            // Tab is to the right of the visible area — scroll right.
+            let max_offset = (scroll_output.content_size.x - visible_width).max(0.0);
+            self.tab_scroll_offset = (content_right - visible_width + padding).min(max_offset);
+        }
+        // Otherwise the tab is already fully visible — no adjustment needed.
+    }
+
+    /// Renders the left/right scroll arrow buttons.
+    fn render_scroll_arrows(&mut self, ui: &mut egui::Ui, visuals: &Visuals, max_offset: f32) {
+        ui.spacing_mut().item_spacing.x = 0.0;
+
+        let at_start = self.tab_scroll_offset <= 0.0;
+        let at_end = self.tab_scroll_offset >= max_offset;
+
+        // Left arrow
+        let left_color = if at_start {
+            visuals
+                .widgets
+                .noninteractive
+                .fg_stroke
+                .color
+                .gamma_multiply(0.3)
+        } else {
+            visuals.widgets.noninteractive.fg_stroke.color
+        };
+        let left_btn = egui::Button::new(RichText::new("\u{25C0}").color(left_color).size(10.0))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
+
+        if ui.add(left_btn).clicked() && !at_start {
+            self.tab_scroll_offset = (self.tab_scroll_offset - SCROLL_STEP).max(0.0);
+        }
+
+        // Right arrow
+        let right_color = if at_end {
+            visuals
+                .widgets
+                .noninteractive
+                .fg_stroke
+                .color
+                .gamma_multiply(0.3)
+        } else {
+            visuals.widgets.noninteractive.fg_stroke.color
+        };
+        let right_btn = egui::Button::new(RichText::new("\u{25B6}").color(right_color).size(10.0))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
+
+        if ui.add(right_btn).clicked() && !at_end {
+            self.tab_scroll_offset = (self.tab_scroll_offset + SCROLL_STEP).min(max_offset);
+        }
     }
 
     /// Renders the right-click context menu for a tab.
