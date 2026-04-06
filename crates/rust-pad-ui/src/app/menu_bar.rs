@@ -96,11 +96,7 @@ impl App {
                         .unwrap_or_else(|| path.to_string_lossy().into_owned());
                     let full_path = path.to_string_lossy().into_owned();
                     if ui.button(&file_name).on_hover_text(&full_path).clicked() {
-                        if let Err(e) = self.tabs.open_file(path) {
-                            tracing::error!("Failed to open recent file: {e:#}");
-                        } else {
-                            self.recent_files.track(path);
-                        }
+                        self.open_file_path(path);
                         ui.close();
                     }
                 }
