@@ -35,13 +35,20 @@ impl RenderCache {
         }
     }
 
-    /// Invalidates the entire cache if the version or font size changed.
+    /// Validates the cache against the current font size.
+    ///
+    /// Font size changes require a full clear because every galley is
+    /// font-dependent. Content version changes do **not** clear the cache —
+    /// per-line content hashes in [`get`] already handle correctness by
+    /// returning `None` when a line's content has changed.
     pub fn validate(&mut self, version: u64, font_size: f32) {
-        if self.last_version != version || (self.last_font_size - font_size).abs() > f32::EPSILON {
+        // Font size change: must clear everything (galleys are font-dependent).
+        if (self.last_font_size - font_size).abs() > f32::EPSILON {
             self.galleys.clear();
-            self.last_version = version;
             self.last_font_size = font_size;
         }
+        // Version change: do NOT clear. Per-line content hashes handle correctness.
+        self.last_version = version;
     }
 
     /// Looks up a cached galley for a line.
@@ -53,6 +60,18 @@ impl RenderCache {
                 None
             }
         })
+    }
+
+    /// Removes cached entries whose line index falls outside the visible
+    /// range extended by `margin` lines on each side.
+    ///
+    /// Call once per frame after rendering to bound memory usage when the
+    /// cache is no longer cleared on every content-version change.
+    pub fn prune(&mut self, first_visible: usize, last_visible: usize, margin: usize) {
+        let lo = first_visible.saturating_sub(margin);
+        let hi = last_visible.saturating_add(margin);
+        self.galleys
+            .retain(|&line_idx, _| line_idx >= lo && line_idx <= hi);
     }
 
     /// Stores a galley in the cache.
@@ -165,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_validate_version_change_clears() {
+    fn cache_validate_version_change_preserves_entries() {
         let mut cache = RenderCache::new();
         cache.validate(1, 14.0);
 
@@ -176,9 +195,9 @@ mod tests {
         cache.validate(1, 14.0);
         assert!(cache.get(0, 42).is_some());
 
-        // Different version → cleared
+        // Different version → still preserved (per-line hash guards correctness)
         cache.validate(2, 14.0);
-        assert!(cache.get(0, 42).is_none());
+        assert!(cache.get(0, 42).is_some());
     }
 
     #[test]
@@ -262,5 +281,119 @@ mod tests {
         let mut slot: Option<Box<dyn std::any::Any + Send>> = Some(Box::new(42u32));
         let cache = get_render_cache(&mut slot);
         assert!(cache.get(0, 0).is_none());
+    }
+
+    // ── Selective invalidation ────────────────────────────────────
+
+    #[test]
+    fn version_change_with_same_hash_is_cache_hit() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+        cache.insert(10, 42, test_galley());
+
+        // Bump version — line 10 content unchanged (same hash)
+        cache.validate(2, 14.0);
+        assert!(
+            cache.get(10, 42).is_some(),
+            "unchanged line should remain a cache hit after version bump"
+        );
+    }
+
+    #[test]
+    fn version_change_with_different_hash_is_cache_miss() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+        cache.insert(10, 42, test_galley());
+
+        // Bump version — line 10 content changed (different hash)
+        cache.validate(2, 14.0);
+        assert!(
+            cache.get(10, 99).is_none(),
+            "changed line should be a cache miss"
+        );
+    }
+
+    #[test]
+    fn line_shift_causes_miss_for_shifted_lines() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        // Lines 0-3 cached with distinct hashes.
+        for i in 0..4 {
+            cache.insert(i, 100 + i as u64, test_galley());
+        }
+
+        // Simulate inserting a line at index 1: old line 1 (hash 101) is now
+        // at index 2. Querying index 2 with hash 101 should miss because the
+        // cache still holds (index 2, hash 102).
+        cache.validate(2, 14.0);
+        assert!(
+            cache.get(2, 101).is_none(),
+            "shifted line should miss (wrong hash at old index)"
+        );
+        // The original index 0 hasn't shifted.
+        assert!(cache.get(0, 100).is_some());
+    }
+
+    // ── prune ─────────────────────────────────────────────────────
+
+    #[test]
+    fn prune_removes_entries_outside_range() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        for i in 0..200 {
+            cache.insert(i, i as u64, test_galley());
+        }
+
+        // Visible range 50..60, margin 10 → keep lines 40..70
+        cache.prune(50, 60, 10);
+
+        assert!(cache.get(39, 39).is_none(), "line below margin removed");
+        assert!(cache.get(40, 40).is_some(), "line at lower margin kept");
+        assert!(cache.get(55, 55).is_some(), "visible line kept");
+        assert!(cache.get(70, 70).is_some(), "line at upper margin kept");
+        assert!(cache.get(71, 71).is_none(), "line above margin removed");
+    }
+
+    #[test]
+    fn prune_handles_start_of_file() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        for i in 0..100 {
+            cache.insert(i, i as u64, test_galley());
+        }
+
+        // Visible range 0..5, margin 50 → keep lines 0..55
+        cache.prune(0, 5, 50);
+
+        assert!(cache.get(0, 0).is_some(), "first line kept");
+        assert!(cache.get(55, 55).is_some(), "upper margin line kept");
+        assert!(cache.get(56, 56).is_none(), "line past margin removed");
+    }
+
+    #[test]
+    fn prune_with_zero_margin() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+
+        for i in 0..10 {
+            cache.insert(i, i as u64, test_galley());
+        }
+
+        cache.prune(3, 5, 0);
+
+        assert!(cache.get(2, 2).is_none());
+        assert!(cache.get(3, 3).is_some());
+        assert!(cache.get(5, 5).is_some());
+        assert!(cache.get(6, 6).is_none());
+    }
+
+    #[test]
+    fn prune_on_empty_cache_is_noop() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0);
+        cache.prune(0, 10, 50); // should not panic
     }
 }

@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Galley Cache Granularity
+- The render cache no longer clears all cached galleys when the document content changes. Per-line content hashes already guard correctness, so unchanged lines now keep their cached galleys across edits.
+- Added periodic pruning of cached galleys outside the visible range (±50-line margin) to bound memory usage.
+- Net effect: editing a single line in a large file (50K+ lines) no longer forces re-highlighting of every visible line on the next frame.
+
 #### Dependencies
 - Updated `egui`/`eframe` to 0.34, `chardetng` to 1.0, and other dependencies. Adjusted API usage to align with upstream changes.
 

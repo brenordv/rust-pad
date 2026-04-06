@@ -559,7 +559,8 @@ impl<'a> EditorWidget<'a> {
             cache.validate(self.doc.content_version, layout.effective_font_size);
         }
 
-        if let Some(wm) = wrap_map {
+        // Track the visible logical line range for cache pruning.
+        let (first_logical, last_logical) = if let Some(wm) = wrap_map {
             let first_visual = self.doc.scroll_y as usize;
             let last_visual = (first_visual + layout.visible_lines + 1).min(total_visual_lines);
             self.render_lines_wrapped(
@@ -589,6 +590,9 @@ impl<'a> EditorWidget<'a> {
                 last_visual,
                 Some(wm),
             );
+            let (first_log, _) = wm.visual_to_logical(first_visual);
+            let (last_log, _) = wm.visual_to_logical(last_visual.saturating_sub(1));
+            (first_log, last_log)
         } else {
             let first_visible_line = self.doc.scroll_y as usize;
             let last_visible_line =
@@ -619,6 +623,14 @@ impl<'a> EditorWidget<'a> {
                 last_visible_line,
                 None,
             );
+            (first_visible_line, last_visible_line.saturating_sub(1))
+        };
+
+        // Prune cached galleys outside the visible range (+ margin) to bound
+        // memory now that the cache persists across content-version changes.
+        {
+            let cache = get_render_cache(&mut self.doc.render_cache);
+            cache.prune(first_logical, last_logical, 50);
         }
 
         if response.has_focus() {
