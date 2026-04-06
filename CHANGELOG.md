@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Supports nested and mixed bracket types. Search is capped at 10,000 characters to avoid freezing on large files.
 - Highlight color is theme-aware and configurable via the `matching_bracket_color` field in custom themes.
 
+#### Session Store Size Limit
+- Added a configurable size limit (`session_content_max_kb`) for unsaved tab content persisted in the session store. Default: 10,240 KB (10 MB).
+- Tabs exceeding the limit are saved as metadata only (title preserved, content skipped). On restore, these tabs appear empty with the original title.
+- Setting the limit to 0 disables the check (unlimited, backward-compatible).
+- Each tab is checked independently — one large tab does not block others.
+- Configurable via the Settings dialog under the History tab ("Max unsaved content to restore (KB)").
+
+#### Async File I/O
+- File open dialogs, save-as dialogs, file reads, and file writes now run on background threads, keeping the UI responsive during slow I/O (network drives, USB sticks, large files).
+- The status bar shows an activity indicator with a spinner ("Opening...", "Saving...", "Reading...") while I/O is in progress.
+- Editing is blocked while a file dialog is open, preventing modifications to content that is being saved.
+- Opening the same file concurrently is de-duplicated: the existing tab is activated instead.
+- Content version tracking ensures the modified flag is preserved correctly if the user edits between save initiation and completion.
+
 ### Changed
 
 #### Galley Cache Granularity

@@ -15,6 +15,7 @@ impl App {
             || self.settings_open
             || self.about_open
             || matches!(self.dialog_state, DialogState::ConfirmClose(_))
+            || self.io_activity.dialog_open
     }
 
     /// Handles global keyboard shortcuts.

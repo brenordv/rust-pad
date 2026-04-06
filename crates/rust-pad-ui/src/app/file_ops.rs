@@ -2,60 +2,112 @@
 //!
 //! Handles opening files, saving (including save-as), creating new tabs,
 //! session cleanup, and closing tabs with unsaved-change prompts.
+//!
+//! File dialogs and file reads run on background threads via the
+//! [`IoWorker`](crate::io_worker::IoWorker) to keep the UI responsive.
+//! Saves to known paths also run in the background. Results are polled
+//! each frame in [`App::handle_io_responses`](super::App::handle_io_responses).
 
+use crate::io_worker::{IoRequest, PendingSave, SaveAsContext};
 use rust_pad_config::session::generate_session_id;
 
 use super::{App, DialogState};
 
 impl App {
-    /// Opens a file dialog and loads the selected file into a new tab.
+    /// Opens a file dialog on a background thread.
+    ///
+    /// The dialog and file read happen off the UI thread. The result is
+    /// handled in [`handle_io_responses`](App::handle_io_responses).
     pub(crate) fn open_file_dialog(&mut self) {
-        let mut dialog = rfd::FileDialog::new().set_title("Open File");
-        if let Some(dir) = self.file_dialog.resolve_directory() {
-            dialog = dialog.set_directory(dir);
+        if self.io_activity.dialog_open {
+            return;
         }
-        if let Some(path) = dialog.pick_file() {
-            self.file_dialog.update_last_folder(&path);
-            if let Err(e) = self.tabs.open_file(&path) {
-                tracing::error!("Failed to open file: {e:#}");
-            } else {
-                self.recent_files.track(&path);
-            }
-        }
+
+        self.io_activity.dialog_open = true;
+        self.io_worker.send(IoRequest::OpenDialog {
+            start_dir: self.file_dialog.resolve_directory(),
+        });
     }
 
-    /// Saves the active document, or opens a save-as dialog if it has no file path.
+    /// Opens a file from a known path on a background thread.
+    ///
+    /// Used by the recent files menu. If the file is already open,
+    /// switches to the existing tab immediately without I/O.
+    pub(crate) fn open_file_path(&mut self, path: &std::path::Path) {
+        // Check for duplicate synchronously to avoid unnecessary reads
+        if let Some(idx) = self
+            .tabs
+            .documents
+            .iter()
+            .position(|d| d.file_path.as_deref() == Some(path))
+        {
+            self.tabs.switch_to(idx);
+            return;
+        }
+
+        self.io_activity.pending_reads += 1;
+        self.io_worker.send(IoRequest::ReadFile {
+            path: path.to_path_buf(),
+        });
+    }
+
+    /// Saves the active document.
+    ///
+    /// For file-backed documents, encodes content on the UI thread and
+    /// writes on a background thread. For untitled documents, opens a
+    /// save-as dialog.
     pub(crate) fn save_active(&mut self) {
-        let doc = self.tabs.active_doc_mut();
-        if doc.file_path.is_some() {
-            if let Err(e) = doc.save() {
-                tracing::error!("Failed to save: {e:#}");
-            }
+        let doc = self.tabs.active_doc();
+        if let Some(path) = doc.file_path.clone() {
+            let content = match doc.encode_for_save() {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::error!("Failed to encode document: {e:#}");
+                    return;
+                }
+            };
+            let version = doc.content_version;
+
+            self.io_activity.pending_saves.push(PendingSave {
+                path: path.clone(),
+                content_version: version,
+            });
+            self.io_worker.send(IoRequest::SaveFile { path, content });
         } else {
             self.save_as_dialog();
         }
     }
 
-    /// Opens a save-as dialog and saves the active document to the chosen path.
+    /// Opens a save-as dialog on a background thread.
+    ///
+    /// Encodes the document content on the UI thread, then sends both
+    /// the content and dialog parameters to the background thread.
     pub(crate) fn save_as_dialog(&mut self) {
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("Save As")
-            .set_file_name(&self.tabs.active_doc().title);
-        if let Some(dir) = self.file_dialog.resolve_directory() {
-            dialog = dialog.set_directory(dir);
+        if self.io_activity.dialog_open {
+            return;
         }
-        if let Some(path) = dialog.save_file() {
-            self.file_dialog.update_last_folder(&path);
-            // Clean up session content before saving (transitions unsaved -> file-backed)
-            self.cleanup_session_for_tab(self.tabs.active);
-            let doc = self.tabs.active_doc_mut();
-            if let Err(e) = doc.save_to(&path) {
-                tracing::error!("Failed to save: {e:#}");
-            } else {
-                doc.session_id = None;
-                self.recent_files.track(&path);
+
+        let doc = self.tabs.active_doc();
+        let content = match doc.encode_for_save() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("Failed to encode document: {e:#}");
+                return;
             }
-        }
+        };
+
+        self.io_activity.dialog_open = true;
+        self.io_activity.save_as_context = Some(SaveAsContext {
+            content_version: doc.content_version,
+            session_id: doc.session_id.clone(),
+            original_path: doc.file_path.clone(),
+        });
+
+        self.io_worker.send(IoRequest::SaveAsDialog {
+            content,
+            suggested_name: doc.title.clone(),
+            start_dir: self.file_dialog.resolve_directory(),
+        });
     }
 
     /// Creates a new empty tab and assigns it a session ID.

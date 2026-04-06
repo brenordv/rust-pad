@@ -7,6 +7,8 @@ use egui::{Key, Modifiers};
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
+use rust_pad_ui::SettingsTab;
+
 use common::create_harness;
 
 // ── A. App Initialization ──────────────────────────────────────────────────
@@ -1650,12 +1652,24 @@ fn test_ctrl_s_saves_file_backed_document() {
         ..Default::default()
     };
     harness.key_press_modifiers(ctrl, Key::S);
-    harness.run();
+    // Save is async — run frames with brief pauses so the background thread
+    // has time to write the file and handle_io_responses can pick up the result.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        harness.run_steps(1);
+        if !harness.state().tabs.active_doc().modified {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Async save did not complete within 5 seconds"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     // File should be saved
     let contents = std::fs::read_to_string(&file_path).unwrap();
     assert!(contents.contains("original"));
-    assert!(!harness.state().tabs.active_doc().modified);
 }
 
 // ── Y. File open integration ──────────────────────────────────────────────
@@ -1759,4 +1773,39 @@ fn test_multi_step_undo_redo() {
         harness.state().tabs.active_doc().buffer.to_string(),
         "hello world"
     );
+}
+
+// ── Settings Dialog: History Tab ──────────────────────────────────────────
+
+#[test]
+fn test_settings_history_tab_renders_session_limit() {
+    let mut harness = create_harness();
+    harness.state_mut().settings_open = true;
+    harness.state_mut().settings_tab = SettingsTab::History;
+    harness.run();
+
+    // The session content limit label should be visible
+    harness.get_by_label("Max unsaved content to restore (KB):");
+}
+
+#[test]
+fn test_settings_history_tab_renders_recent_files() {
+    let mut harness = create_harness();
+    harness.state_mut().settings_open = true;
+    harness.state_mut().settings_tab = SettingsTab::History;
+    harness.run();
+
+    // The recent files section should also be visible
+    harness.get_by_label("Enable recent files history");
+}
+
+#[test]
+fn test_settings_history_tab_shows_unlimited_hint() {
+    let mut harness = create_harness();
+    harness.state_mut().settings_open = true;
+    harness.state_mut().settings_tab = SettingsTab::History;
+    harness.run();
+
+    // The hint text about unlimited should be visible
+    harness.get_by_label("0 = unlimited. Tabs exceeding this limit will be restored empty.");
 }
