@@ -1652,7 +1652,10 @@ fn test_ctrl_s_saves_file_backed_document() {
         ..Default::default()
     };
     harness.key_press_modifiers(ctrl, Key::S);
-    harness.run();
+    // Save is async — run enough frames for the background thread to write the
+    // file and for handle_io_responses to process the result.  The spinner shown
+    // during the save prevents harness.run() from settling, so use run_steps().
+    harness.run_steps(10);
 
     // File should be saved
     let contents = std::fs::read_to_string(&file_path).unwrap();
