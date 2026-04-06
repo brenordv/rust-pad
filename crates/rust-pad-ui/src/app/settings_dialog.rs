@@ -254,6 +254,29 @@ impl App {
     }
 
     fn settings_history(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Session Restore");
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Max unsaved content to restore (KB):");
+            let mut value = self.session_content_max_kb as f64;
+            if ui
+                .add(egui::DragValue::new(&mut value).range(0.0..=102_400.0))
+                .changed()
+            {
+                self.session_content_max_kb = value as usize;
+            }
+        });
+        ui.label(
+            egui::RichText::new("0 = unlimited. Tabs exceeding this limit will be restored empty.")
+                .small()
+                .color(egui::Color32::GRAY),
+        );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
         ui.heading("Recent Files");
         ui.add_space(4.0);
 

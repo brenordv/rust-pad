@@ -47,6 +47,9 @@ pub struct AppConfig {
     pub recent_files_cleanup: RecentFilesCleanup,
     /// Most-recently-opened file paths (most recent first).
     pub recent_files: Vec<String>,
+    /// Maximum size (in KB) of unsaved tab content to persist in the session store.
+    /// 0 = unlimited. Tabs exceeding this limit are saved as metadata only.
+    pub session_content_max_kb: usize,
     pub themes: Vec<ThemeDefinition>,
 }
 
@@ -72,6 +75,7 @@ impl Default for AppConfig {
             recent_files_max_count: 10,
             recent_files_cleanup: RecentFilesCleanup::default(),
             recent_files: Vec::new(),
+            session_content_max_kb: 10_240,
             themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
         }
     }
@@ -188,6 +192,10 @@ impl AppConfig {
         self.auto_save_interval_secs = self.auto_save_interval_secs.max(5);
         self.recent_files_max_count = self.recent_files_max_count.clamp(1, 50);
         self.recent_files.truncate(self.recent_files_max_count);
+        // 0 = unlimited; otherwise clamp to 1..=102_400 KB (100 MB)
+        if self.session_content_max_kb > 0 {
+            self.session_content_max_kb = self.session_content_max_kb.clamp(1, 102_400);
+        }
     }
 }
 
@@ -420,5 +428,53 @@ mod tests {
         assert_eq!(parsed.recent_files_max_count, 10);
         assert_eq!(parsed.recent_files_cleanup, RecentFilesCleanup::OnStartup);
         assert!(parsed.recent_files.is_empty());
+    }
+
+    // ── Session content max KB tests ───────────────────────────────
+
+    #[test]
+    fn test_session_content_max_kb_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.session_content_max_kb, 10_240);
+    }
+
+    #[test]
+    fn test_session_content_max_kb_serde_round_trip() {
+        let mut config = AppConfig::default();
+        config.session_content_max_kb = 5_000;
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.session_content_max_kb, 5_000);
+    }
+
+    #[test]
+    fn test_session_content_max_kb_missing_field_gets_default() {
+        let json = r#"{"current_theme": "Dark"}"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.session_content_max_kb, 10_240);
+    }
+
+    #[test]
+    fn test_sanitize_session_content_max_kb_zero_is_unlimited() {
+        let mut config = AppConfig::default();
+        config.session_content_max_kb = 0;
+        config.sanitize();
+        assert_eq!(config.session_content_max_kb, 0);
+    }
+
+    #[test]
+    fn test_sanitize_clamps_session_content_max_kb_upper() {
+        let mut config = AppConfig::default();
+        config.session_content_max_kb = 200_000;
+        config.sanitize();
+        assert_eq!(config.session_content_max_kb, 102_400);
+    }
+
+    #[test]
+    fn test_sanitize_preserves_valid_session_content_max_kb() {
+        let mut config = AppConfig::default();
+        config.session_content_max_kb = 2_048;
+        config.sanitize();
+        assert_eq!(config.session_content_max_kb, 2_048);
     }
 }

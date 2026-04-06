@@ -1,9 +1,24 @@
 {
-  "current_theme": "System",
-  "zoom_level": 1.0,
+  "current_theme": "Dark",
+  "current_zoom_level": 1.0,
+  "max_zoom_level": 15.0,
   "word_wrap": false,
   "show_special_chars": false,
-  "font_size": 16.0,
+  "show_line_numbers": true,
+  "restore_open_files": true,
+  "show_full_path_in_title": true,
+  "font_size": 14.0,
+  "default_extension": "",
+  "remember_last_folder": true,
+  "default_work_folder": "",
+  "last_used_folder": "",
+  "auto_save_enabled": false,
+  "auto_save_interval_secs": 30,
+  "recent_files_enabled": true,
+  "recent_files_max_count": 10,
+  "recent_files_cleanup": "OnStartup",
+  "recent_files": [],
+  "session_content_max_kb": 10240,
   "themes": [
     {
       "name": "Dark",
@@ -25,6 +40,7 @@
         "scrollbar_thumb_hover": "#6E6E6E",
         "scrollbar_thumb_active": "#8C8C8C",
         "occurrence_highlight_color": "#64643250",
+        "matching_bracket_color": "#B4A03C5A",
         "special_char_color": "#646464B4"
       },
       "ui": {
@@ -59,6 +75,7 @@
         "scrollbar_thumb_hover": "#A0A0A0",
         "scrollbar_thumb_active": "#828282",
         "occurrence_highlight_color": "#FFD25050",
+        "matching_bracket_color": "#3C78C85A",
         "special_char_color": "#AAAAAAB4"
       },
       "ui": {
@@ -93,6 +110,7 @@
         "scrollbar_thumb_hover": "#CD853F",
         "scrollbar_thumb_active": "#FF4500",
         "occurrence_highlight_color": "#FF00FF50",
+        "matching_bracket_color": "#FFD70064",
         "special_char_color": "#FF69B4B4"
       },
       "ui": {

@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Supports nested and mixed bracket types. Search is capped at 10,000 characters to avoid freezing on large files.
 - Highlight color is theme-aware and configurable via the `matching_bracket_color` field in custom themes.
 
+#### Session Store Size Limit
+- Added a configurable size limit (`session_content_max_kb`) for unsaved tab content persisted in the session store. Default: 10,240 KB (10 MB).
+- Tabs exceeding the limit are saved as metadata only (title preserved, content skipped). On restore, these tabs appear empty with the original title.
+- Setting the limit to 0 disables the check (unlimited, backward-compatible).
+- Each tab is checked independently — one large tab does not block others.
+- Configurable via the Settings dialog under the History tab ("Max unsaved content to restore (KB)").
+
 ### Changed
 
 #### Galley Cache Granularity
