@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Each tab is checked independently — one large tab does not block others.
 - Configurable via the Settings dialog under the History tab ("Max unsaved content to restore (KB)").
 
+#### Async File I/O
+- File open dialogs, save-as dialogs, file reads, and file writes now run on background threads, keeping the UI responsive during slow I/O (network drives, USB sticks, large files).
+- The status bar shows an activity indicator with a spinner ("Opening...", "Saving...", "Reading...") while I/O is in progress.
+- Editing is blocked while a file dialog is open, preventing modifications to content that is being saved.
+- Opening the same file concurrently is de-duplicated: the existing tab is activated instead.
+- Content version tracking ensures the modified flag is preserved correctly if the user edits between save initiation and completion.
+
 ### Changed
 
 #### Galley Cache Granularity
