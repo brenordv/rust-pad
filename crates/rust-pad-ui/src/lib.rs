@@ -3,4 +3,4 @@ pub mod dialogs;
 mod editor;
 mod tabs;
 
-pub use app::{App, StartupArgs, ThemeController, ThemeMode};
+pub use app::{App, SettingsTab, StartupArgs, ThemeController, ThemeMode};

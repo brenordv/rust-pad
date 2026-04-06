@@ -21,6 +21,7 @@ pub use auto_save::AutoSaveController;
 pub use file_dialog_state::FileDialogState;
 pub use live_monitor::LiveMonitorController;
 pub use recent_files::RecentFilesManager;
+pub use settings_dialog::SettingsTab;
 pub use theme_controller::ThemeController;
 
 use std::path::PathBuf;
@@ -117,8 +118,8 @@ pub struct App {
     session_content_max_kb: usize,
     last_window_title: String,
     live_monitor: LiveMonitorController,
-    pub(crate) settings_open: bool,
-    pub(crate) settings_tab: settings_dialog::SettingsTab,
+    pub settings_open: bool,
+    pub settings_tab: SettingsTab,
     pub(crate) about_open: bool,
     pub(crate) about_logo: Option<egui::TextureHandle>,
 }

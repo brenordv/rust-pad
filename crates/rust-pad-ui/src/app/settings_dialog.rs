@@ -9,7 +9,7 @@ use super::App;
 
 /// Which section of the settings dialog is currently visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum SettingsTab {
+pub enum SettingsTab {
     #[default]
     General,
     Editor,
