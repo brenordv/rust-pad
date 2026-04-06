@@ -287,7 +287,7 @@ fn test_tab_count_after_new() {
 #[test]
 fn test_tab_bar_shows_titles() {
     let harness = create_harness();
-    // Default document title contains "Untitled" (padded for visual spacing)
+    // Default document title is the clean filename (e.g. "Untitled 1")
     harness.get_by_label_contains("Untitled");
 }
 
@@ -302,6 +302,50 @@ fn test_modified_tab_shows_asterisk() {
         .insert_text("hello");
     harness.run();
     // Tab title should now show "Untitled *"
+    harness.get_by_label_contains("Untitled *");
+}
+
+#[test]
+fn test_all_tabs_have_accessible_labels() {
+    let mut harness = create_harness();
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    harness.key_press_modifiers(ctrl, Key::N);
+    harness.run();
+    harness.key_press_modifiers(ctrl, Key::N);
+    harness.run();
+    assert_eq!(harness.state().tabs.tab_count(), 3);
+
+    // All tabs — both active and inactive — must be discoverable by label.
+    // Guards the widget_info accessibility annotation on the custom-painted tab rect.
+    // Naming: first tab is "Untitled", then "Untitled 2", "Untitled 3".
+    harness.get_by_label_contains("Untitled 2");
+    harness.get_by_label_contains("Untitled 3");
+}
+
+#[test]
+fn test_modified_indicator_on_inactive_tab() {
+    let mut harness = create_harness();
+    // Modify the first tab ("Untitled")
+    harness
+        .state_mut()
+        .tabs
+        .active_doc_mut()
+        .insert_text("hello");
+    harness.run();
+
+    // Create a second tab (switches focus away from the modified tab)
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    harness.key_press_modifiers(ctrl, Key::N);
+    harness.run();
+    assert_eq!(harness.state().tabs.active, 1);
+
+    // The inactive modified tab must still show the asterisk in its label
     harness.get_by_label_contains("Untitled *");
 }
 
