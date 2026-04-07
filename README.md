@@ -32,7 +32,6 @@ stable, and fast as possible.
 
 ### Editing
 - **Multi-tab interface** with session restore (reopen files from last session)
-- **Syntax highlighting** powered by syntect (78+ languages)
 - **Find/Replace** with regex support and search across all open tabs
 - **Multi-cursor editing** -- Ctrl+Click to add cursors, Alt+Shift+Arrow to add cursors above/below, Alt+Shift+Period to select next occurrence
 - **Undo/Redo** with persistent history (survives application restart)
