@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0.0]
+
+### Added
+
+#### File Size Validation
+- Files are now validated against a configurable size limit before loading to prevent out-of-memory crashes. Default limit: 512 MB.
+- New `max_file_size_mb` setting in `rust-pad.json` (0 = no limit, configurable 1-10240 MB). Also available in the Settings dialog under "File Size Limit".
+- Applied to all file-open paths: file dialogs, recent files, CLI arguments, session restore, and live monitoring reloads.
+
+#### UTF-16 Odd-Byte Validation
+- UTF-16 LE and BE files with an odd number of bytes after BOM removal are now rejected with a clear error instead of silently dropping the last byte. This prevents silent data corruption when opening truncated or malformed UTF-16 files.
+
+#### Bincode Deserialization Size Limits
+- Deserialization of undo history entries, document metadata, and session data from redb databases is now bounded to prevent out-of-memory crashes from corrupted database files.
+- Corrupted records are now gracefully skipped with a warning log instead of preventing the app from starting. History limits: 50 MB per edit group, 1 KB for metadata, 10 MB for session data.
+
 ## [1.3.0] - 2026-04-06
 
 ### Added

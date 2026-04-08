@@ -133,6 +133,13 @@ pub fn decode_bytes(bytes: &[u8], encoding: TextEncoding) -> Result<String> {
             } else {
                 bytes
             };
+            if content.len() % 2 != 0 {
+                anyhow::bail!(
+                    "Invalid UTF-16 LE file: odd number of bytes ({} bytes after BOM). \
+                     The file may be truncated or corrupted.",
+                    content.len()
+                );
+            }
             let u16s: Vec<u16> = content
                 .chunks_exact(2)
                 .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
@@ -145,6 +152,13 @@ pub fn decode_bytes(bytes: &[u8], encoding: TextEncoding) -> Result<String> {
             } else {
                 bytes
             };
+            if content.len() % 2 != 0 {
+                anyhow::bail!(
+                    "Invalid UTF-16 BE file: odd number of bytes ({} bytes after BOM). \
+                     The file may be truncated or corrupted.",
+                    content.len()
+                );
+            }
             let u16s: Vec<u16> = content
                 .chunks_exact(2)
                 .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
@@ -480,5 +494,103 @@ mod tests {
     fn test_encode_utf16be_includes_bom() {
         let bytes = encode_string("A", TextEncoding::Utf16Be).unwrap();
         assert_eq!(&bytes[..2], &[0xFE, 0xFF]); // BE BOM
+    }
+
+    // ── UTF-16 odd-byte validation ──────────────────────────────────
+
+    #[test]
+    fn test_decode_utf16le_odd_bytes_with_bom_returns_error() {
+        // BOM (2 bytes) + 3 content bytes = odd content length
+        let bytes = vec![0xFF, 0xFE, 0x48, 0x00, 0x65];
+        let result = decode_bytes(&bytes, TextEncoding::Utf16Le);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("odd number of bytes"));
+        assert!(msg.contains("UTF-16 LE"));
+    }
+
+    #[test]
+    fn test_decode_utf16be_odd_bytes_with_bom_returns_error() {
+        // BOM (2 bytes) + 3 content bytes = odd content length
+        let bytes = vec![0xFE, 0xFF, 0x00, 0x48, 0x65];
+        let result = decode_bytes(&bytes, TextEncoding::Utf16Be);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("odd number of bytes"));
+        assert!(msg.contains("UTF-16 BE"));
+    }
+
+    #[test]
+    fn test_decode_utf16le_odd_bytes_without_bom_returns_error() {
+        // 5 bytes, no BOM — odd
+        let bytes = vec![0x48, 0x00, 0x65, 0x00, 0x6C];
+        let result = decode_bytes(&bytes, TextEncoding::Utf16Le);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("odd number of bytes"));
+    }
+
+    #[test]
+    fn test_decode_utf16be_odd_bytes_without_bom_returns_error() {
+        // 5 bytes, no BOM — odd
+        let bytes = vec![0x00, 0x48, 0x00, 0x65, 0x6C];
+        let result = decode_bytes(&bytes, TextEncoding::Utf16Be);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("odd number of bytes"));
+    }
+
+    #[test]
+    fn test_decode_utf16le_even_bytes_still_works() {
+        // BOM + 4 content bytes ("He") — even, should succeed
+        let bytes = vec![0xFF, 0xFE, 0x48, 0x00, 0x65, 0x00];
+        let decoded = decode_bytes(&bytes, TextEncoding::Utf16Le).unwrap();
+        assert_eq!(decoded, "He");
+    }
+
+    #[test]
+    fn test_decode_utf16be_even_bytes_still_works() {
+        // BOM + 4 content bytes ("He") — even, should succeed
+        let bytes = vec![0xFE, 0xFF, 0x00, 0x48, 0x00, 0x65];
+        let decoded = decode_bytes(&bytes, TextEncoding::Utf16Be).unwrap();
+        assert_eq!(decoded, "He");
+    }
+
+    #[test]
+    fn test_decode_utf16le_empty_after_bom_is_ok() {
+        // Just the BOM, no content — 0 bytes after BOM, which is even
+        let bytes = vec![0xFF, 0xFE];
+        let decoded = decode_bytes(&bytes, TextEncoding::Utf16Le).unwrap();
+        assert_eq!(decoded, "");
+    }
+
+    #[test]
+    fn test_decode_utf16be_empty_after_bom_is_ok() {
+        let bytes = vec![0xFE, 0xFF];
+        let decoded = decode_bytes(&bytes, TextEncoding::Utf16Be).unwrap();
+        assert_eq!(decoded, "");
+    }
+
+    #[test]
+    fn test_decode_utf16le_single_byte_after_bom_returns_error() {
+        // BOM + 1 byte — odd
+        let bytes = vec![0xFF, 0xFE, 0x48];
+        let result = decode_bytes(&bytes, TextEncoding::Utf16Le);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("1 bytes after BOM"));
+    }
+
+    #[test]
+    fn test_decode_utf16be_single_byte_after_bom_returns_error() {
+        let bytes = vec![0xFE, 0xFF, 0x48];
+        let result = decode_bytes(&bytes, TextEncoding::Utf16Be);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("1 bytes after BOM"));
     }
 }

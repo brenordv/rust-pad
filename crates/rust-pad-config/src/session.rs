@@ -7,8 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
+use bincode::Options;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+
+/// Maximum size in bytes for deserializing session metadata.
+/// 10 MB is generous for tab metadata; anything larger is likely corrupt.
+const MAX_SESSION_META_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Session metadata table: `"data"` → bincode(`SessionData`).
 const SESSION_META: TableDefinition<&str, &[u8]> = TableDefinition::new("session_meta");
@@ -119,9 +124,18 @@ impl SessionStore {
 
         match table.get("data").context("Failed to read session data")? {
             Some(guard) => {
-                let data: SessionData = bincode::deserialize(guard.value())
-                    .context("Failed to deserialize session data")?;
-                Ok(Some(data))
+                match bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .allow_trailing_bytes()
+                    .with_limit(MAX_SESSION_META_BYTES)
+                    .deserialize::<SessionData>(guard.value())
+                {
+                    Ok(data) => Ok(Some(data)),
+                    Err(e) => {
+                        tracing::warn!("Corrupted session data, starting fresh: {e}");
+                        Ok(None)
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -352,5 +366,39 @@ mod tests {
         assert_ne!(id1, id2);
         assert!(id1.starts_with("sess-"));
         assert!(id2.starts_with("sess-"));
+    }
+
+    // ── Deserialization size limits ──────────────────────────────────
+
+    #[test]
+    fn test_load_session_returns_none_on_corrupt_data() {
+        let (store, _dir) = open_test_store();
+
+        // Write valid session data first
+        let data = SessionData {
+            tabs: vec![SessionTabEntry::File {
+                path: "/tmp/foo.rs".to_string(),
+            }],
+            active_tab_index: 0,
+        };
+        store.save_session(&data).expect("save");
+        assert!(store.load_session().expect("load").is_some());
+
+        // Corrupt the session metadata by writing garbage
+        let write_txn = store.db.begin_write().expect("txn");
+        {
+            let mut table = write_txn.open_table(SESSION_META).expect("table");
+            table
+                .insert("data", &[0xFF, 0xFF, 0xFF][..])
+                .expect("insert");
+        }
+        write_txn.commit().expect("commit");
+
+        // Should return None instead of erroring
+        let result = store.load_session().expect("should not error");
+        assert!(
+            result.is_none(),
+            "Should return None for corrupted session data"
+        );
     }
 }

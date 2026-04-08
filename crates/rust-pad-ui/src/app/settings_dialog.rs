@@ -254,6 +254,36 @@ impl App {
     }
 
     fn settings_history(&mut self, ui: &mut egui::Ui) {
+        ui.heading("File Size Limit");
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Maximum file size to open (MB):");
+            let mut value = self
+                .max_file_size_bytes
+                .map_or(0.0, |b| b as f64 / (1024.0 * 1024.0));
+            if ui
+                .add(egui::DragValue::new(&mut value).range(0.0..=10_240.0))
+                .changed()
+            {
+                let mb = value as u64;
+                self.max_file_size_bytes = if mb == 0 {
+                    None
+                } else {
+                    Some(mb * 1024 * 1024)
+                };
+            }
+        });
+        ui.label(
+            egui::RichText::new("0 = no limit. Files exceeding this limit cannot be opened.")
+                .small()
+                .color(egui::Color32::GRAY),
+        );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
         ui.heading("Session Restore");
         ui.add_space(4.0);
 

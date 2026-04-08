@@ -7,9 +7,18 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bincode::Options;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::operation::EditGroup;
+
+/// Maximum size in bytes for deserializing a single `EditGroup` from the database.
+/// 50 MB is generous for undo history; anything larger is likely corrupt data.
+const MAX_EDIT_GROUP_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Maximum size in bytes for deserializing document metadata.
+/// Metadata is tiny (a single u64), so 1 KB is more than enough.
+const MAX_META_BYTES: u64 = 1024;
 
 /// History table: composite string key → bincode-serialized EditGroup.
 const HISTORY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("history");
@@ -143,15 +152,25 @@ impl PersistenceLayer {
 
         let (start, end) = doc_range(doc_id);
         let mut groups = Vec::new();
+        let deserializer = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MAX_EDIT_GROUP_BYTES);
 
         for entry in table
             .range::<&str>(start.as_str()..end.as_str())
             .context("Failed to range query history table")?
         {
-            let (_, value_guard) = entry.context("Failed to read history entry")?;
-            let group: EditGroup = bincode::deserialize(value_guard.value())
-                .context("Failed to deserialize edit group")?;
-            groups.push(group);
+            let (key_guard, value_guard) = entry.context("Failed to read history entry")?;
+            match deserializer.deserialize::<EditGroup>(value_guard.value()) {
+                Ok(group) => groups.push(group),
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping corrupted history entry '{}': {e}",
+                        key_guard.value()
+                    );
+                }
+            }
         }
 
         Ok(groups)
@@ -300,9 +319,20 @@ impl PersistenceLayer {
 
         match table.get(doc_id).context("Failed to read metadata")? {
             Some(guard) => {
-                let meta: DocumentMeta = bincode::deserialize(guard.value())
-                    .context("Failed to deserialize metadata")?;
-                Ok(Some(meta.next_seq))
+                match bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .allow_trailing_bytes()
+                    .with_limit(MAX_META_BYTES)
+                    .deserialize::<DocumentMeta>(guard.value())
+                {
+                    Ok(meta) => Ok(Some(meta.next_seq)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Corrupted metadata for '{doc_id}', resetting history state: {e}"
+                        );
+                        Ok(None)
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -348,6 +378,26 @@ mod tests {
             }],
             seq,
         }
+    }
+
+    #[test]
+    fn test_bincode_format_compat() {
+        use bincode::Options;
+        let group = make_group(0, "a");
+        let bytes_legacy = bincode::serialize(&group).unwrap();
+        let bytes_options = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .serialize(&group)
+            .unwrap();
+        assert_eq!(
+            bytes_legacy.len(),
+            bytes_options.len(),
+            "legacy={} bytes, options={} bytes",
+            bytes_legacy.len(),
+            bytes_options.len()
+        );
+        assert_eq!(bytes_legacy, bytes_options);
     }
 
     fn open_test_db() -> (Arc<PersistenceLayer>, TempDir) {
@@ -529,5 +579,61 @@ mod tests {
             assert_eq!(groups[0].operations[0].inserted, "persistent");
             assert_eq!(pl.load_meta("doc").expect("meta").expect("exists"), 1);
         }
+    }
+
+    // ── Deserialization size limits ──────────────────────────────────
+
+    #[test]
+    fn test_read_groups_skips_corrupted_entry() {
+        let (pl, _dir) = open_test_db();
+        let doc_id = "corrupt-doc";
+
+        // Write valid groups
+        pl.write_groups(doc_id, &[make_group(0, "good"), make_group(1, "also good")])
+            .expect("write");
+
+        // Manually corrupt entry at seq=0 by writing garbage bytes
+        let write_txn = pl.db.begin_write().expect("txn");
+        {
+            let mut table = write_txn.open_table(HISTORY_TABLE).expect("table");
+            let key = history_key(doc_id, 0);
+            // Write invalid bincode data
+            table
+                .insert(key.as_str(), &[0xFF, 0xFF, 0xFF][..])
+                .expect("insert");
+        }
+        write_txn.commit().expect("commit");
+
+        // read_groups should skip the corrupted entry and return the valid one
+        let groups = pl.read_groups(doc_id).expect("read");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].operations[0].inserted, "also good");
+    }
+
+    #[test]
+    fn test_load_meta_returns_none_on_corrupt_data() {
+        let (pl, _dir) = open_test_db();
+        let doc_id = "corrupt-meta";
+
+        // Write valid metadata first
+        pl.save_meta(doc_id, 42).expect("save");
+        assert_eq!(pl.load_meta(doc_id).expect("load").expect("exists"), 42);
+
+        // Corrupt the metadata
+        let write_txn = pl.db.begin_write().expect("txn");
+        {
+            let mut table = write_txn.open_table(META_TABLE).expect("table");
+            table
+                .insert(doc_id, &[0xFF, 0xFF, 0xFF][..])
+                .expect("insert");
+        }
+        write_txn.commit().expect("commit");
+
+        // Should return None instead of erroring
+        let result = pl.load_meta(doc_id).expect("should not error");
+        assert!(
+            result.is_none(),
+            "Should return None for corrupted metadata"
+        );
     }
 }

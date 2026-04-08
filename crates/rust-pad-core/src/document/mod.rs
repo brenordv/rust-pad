@@ -8,6 +8,8 @@
 mod io;
 mod multi_cursor;
 
+pub use io::validate_file_size;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1535,7 +1537,7 @@ mod tests {
 
         // Modify file externally
         std::fs::write(&path, "updated content").unwrap();
-        doc.reload_from_disk().unwrap();
+        doc.reload_from_disk(None).unwrap();
         assert_eq!(doc.buffer.to_string(), "updated content");
         assert!(!doc.modified);
 
@@ -1557,7 +1559,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(&path, "changed").unwrap();
 
-        doc.reload_from_disk().unwrap();
+        doc.reload_from_disk(None).unwrap();
         assert!(doc.last_known_mtime.is_some());
         // mtime should be at least as recent as the open mtime
         assert!(doc.last_known_mtime >= mtime_after_open);
@@ -1568,7 +1570,7 @@ mod tests {
     #[test]
     fn test_reload_from_disk_without_path_errors() {
         let mut doc = Document::new();
-        let result = doc.reload_from_disk();
+        let result = doc.reload_from_disk(None);
         assert!(result.is_err());
     }
 
@@ -1581,7 +1583,7 @@ mod tests {
 
         let mut doc = Document::open(&path).unwrap();
         doc.live_monitoring = true;
-        doc.reload_from_disk().unwrap();
+        doc.reload_from_disk(None).unwrap();
         assert!(
             doc.live_monitoring,
             "reload should preserve live_monitoring flag"
@@ -1605,7 +1607,7 @@ mod tests {
         bom_content.extend_from_slice(b"world");
         std::fs::write(&path, &bom_content).unwrap();
 
-        doc.reload_from_disk().unwrap();
+        doc.reload_from_disk(None).unwrap();
         assert_eq!(doc.buffer.to_string(), "world");
 
         std::fs::remove_dir_all(&dir).ok();
