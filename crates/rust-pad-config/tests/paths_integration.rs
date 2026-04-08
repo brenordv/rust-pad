@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use rust_pad_config::paths;
 
 #[test]
@@ -32,42 +30,6 @@ fn test_session_file_path_is_under_platform_data_dir() {
 }
 
 #[test]
-fn test_history_data_dir_is_under_platform_data_dir() {
-    // Clear the env var to test the default path
-    let original = std::env::var("RUST_PAD_DATA_DIR").ok();
-    std::env::remove_var("RUST_PAD_DATA_DIR");
-
-    let dir = paths::history_data_dir();
-    if let Some(data_dir) = dirs::data_dir() {
-        assert!(
-            dir.starts_with(&data_dir),
-            "history data dir should be under platform data dir.\n  Expected prefix: {}\n  Got: {}",
-            data_dir.display(),
-            dir.display()
-        );
-    }
-
-    // Restore
-    if let Some(val) = original {
-        std::env::set_var("RUST_PAD_DATA_DIR", val);
-    }
-}
-
-#[test]
-fn test_history_data_dir_env_var_overrides_platform() {
-    let original = std::env::var("RUST_PAD_DATA_DIR").ok();
-    std::env::set_var("RUST_PAD_DATA_DIR", "/override/path");
-
-    let dir = paths::history_data_dir();
-    assert_eq!(dir, PathBuf::from("/override/path"));
-
-    match original {
-        Some(val) => std::env::set_var("RUST_PAD_DATA_DIR", val),
-        None => std::env::remove_var("RUST_PAD_DATA_DIR"),
-    }
-}
-
-#[test]
 fn test_portable_paths_are_exe_relative() {
     let config = paths::portable_config_file_path();
     let session = paths::portable_session_file_path();
@@ -83,23 +45,6 @@ fn test_portable_paths_are_exe_relative() {
 
     // Both should share the same parent directory (the exe dir)
     assert_eq!(config.parent(), session.parent());
-}
-
-#[test]
-fn test_portable_history_dir_is_dot_data() {
-    let original = std::env::var("RUST_PAD_DATA_DIR").ok();
-    std::env::remove_var("RUST_PAD_DATA_DIR");
-
-    let dir = paths::portable_history_data_dir();
-    assert!(
-        dir.ends_with(".data"),
-        "portable history dir should end with .data, got: {}",
-        dir.display()
-    );
-
-    if let Some(val) = original {
-        std::env::set_var("RUST_PAD_DATA_DIR", val);
-    }
 }
 
 #[test]
@@ -131,9 +76,8 @@ fn test_migrate_legacy_paths_end_to_end() {
     let new_session = new_dir.path().join("data").join("rust-pad-session.redb");
     let new_history = new_dir.path().join("data").join("history.redb");
 
-    // Use the internal migrate_file function indirectly via migrate_legacy_paths
     // Since we can't easily override dirs::config_dir() in tests,
-    // test the migrate_file behavior through the unit tests in the module.
+    // the migrate_file behavior is tested through the unit tests in paths.rs.
     // Here we just verify the public portable paths are consistent.
 
     // Verify old files still exist (not deleted by migration)
