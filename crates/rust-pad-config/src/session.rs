@@ -58,18 +58,33 @@ impl std::fmt::Debug for SessionStore {
 }
 
 impl SessionStore {
-    /// Returns the default session database path (next to the executable).
+    /// Returns the default session database path in the platform-standard
+    /// data directory.
+    ///
+    /// Falls back to the executable directory if the platform data
+    /// directory cannot be determined.
     pub fn session_path() -> PathBuf {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("rust-pad-session.redb")))
-            .unwrap_or_else(|| PathBuf::from("rust-pad-session.redb"))
+        crate::paths::session_file_path()
     }
 
     /// Opens or creates the session database at `path`.
+    ///
+    /// Creates the parent directory if it does not exist.
     pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "Failed to create session database directory: {}",
+                        parent.display()
+                    )
+                })?;
+                crate::permissions::set_owner_only_dir_permissions(parent);
+            }
+        }
         let db = Database::create(path)
             .with_context(|| format!("Failed to open session database: {}", path.display()))?;
+        crate::permissions::set_owner_only_file_permissions(path);
 
         // Ensure tables exist
         let write_txn = db

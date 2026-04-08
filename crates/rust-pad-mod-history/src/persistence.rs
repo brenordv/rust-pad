@@ -78,10 +78,12 @@ impl PersistenceLayer {
     pub fn open(data_dir: &Path) -> Result<Arc<Self>> {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("Failed to create data directory: {}", data_dir.display()))?;
+        rust_pad_config::set_owner_only_dir_permissions(data_dir);
 
         let db_path = data_dir.join("history.redb");
         let db = Database::create(&db_path)
             .with_context(|| format!("Failed to open history database: {}", db_path.display()))?;
+        rust_pad_config::set_owner_only_file_permissions(&db_path);
 
         // Ensure tables exist
         let write_txn = db

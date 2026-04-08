@@ -15,6 +15,11 @@ struct Cli {
     /// Create a new tab pre-filled with the given text.
     #[arg(long = "new-file")]
     new_file: Option<String>,
+
+    /// Store config and data next to the executable instead of in
+    /// platform-standard directories. Useful for USB/portable installs.
+    #[arg(long)]
+    portable: bool,
 }
 
 fn main() -> Result<()> {
@@ -33,6 +38,7 @@ fn main() -> Result<()> {
     let startup_args = rust_pad_ui::StartupArgs {
         files: cli.files,
         new_file_text: cli.new_file,
+        portable: cli.portable,
     };
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/logo2.png"))

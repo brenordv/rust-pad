@@ -3197,6 +3197,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "redb",
+ "rust-pad-config",
  "serde",
  "tempfile",
  "tracing",
