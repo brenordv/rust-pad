@@ -26,6 +26,7 @@ impl App {
         self.io_activity.dialog_open = true;
         self.io_worker.send(IoRequest::OpenDialog {
             start_dir: self.file_dialog.resolve_directory(),
+            max_file_size_bytes: self.max_file_size_bytes,
         });
     }
 
@@ -48,6 +49,7 @@ impl App {
         self.io_activity.pending_reads += 1;
         self.io_worker.send(IoRequest::ReadFile {
             path: path.to_path_buf(),
+            max_file_size_bytes: self.max_file_size_bytes,
         });
     }
 

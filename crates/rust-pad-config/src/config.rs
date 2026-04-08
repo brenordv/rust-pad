@@ -47,6 +47,9 @@ pub struct AppConfig {
     pub recent_files_cleanup: RecentFilesCleanup,
     /// Most-recently-opened file paths (most recent first).
     pub recent_files: Vec<String>,
+    /// Maximum file size in MB that can be opened. Files exceeding this limit
+    /// are rejected to prevent out-of-memory crashes. 0 = no limit.
+    pub max_file_size_mb: u64,
     /// Maximum size (in KB) of unsaved tab content to persist in the session store.
     /// 0 = unlimited. Tabs exceeding this limit are saved as metadata only.
     pub session_content_max_kb: usize,
@@ -75,6 +78,7 @@ impl Default for AppConfig {
             recent_files_max_count: 10,
             recent_files_cleanup: RecentFilesCleanup::default(),
             recent_files: Vec::new(),
+            max_file_size_mb: 512,
             session_content_max_kb: 10_240,
             themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
         }
@@ -175,6 +179,15 @@ impl AppConfig {
         dirs::home_dir()
     }
 
+    /// Returns the max file size in bytes, or `None` if no limit is set.
+    pub fn max_file_size_bytes(&self) -> Option<u64> {
+        if self.max_file_size_mb == 0 {
+            None
+        } else {
+            Some(self.max_file_size_mb * 1024 * 1024)
+        }
+    }
+
     /// Clamps values to valid ranges and resets invalid fields.
     pub fn sanitize(&mut self) {
         self.max_zoom_level = self.max_zoom_level.max(1.0);
@@ -192,6 +205,10 @@ impl AppConfig {
         self.auto_save_interval_secs = self.auto_save_interval_secs.max(5);
         self.recent_files_max_count = self.recent_files_max_count.clamp(1, 50);
         self.recent_files.truncate(self.recent_files_max_count);
+        // 0 = no limit; otherwise clamp to 1..=10_240 MB (10 GB)
+        if self.max_file_size_mb > 0 {
+            self.max_file_size_mb = self.max_file_size_mb.clamp(1, 10_240);
+        }
         // 0 = unlimited; otherwise clamp to 1..=102_400 KB (100 MB)
         if self.session_content_max_kb > 0 {
             self.session_content_max_kb = self.session_content_max_kb.clamp(1, 102_400);
@@ -476,5 +493,66 @@ mod tests {
         config.session_content_max_kb = 2_048;
         config.sanitize();
         assert_eq!(config.session_content_max_kb, 2_048);
+    }
+
+    // ── File size limit tests ─────────────────────────────────────
+
+    #[test]
+    fn test_max_file_size_mb_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.max_file_size_mb, 512);
+    }
+
+    #[test]
+    fn test_max_file_size_bytes_conversion() {
+        let config = AppConfig::default();
+        assert_eq!(config.max_file_size_bytes(), Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_max_file_size_bytes_zero_means_no_limit() {
+        let mut config = AppConfig::default();
+        config.max_file_size_mb = 0;
+        assert_eq!(config.max_file_size_bytes(), None);
+    }
+
+    #[test]
+    fn test_sanitize_max_file_size_mb_zero_is_no_limit() {
+        let mut config = AppConfig::default();
+        config.max_file_size_mb = 0;
+        config.sanitize();
+        assert_eq!(config.max_file_size_mb, 0);
+    }
+
+    #[test]
+    fn test_sanitize_clamps_max_file_size_mb_upper() {
+        let mut config = AppConfig::default();
+        config.max_file_size_mb = 20_000;
+        config.sanitize();
+        assert_eq!(config.max_file_size_mb, 10_240);
+    }
+
+    #[test]
+    fn test_sanitize_preserves_valid_max_file_size_mb() {
+        let mut config = AppConfig::default();
+        config.max_file_size_mb = 100;
+        config.sanitize();
+        assert_eq!(config.max_file_size_mb, 100);
+    }
+
+    #[test]
+    fn test_max_file_size_missing_field_gets_default() {
+        let json = r#"{"current_theme": "Dark"}"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.max_file_size_mb, 512);
+    }
+
+    #[test]
+    fn test_max_file_size_serde_round_trip() {
+        let mut config = AppConfig::default();
+        config.max_file_size_mb = 256;
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.max_file_size_mb, 256);
     }
 }

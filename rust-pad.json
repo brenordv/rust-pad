@@ -16,6 +16,7 @@
   "auto_save_interval_secs": 30,
   "recent_files_enabled": true,
   "recent_files_max_count": 10,
+  "max_file_size_mb": 1,
   "recent_files_cleanup": "OnStartup",
   "recent_files": [],
   "session_content_max_kb": 10240,

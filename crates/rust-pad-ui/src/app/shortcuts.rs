@@ -14,7 +14,7 @@ impl App {
             || self.go_to_line.visible
             || self.settings_open
             || self.about_open
-            || matches!(self.dialog_state, DialogState::ConfirmClose(_))
+            || !matches!(self.dialog_state, DialogState::None)
             || self.io_activity.dialog_open
     }
 

@@ -116,6 +116,8 @@ pub struct App {
     last_flush: Instant,
     session_store: Option<SessionStore>,
     session_content_max_kb: usize,
+    /// Maximum file size in bytes that can be opened, or `None` for no limit.
+    max_file_size_bytes: Option<u64>,
     last_window_title: String,
     live_monitor: LiveMonitorController,
     pub settings_open: bool,
@@ -139,6 +141,18 @@ pub(crate) enum DialogState {
     #[default]
     None,
     ConfirmClose(usize),
+    /// A file exceeded the size limit — ask the user whether to open it anyway.
+    ConfirmLargeFile {
+        path: std::path::PathBuf,
+        message: String,
+    },
+    /// A file could not be opened (e.g. invalid encoding).
+    FileOpenError {
+        path: std::path::PathBuf,
+        message: String,
+        /// When true, offer a "recover as UTF-8 (lossy)" option.
+        can_recover_utf8: bool,
+    },
 }
 
 impl App {
@@ -189,6 +203,8 @@ impl App {
         // Open files requested via CLI arguments
         Self::open_startup_files(&mut tabs, &args);
 
+        let max_file_size_bytes = app_config.max_file_size_bytes();
+
         Self {
             tabs,
             theme_ctrl,
@@ -226,6 +242,7 @@ impl App {
             last_flush: Instant::now(),
             session_store,
             session_content_max_kb: app_config.session_content_max_kb,
+            max_file_size_bytes,
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -355,6 +372,12 @@ impl App {
                     self.file_dialog.update_last_folder(&path);
                     if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
                         tracing::error!("Failed to open file: {e:#}");
+                        let msg = format!("{e:#}");
+                        self.dialog_state = DialogState::FileOpenError {
+                            can_recover_utf8: Self::is_decode_error(&msg),
+                            path,
+                            message: msg,
+                        };
                     } else {
                         self.recent_files.track(&path);
                     }
@@ -364,6 +387,12 @@ impl App {
                         self.io_activity.pending_reads.saturating_sub(1);
                     if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
                         tracing::error!("Failed to open file: {e:#}");
+                        let msg = format!("{e:#}");
+                        self.dialog_state = DialogState::FileOpenError {
+                            can_recover_utf8: Self::is_decode_error(&msg),
+                            path,
+                            message: msg,
+                        };
                     } else {
                         self.recent_files.track(&path);
                     }
@@ -426,6 +455,13 @@ impl App {
                             self.io_activity.pending_reads.saturating_sub(1);
                     }
                 }
+                IoResponse::FileTooLarge { path, message } => {
+                    tracing::warn!("File too large: {message}");
+                    if self.io_activity.dialog_open {
+                        self.io_activity.dialog_open = false;
+                    }
+                    self.dialog_state = DialogState::ConfirmLargeFile { path, message };
+                }
             }
         }
     }
@@ -461,6 +497,8 @@ impl App {
     /// Shows all dialog windows.
     fn show_dialogs(&mut self, ctx: &egui::Context) {
         self.show_confirm_close_dialog(ctx);
+        self.show_confirm_large_file_dialog(ctx);
+        self.show_file_open_error_dialog(ctx);
         self.show_settings_dialog(ctx);
 
         if self.about_open {
@@ -531,6 +569,135 @@ impl App {
         if !open {
             self.dialog_state = DialogState::None;
         }
+    }
+
+    /// Shows a confirmation dialog when a file exceeds the configured size limit.
+    fn show_confirm_large_file_dialog(&mut self, ctx: &egui::Context) {
+        let DialogState::ConfirmLargeFile { path, message } = &self.dialog_state else {
+            return;
+        };
+        let path = path.clone();
+        let message = message.clone();
+
+        let mut open = true;
+        egui::Window::new("File Too Large")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(&message);
+                ui.label("Do you want to open it anyway?");
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.button("  Open Anyway  ").clicked() {
+                        self.io_activity.pending_reads += 1;
+                        self.io_worker.send(crate::io_worker::IoRequest::ReadFile {
+                            path: path.clone(),
+                            max_file_size_bytes: None,
+                        });
+                        self.dialog_state = DialogState::None;
+                    }
+                    if ui.button("  Cancel  ").clicked() {
+                        self.dialog_state = DialogState::None;
+                    }
+                });
+            });
+
+        if !open {
+            self.dialog_state = DialogState::None;
+        }
+    }
+
+    /// Shows an error dialog when a file could not be opened.
+    ///
+    /// When the failure is a decode error, offers a "Recover as UTF-8"
+    /// button that re-reads the file and force-decodes it with lossy
+    /// UTF-8 replacement (`U+FFFD` for invalid bytes).
+    fn show_file_open_error_dialog(&mut self, ctx: &egui::Context) {
+        let DialogState::FileOpenError {
+            path,
+            message,
+            can_recover_utf8,
+        } = &self.dialog_state
+        else {
+            return;
+        };
+        let path = path.clone();
+        let filename = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let message = message.clone();
+        let can_recover = *can_recover_utf8;
+
+        let mut open = true;
+        egui::Window::new("Failed to Open File")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(format!("Could not open '{filename}':"));
+                ui.label(&message);
+                if can_recover {
+                    ui.add_space(2.0);
+                    ui.label(
+                        "You can attempt a lossy recovery as UTF-8. \
+                         Invalid bytes will be replaced with \u{FFFD}.",
+                    );
+                }
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if can_recover && ui.button("  Recover as UTF-8  ").clicked() {
+                        self.recover_file_as_utf8_lossy(&path);
+                        self.dialog_state = DialogState::None;
+                    }
+                    if ui.button("  OK  ").clicked() {
+                        self.dialog_state = DialogState::None;
+                    }
+                });
+            });
+
+        if !open {
+            self.dialog_state = DialogState::None;
+        }
+    }
+
+    /// Returns true if the error message indicates a decoding failure.
+    fn is_decode_error(message: &str) -> bool {
+        message.contains("failed to decode")
+    }
+
+    /// Reads a file from disk and opens it as lossy UTF-8 in a new tab.
+    ///
+    /// The resulting document is untitled (no file path) so the user must
+    /// explicitly "Save As" to write it back — this prevents accidentally
+    /// overwriting the original file.
+    fn recover_file_as_utf8_lossy(&mut self, path: &std::path::Path) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("Recovery failed — could not read file: {e}");
+                return;
+            }
+        };
+        let recovered = String::from_utf8_lossy(&bytes);
+        let filename = path.file_name().map_or_else(
+            || "Recovered".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+
+        self.tabs.new_tab();
+        let doc = self.tabs.active_doc_mut();
+        doc.insert_text(&recovered);
+        doc.title = format!("[Recovered] {filename}");
     }
 }
 
@@ -622,7 +789,8 @@ impl eframe::App for App {
         self.handle_io_responses();
 
         // Live file monitoring: check for external changes every second
-        self.live_monitor.tick(&mut self.tabs);
+        self.live_monitor
+            .tick(&mut self.tabs, self.max_file_size_bytes);
 
         // Periodic flush of undo history to disk
         if self.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
@@ -718,6 +886,7 @@ impl eframe::App for App {
             recent_files_max_count: self.recent_files.max_count,
             recent_files_cleanup: self.recent_files.cleanup,
             recent_files: self.recent_files.to_config_strings(),
+            max_file_size_mb: self.max_file_size_bytes.map_or(0, |b| b / (1024 * 1024)),
             session_content_max_kb: self.session_content_max_kb,
             themes: self.theme_ctrl.available_themes.clone(),
         };
@@ -781,6 +950,7 @@ mod tests {
             last_flush: Instant::now(),
             session_store: None,
             session_content_max_kb: 10_240,
+            max_file_size_bytes: Some(512 * 1024 * 1024),
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -1857,7 +2027,7 @@ mod tests {
         let mut app = test_app();
         assert!(!app.tabs.active_doc().live_monitoring);
         // Should be a no-op, no crash
-        app.live_monitor.tick(&mut app.tabs);
+        app.live_monitor.tick(&mut app.tabs, None);
     }
 
     #[test]
@@ -3309,5 +3479,167 @@ mod tests {
             original_path: None,
         };
         assert_eq!(app.find_save_as_tab(&ctx), Some(app.tabs.active));
+    }
+
+    // ── handle_io_responses: FileTooLarge ───────────────────────────────
+
+    #[test]
+    fn test_handle_file_too_large_sets_confirm_dialog() {
+        let mut app = test_app();
+        let path = std::path::PathBuf::from("/tmp/huge.bin");
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileTooLarge {
+                path: path.clone(),
+                message: "File is too large (2.0 MB)".to_string(),
+            });
+        app.handle_io_responses();
+
+        match &app.dialog_state {
+            DialogState::ConfirmLargeFile {
+                path: p,
+                message: m,
+            } => {
+                assert_eq!(*p, path);
+                assert!(m.contains("2.0 MB"));
+            }
+            other => panic!("Expected ConfirmLargeFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_handle_file_too_large_clears_dialog_open() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileTooLarge {
+                path: std::path::PathBuf::from("/tmp/huge.bin"),
+                message: "too large".to_string(),
+            });
+        app.handle_io_responses();
+
+        assert!(!app.io_activity.dialog_open);
+    }
+
+    // ── handle_io_responses: decode error → FileOpenError ───────────────
+
+    #[test]
+    fn test_handle_file_read_decode_error_sets_dialog_with_recovery() {
+        let mut app = test_app();
+        app.io_activity.pending_reads = 1;
+
+        // UTF-16 LE BOM followed by an odd byte count → decode failure
+        let bad_utf16 = vec![0xFF, 0xFE, 0x41, 0x00, 0x42];
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileRead {
+                path: std::path::PathBuf::from("/tmp/corrupt.txt"),
+                bytes: bad_utf16,
+            });
+        app.handle_io_responses();
+
+        assert_eq!(app.io_activity.pending_reads, 0);
+        match &app.dialog_state {
+            DialogState::FileOpenError {
+                message,
+                can_recover_utf8,
+                ..
+            } => {
+                assert!(message.contains("failed to decode"), "Got: {message}");
+                assert!(can_recover_utf8);
+            }
+            other => panic!("Expected FileOpenError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_handle_dialog_file_opened_decode_error_sets_dialog() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+
+        let bad_utf16 = vec![0xFF, 0xFE, 0x41, 0x00, 0x42];
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::DialogFileOpened {
+                path: std::path::PathBuf::from("/tmp/corrupt.txt"),
+                bytes: bad_utf16,
+            });
+        app.handle_io_responses();
+
+        assert!(!app.io_activity.dialog_open);
+        assert!(matches!(
+            app.dialog_state,
+            DialogState::FileOpenError {
+                can_recover_utf8: true,
+                ..
+            }
+        ));
+    }
+
+    // ── is_decode_error ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_decode_error_positive() {
+        assert!(App::is_decode_error("failed to decode file: /tmp/x.txt"));
+        assert!(App::is_decode_error(
+            "Invalid UTF-16 LE: failed to decode: odd bytes"
+        ));
+    }
+
+    #[test]
+    fn test_is_decode_error_negative() {
+        assert!(!App::is_decode_error("failed to load undo history"));
+        assert!(!App::is_decode_error("permission denied"));
+        assert!(!App::is_decode_error(""));
+    }
+
+    // ── recover_file_as_utf8_lossy ──────────────────────────────────────
+
+    #[test]
+    fn test_recover_file_as_utf8_lossy_creates_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.txt");
+        // Write bytes with some invalid UTF-8 sequences
+        std::fs::write(&path, b"hello\xFF\xFEworld").unwrap();
+
+        let mut app = test_app();
+        let initial_count = app.tabs.tab_count();
+        app.recover_file_as_utf8_lossy(&path);
+
+        assert_eq!(app.tabs.tab_count(), initial_count + 1);
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.title, "[Recovered] broken.txt");
+        assert!(doc.file_path.is_none(), "Recovered tab should be untitled");
+        let content = doc.buffer.to_string();
+        assert!(content.contains("hello"));
+        assert!(content.contains("world"));
+        assert!(
+            content.contains('\u{FFFD}'),
+            "Should contain replacement chars"
+        );
+    }
+
+    #[test]
+    fn test_recover_file_as_utf8_lossy_valid_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("valid.txt");
+        std::fs::write(&path, "perfectly fine text").unwrap();
+
+        let mut app = test_app();
+        app.recover_file_as_utf8_lossy(&path);
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.title, "[Recovered] valid.txt");
+        assert_eq!(doc.buffer.to_string(), "perfectly fine text");
+    }
+
+    #[test]
+    fn test_recover_file_as_utf8_lossy_missing_file() {
+        let mut app = test_app();
+        let initial_count = app.tabs.tab_count();
+
+        app.recover_file_as_utf8_lossy(std::path::Path::new("/nonexistent/file.txt"));
+
+        // Should not create a tab when the file cannot be read
+        assert_eq!(app.tabs.tab_count(), initial_count);
     }
 }
