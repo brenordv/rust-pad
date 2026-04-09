@@ -48,6 +48,9 @@ pub struct StartupArgs {
     pub files: Vec<PathBuf>,
     /// If set, create a new tab pre-filled with this text.
     pub new_file_text: Option<String>,
+    /// If true, store config and data next to the executable instead of
+    /// in platform-standard directories. Useful for USB/portable installs.
+    pub portable: bool,
 }
 
 /// Which color theme to use.
@@ -161,8 +164,17 @@ impl App {
         // Disable egui's built-in keyboard zoom so Ctrl+/- only affects the editor text
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
+        // Migrate config/data from legacy exe-relative paths to platform dirs
+        if !args.portable {
+            rust_pad_config::paths::migrate_legacy_paths();
+        }
+
         // Load config
-        let config_path = AppConfig::config_path();
+        let config_path = if args.portable {
+            rust_pad_config::paths::portable_config_file_path()
+        } else {
+            AppConfig::config_path()
+        };
         let app_config = AppConfig::load_or_create(&config_path);
 
         let theme_ctrl = ThemeController::new(
@@ -174,7 +186,10 @@ impl App {
             &cc.egui_ctx,
         );
 
-        let history_config = HistoryConfig::default();
+        let mut history_config = HistoryConfig::default();
+        if args.portable {
+            history_config.data_dir = rust_pad_config::paths::portable_history_data_dir();
+        }
         let mut tabs = match PersistenceLayer::open(&history_config.data_dir) {
             Ok(pl) => TabManager::with_persistence(pl, history_config),
             Err(e) => {
@@ -187,7 +202,12 @@ impl App {
         tabs.default_extension = app_config.default_extension.clone();
 
         // Open session store
-        let session_store = match SessionStore::open(&SessionStore::session_path()) {
+        let session_path = if args.portable {
+            rust_pad_config::paths::portable_session_file_path()
+        } else {
+            SessionStore::session_path()
+        };
+        let session_store = match SessionStore::open(&session_path) {
             Ok(store) => Some(store),
             Err(e) => {
                 tracing::warn!("Failed to open session store: {e}");

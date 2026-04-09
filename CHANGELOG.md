@@ -16,6 +16,24 @@
 - Deserialization of undo history entries, document metadata, and session data from redb databases is now bounded to prevent out-of-memory crashes from corrupted database files.
 - Corrupted records are now gracefully skipped with a warning log instead of preventing the app from starting. History limits: 50 MB per edit group, 1 KB for metadata, 10 MB for session data.
 
+#### Data Directory Permissions
+- The history data directory is now created with owner-only permissions (0700 on Unix) to prevent other local users from listing database files.
+
+#### History Database File Permissions
+- The `history.redb` file is now created with owner-only read/write permissions (0600 on Unix) to prevent other local users from reading undo history containing deleted sensitive text.
+
+#### Session Database File Permissions
+- The `rust-pad-session.redb` file is now created with owner-only read/write permissions (0600 on Unix) to prevent other local users from reading unsaved tab content.
+
+#### Platform-Standard Config and Data Directories
+- Configuration (`rust-pad.json`) is now stored in the platform-standard config directory: `~/.config/rust-pad/` (Linux), `~/Library/Application Support/rust-pad/` (macOS), `%APPDATA%\rust-pad\` (Windows).
+- Data files (`history.redb`, `rust-pad-session.redb`) are now stored in the platform-standard data directory: `~/.local/share/rust-pad/` (Linux), `~/Library/Application Support/rust-pad/` (macOS), `%APPDATA%\rust-pad\` (Windows).
+- On first launch, existing config and data files next to the executable are automatically migrated (copied) to the new locations. Originals are preserved for downgrade safety.
+- If the platform directory cannot be determined, falls back to the executable directory with a warning.
+- New `--portable` CLI flag stores all config and data next to the executable (useful for USB/portable installs).
+- The `RUST_PAD_DATA_DIR` environment variable continues to override the history data directory location.
+- All new directories and files are created with restrictive permissions (directories: 0700, files: 0600 on Unix).
+
 ## [1.3.0] - 2026-04-06
 
 ### Added

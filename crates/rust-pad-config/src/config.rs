@@ -86,12 +86,12 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Returns the config file path: exe directory + `rust-pad.json`.
+    /// Returns the config file path in the platform-standard config directory.
+    ///
+    /// Falls back to the executable directory if the platform config
+    /// directory cannot be determined.
     pub fn config_path() -> PathBuf {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("rust-pad.json")))
-            .unwrap_or_else(|| PathBuf::from("rust-pad.json"))
+        crate::paths::config_file_path()
     }
 
     /// Loads config from `path`, creating a default file if it doesn't exist.
@@ -127,9 +127,20 @@ impl AppConfig {
     }
 
     /// Saves config to `path` as pretty-printed JSON.
+    ///
+    /// Creates the parent directory if it does not exist and sets
+    /// restrictive permissions on it.
     pub fn save(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+                crate::permissions::set_owner_only_dir_permissions(parent);
+            }
+        }
         let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(path, json)
+        std::fs::write(path, &json)?;
+        crate::permissions::set_owner_only_file_permissions(path);
+        Ok(())
     }
 
     /// Ensures built-in Dark and Light themes are always present.

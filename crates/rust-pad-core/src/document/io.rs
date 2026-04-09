@@ -35,7 +35,7 @@ pub fn validate_file_size(path: &Path, max_bytes: u64) -> Result<u64> {
         let limit_mb = max_bytes as f64 / (1024.0 * 1024.0);
         anyhow::bail!(
             "File is too large ({size_mb:.1} MB). Maximum allowed size is {limit_mb:.0} MB. \
-             Adjust 'max_file_size_mb' in rust-pad.json to change this limit."
+             Adjust 'max_file_size_mb' in the settings or config file to change this limit."
         );
     }
     Ok(size)
