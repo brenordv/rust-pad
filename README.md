@@ -22,23 +22,26 @@
 ---
 
 ## Motivation
-I absolutely love Notepad++, so whenever I consider moving away from Windows, I end up looking for a way to run it on Linux. 
-Since I prefer native applications, I decided to take the longer route and write my own text editor in Rust. 
-This isn’t a port of Notepad++ and it doesn’t include all of its features—nor am I trying to compete with it. 
-Instead, my goal is to build a cross-platform Notepad-like editor with a few neat features, keeping it as simple, 
+I absolutely love Notepad++, so whenever I consider moving away from Windows, I end up looking for a way to run it on Linux.
+Since I prefer native applications, I decided to take the longer route and write my own text editor in Rust.
+This isn’t a port of Notepad++ and it doesn’t include all of its features—nor am I trying to compete with it.
+Instead, my goal is to build a cross-platform Notepad-like editor with a few neat features, keeping it as simple,
 stable, and fast as possible.
 
 ## Features
 
 ### Editing
-- **Multi-tab interface** with session restore (reopen files from last session)
+- **Multi-tab interface** with session restore (reopen files from last session) and horizontal tab scrolling when tabs overflow
 - **Syntax highlighting** powered by syntect (78+ languages)
 - **Find/Replace** with regex support and search across all open tabs
-- **Multi-cursor editing** -- Ctrl+Click to add cursors, Alt+Shift+Arrow to add cursors above/below, Alt+Shift+Period to select next occurrence
+- **Multi-cursor editing**: `Ctrl+Click` to add cursors, `Alt+Shift+Arrow` to add the cursors above/below (with shrink support), `Alt+Shift+Period` to select next occurrence
 - **Undo/Redo** with persistent history (survives application restart)
-- **Bookmarks** -- toggle (Ctrl+F2), navigate (F2 / Shift+F2), clear all
-- **Go to Line** dialog (Ctrl+G)
-- **Delete current line** (Ctrl+D)
+- **Auto-indent**: pressing Enter inherits the leading whitespace from the current line
+- **Bracket matching**: highlights matching `()`, `[]`, `{}` pairs when the cursor is adjacent to a bracket
+- **Bookmarks**: toggle (`Ctrl+F2`), navigate (`F2 / Shift+F2`), clear all
+- **Context menu**: right-click for clipboard actions, selection operations, case conversion, and line operations scoped to selection or entire document
+- **Go to Line** dialog (`Ctrl+G`)
+- **Delete current line** (`Ctrl+D`)
 
 ### Line Operations
 - Sort lines ascending/descending
@@ -48,14 +51,20 @@ stable, and fast as possible.
 - Duplicate line
 - Increase/Decrease indent (Tab / Shift+Tab)
 
+### Selection
+- **Invert Selection**: toggles selection (no selection -> select all, full selection -> clear, partial -> invert to unselected regions)
+
 ### Case Conversion
 - UPPERCASE
 - lowercase
 - Title Case
 
 ### File Handling
-- **Live file monitoring** (tail -f mode) -- auto-refresh when file changes on disk
+- **Recent files**: quick reopen from the File > Open Recent submenu (configurable max count and cleanup strategy)
+- **Live file monitoring** (`tail -f mode`): auto-refresh when file changes on disk
 - **Auto-save** for file-backed documents (configurable interval)
+- **Async file I/O**: file dialogs, reads, and writes run on background threads with a status bar spinner, keeping the UI responsive
+- **File size validation**: configurable size limit (default 512 MB) prevents out-of-memory crashes from opening very large files
 - **Encoding support**: UTF-8, UTF-8 with BOM, UTF-16 LE, UTF-16 BE, ASCII
 - **Line ending conversion**: LF (Unix), CRLF (Windows), CR (classic Mac)
 - **Indent style**: spaces (2/4/8) or tabs, with auto-detection
@@ -63,16 +72,20 @@ stable, and fast as possible.
 
 ### View
 - **Customizable themes**: Dark, Light, and custom themes via JSON
-- **Settings dialog** for all preferences
+- **Settings dialog** with five tabs: General, Editor, File Dialogs, Auto-Save, History
 - **Status bar** displaying: cursor position, encoding, line ending, indent style, character count, file size, zoom level, and last saved time
 - **Word wrap** toggle
 - **Special character visualization** (whitespace, line endings)
 - **Line number gutter** with change tracking (orange = unsaved changes, green = saved changes)
-- **Zoom**: in (Ctrl++), out (Ctrl+-), reset (Ctrl+0) -- range 50% to 1500%
+- **Zoom**: in (`Ctrl++`), out (`Ctrl+-`), reset (`Ctrl+0`): range 50% to 1500%
 
 ### Platform & CLI
 - **Cross-platform**: Windows, macOS, Linux
 - **CLI support**: open files from the command line, `--new-file` flag to create a tab with given text
+- **Portable mode** (`--portable` flag): store all config and data next to the executable for USB/portable installs
+- **Platform-standard directories**: config and data stored in OS-standard locations (`%APPDATA%`, `~/.config`, `~/Library/Application Support`) with automatic migration from older versions
+- **Security hardening**: data directories (0700) and database files (0600) use restrictive permissions on Unix; bounded deserialization prevents OOM from corrupted databases
+- **Release integrity**: SHA256 checksums published alongside release binaries for download verification
 - **Custom application icon**
 
 ---
@@ -150,7 +163,19 @@ stable, and fast as possible.
 
 ## Configuration
 
-rust-pad stores its configuration in a `rust-pad.json` file located next to the executable. The file is created automatically on first launch with default values.
+rust-pad stores its configuration in a `rust-pad.json` file in the platform-standard config directory:
+
+| Platform | Config directory                          |
+|----------|-------------------------------------------|
+| Windows  | `%APPDATA%\rust-pad\`                     |
+| macOS    | `~/Library/Application Support/rust-pad/` |
+| Linux    | `~/.config/rust-pad/`                     |
+
+Data files (`history.redb`, `rust-pad-session.redb`) are stored in the platform-standard data directory (same as config on Windows/macOS; `~/.local/share/rust-pad/` on Linux).
+
+When running with `--portable`, all files are stored next to the executable instead. The `RUST_PAD_DATA_DIR` environment variable can override the history data directory location.
+
+The config file is created automatically on the first launch with default values. If upgrading from an older version that stored files next to the executable, they are automatically migrated (copied) to the new location.
 
 ### Configuration Fields
 
@@ -171,6 +196,12 @@ rust-pad stores its configuration in a `rust-pad.json` file located next to the 
 | `last_used_folder`        | string | `""`                          | Persisted last folder from open/save dialogs (managed automatically).                                                 |
 | `auto_save_enabled`       | bool   | `false`                       | Enable periodic auto-save for file-backed documents.                                                                  |
 | `auto_save_interval_secs` | int    | `30`                          | Seconds between auto-saves (minimum 5).                                                                               |
+| `recent_files_enabled`    | bool   | `true`                        | Enable the recent files feature.                                                                                      |
+| `recent_files_max_count`  | int    | `10`                          | Maximum number of recent files to remember (1 to 50).                                                                 |
+| `recent_files_cleanup`    | string | `"OnStartup"`                 | When to remove non-existent files: `"OnStartup"`, `"OnMenuOpen"`, or `"Both"`.                                        |
+| `recent_files`            | array  | `[]`                          | Most-recently-opened file paths (managed automatically).                                                              |
+| `max_file_size_mb`        | int    | `512`                         | Maximum file size in MB to open (0 = no limit, 1 to 10240).                                                           |
+| `session_content_max_kb`  | int    | `10240`                       | Maximum KB of unsaved content to persist per tab (0 = unlimited). Tabs exceeding this are restored empty.             |
 | `themes`                  | array  | (built-in Dark, Light, Wacky) | Array of theme definitions. See below.                                                                                |
 
 ### Custom Themes
@@ -199,7 +230,7 @@ You can also load custom `.tmTheme` files (TextMate/Sublime Text theme format) b
 
 Theme colors are specified as hex strings (`"#RRGGBB"` or `"#RRGGBBAA"`) and cover:
 
-- **Editor colors**: background, text, cursor, selection, line numbers, line number background, current line highlight, modified/saved line indicators, gutter separator, scrollbar (track, thumb idle/hover/active), occurrence highlight, special character color
+- **Editor colors**: background, text, cursor, selection, line numbers, line number background, current line highlight, modified/saved line indicators, gutter separator, scrollbar (track, thumb idle/hover/active), occurrence highlight, matching bracket highlight, special character color
 - **UI colors**: inherited from egui's built-in visuals, overridden per-theme
 
 Example custom theme entry:
@@ -223,12 +254,11 @@ Example custom theme entry:
     "scrollbar_thumb_hover": "#6E6E6E",
     "scrollbar_thumb_active": "#8C8C8C",
     "occurrence_highlight_color": "#64643250",
+    "matching_bracket_color": "#B4A03C5A",
     "special_char_color": "#646464B4"
   }
 }
 ```
-
----
 
 ## Installation
 
@@ -244,7 +274,12 @@ Pre-built binaries are available on the [Releases](https://github.com/brenordv/r
 
 Requirements:
 - [Rust](https://www.rust-lang.org/tools/install) (stable toolchain)
-- A C compiler (for native dependencies)
+- **Linux only**: a C compiler and system development libraries:
+  ```bash
+  # Debian/Ubuntu
+  sudo apt-get install -y build-essential libxcb-render0-dev libxcb-shape0-dev \
+    libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgtk-3-dev
+  ```
 
 ```bash
 git clone https://github.com/brenordv/rust-pad.git
@@ -262,6 +297,9 @@ rust-pad file1.txt file2.rs
 
 # Create a new tab with initial text
 rust-pad --new-file "Hello, world!"
+
+# Portable mode: store config and data next to the executable
+rust-pad --portable
 ```
 
 ---
@@ -273,40 +311,43 @@ rust-pad is organized as a Cargo workspace with the following crates:
 | Crate                  | Description                                                                      |
 |------------------------|----------------------------------------------------------------------------------|
 | `rust-pad`             | Binary entry point, CLI parsing (clap), eframe bootstrap                         |
-| `rust-pad-core`        | Core text buffer (ropey), cursor, encoding, line operations -- no GUI dependency |
+| `rust-pad-core`        | Core text buffer (ropey), cursor, encoding, line operations: no GUI dependency |
 | `rust-pad-ui`          | egui/eframe UI: editor widget, tabs, menus, dialogs, syntax highlighting         |
 | `rust-pad-config`      | Configuration loading/saving, theme definitions (serde/JSON)                     |
 | `rust-pad-mod-history` | Persistent undo/redo history (redb)                                              |
 
 ### Key Dependencies
 
-| Dependency         | Version | Purpose                                       |
-|--------------------|---------|-----------------------------------------------|
-| egui / eframe      | 0.33    | Immediate-mode GUI framework                  |
-| ropey              | 1.6     | Rope data structure for text storage          |
-| syntect            | 5.3     | Syntax highlighting (lexer-based)             |
-| regex              | 1.12    | Regular expression support for Find/Replace   |
-| encoding_rs        | 0.8     | Character encoding conversion                 |
-| chardetng          | 0.1     | Automatic encoding detection                  |
-| rfd                | 0.17    | Native file dialogs                           |
-| arboard            | 3.6     | System clipboard access                       |
-| trash              | 5.2     | Send files to recycle bin/trash               |
-| clap               | 4       | Command-line argument parsing                 |
-| redb               | 3       | Embedded database for persistent undo history |
-| serde / serde_json | 1.0     | Configuration serialization                   |
-| dark-light         | 1       | OS dark/light mode detection                  |
+| Dependency         | Version | Purpose                                          |
+|--------------------|---------|--------------------------------------------------|
+| egui / eframe      | 0.34    | Immediate-mode GUI framework                     |
+| ropey              | 1.6     | Rope data structure for text storage             |
+| syntect            | 5.3     | Syntax highlighting (lexer-based)                |
+| regex              | 1.12    | Regular expression support for Find/Replace      |
+| encoding_rs        | 0.8     | Character encoding conversion                    |
+| chardetng          | 1.0     | Automatic encoding detection                     |
+| rfd                | 0.17    | Native file dialogs                              |
+| arboard            | 3.6     | System clipboard access                          |
+| trash              | 5.2     | Send files to recycle bin/trash                  |
+| clap               | 4.6     | Command-line argument parsing                    |
+| redb               | 4.0     | Embedded database for persistent undo history    |
+| serde / serde_json | 1.0     | Configuration serialization                      |
+| dark-light         | 2.0     | OS dark/light mode detection                     |
+| dirs               | 6.0     | Platform-standard config and data directories    |
 
 ---
 
 ## File Size Limits
 
-rust-pad uses the **ropey** crate, which stores text in a B-tree of small chunks. This data structure provides:
+By default, rust-pad refuses to open files larger than **512 MB** to prevent out-of-memory crashes. This limit is configurable via the `max_file_size_mb` setting (0 = no limit, max 10240 MB) or through the Settings dialog under the History tab.
+
+Internally, rust-pad uses the **ropey** crate, which stores text in a B-tree of small chunks. This data structure provides:
 
 - **O(log n)** random access to any character or line
 - **O(log n)** insertions and deletions at any position
 - **O(n)** memory usage where n is the text size
 
-The practical limit is system memory. Files up to several GB should work as long as sufficient RAM is available. The rope data structure is far more efficient than a flat string buffer for large files, since edits do not require copying the entire document.
+The practical limit beyond the configured cap is system memory. The rope data structure is far more efficient than a flat string buffer for large files, since edits do not require copying the entire document.
 
 ---
 
@@ -315,10 +356,8 @@ The practical limit is system memory. Files up to several GB should work as long
 The following features are planned for future releases, inspired by Notepad++ functionality:
 
 ### Editor
-- [ ] Auto-indent on Enter (match indentation of previous line)
 - [ ] Code folding (collapse/expand blocks by language rules)
 - [ ] Auto-completion (keyword and word suggestions)
-- [ ] Brace/bracket matching and highlighting
 - [ ] Column editor (insert text/numbers into column selections)
 - [ ] Smart backspace (remove full indent level)
 - [ ] Edge/ruler line at a configurable column
@@ -333,7 +372,6 @@ The following features are planned for future releases, inspired by Notepad++ fu
 - [ ] Synchronized scrolling between two panes
 
 ### File
-- [ ] Recent files list (quick reopen of previously edited files)
 - [ ] Print support
 - [ ] Open containing folder / open in terminal
 - [ ] Reload from disk (discard unsaved changes)
@@ -363,17 +401,6 @@ The following features are planned for future releases, inspired by Notepad++ fu
 - [ ] Shortcut mapper (customizable keybindings)
 - [ ] Right-to-left text support
 - [ ] Import/export settings
-
----
-
-## Caveats
-
-- **No code folding** -- blocks cannot be collapsed/expanded yet.
-- **No auto-completion** -- no keyword or word suggestions are offered.
-- **No split view / multiple panes** -- only one editor view at a time.
-- **No plugin system** -- extensibility is not yet available.
-- **No macro recording** -- sequences of edits cannot be recorded and replayed.
-- **Syntax highlighting is lexer-based** -- powered by syntect, not an LSP. This means highlighting is based on regex patterns, not semantic analysis.
 
 ---
 
