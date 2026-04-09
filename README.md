@@ -24,7 +24,7 @@
 ## Motivation
 I absolutely love Notepad++, so whenever I consider moving away from Windows, I end up looking for a way to run it on Linux.
 Since I prefer native applications, I decided to take the longer route and write my own text editor in Rust.
-This isn’t a port of Notepad++ and it doesn’t include all of its features—nor am I trying to compete with it.
+This isn’t a port of Notepad++, and it doesn’t include all of its features—nor am I trying to compete with it.
 Instead, my goal is to build a cross-platform Notepad-like editor with a few neat features, keeping it as simple,
 stable, and fast as possible.
 
@@ -301,41 +301,6 @@ rust-pad --new-file "Hello, world!"
 # Portable mode: store config and data next to the executable
 rust-pad --portable
 ```
-
----
-
-## Architecture
-
-rust-pad is organized as a Cargo workspace with the following crates:
-
-| Crate                  | Description                                                                      |
-|------------------------|----------------------------------------------------------------------------------|
-| `rust-pad`             | Binary entry point, CLI parsing (clap), eframe bootstrap                         |
-| `rust-pad-core`        | Core text buffer (ropey), cursor, encoding, line operations: no GUI dependency |
-| `rust-pad-ui`          | egui/eframe UI: editor widget, tabs, menus, dialogs, syntax highlighting         |
-| `rust-pad-config`      | Configuration loading/saving, theme definitions (serde/JSON)                     |
-| `rust-pad-mod-history` | Persistent undo/redo history (redb)                                              |
-
-### Key Dependencies
-
-| Dependency         | Version | Purpose                                          |
-|--------------------|---------|--------------------------------------------------|
-| egui / eframe      | 0.34    | Immediate-mode GUI framework                     |
-| ropey              | 1.6     | Rope data structure for text storage             |
-| syntect            | 5.3     | Syntax highlighting (lexer-based)                |
-| regex              | 1.12    | Regular expression support for Find/Replace      |
-| encoding_rs        | 0.8     | Character encoding conversion                    |
-| chardetng          | 1.0     | Automatic encoding detection                     |
-| rfd                | 0.17    | Native file dialogs                              |
-| arboard            | 3.6     | System clipboard access                          |
-| trash              | 5.2     | Send files to recycle bin/trash                  |
-| clap               | 4.6     | Command-line argument parsing                    |
-| redb               | 4.0     | Embedded database for persistent undo history    |
-| serde / serde_json | 1.0     | Configuration serialization                      |
-| dark-light         | 2.0     | OS dark/light mode detection                     |
-| dirs               | 6.0     | Platform-standard config and data directories    |
-
----
 
 ## File Size Limits
 
