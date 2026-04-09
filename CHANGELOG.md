@@ -25,6 +25,15 @@
 #### Session Database File Permissions
 - The `rust-pad-session.redb` file is now created with owner-only read/write permissions (0600 on Unix) to prevent other local users from reading unsaved tab content.
 
+#### GitHub Actions SHA Pinning
+- All third-party GitHub Actions in CI, release, and SonarCloud workflows are now pinned to full commit SHAs instead of mutable version tags. This prevents supply chain attacks where a compromised action could inject malicious code into builds or release artifacts.
+
+#### Release Artifact SHA256 Checksums
+- Release builds now generate a `SHA256SUMS.txt` file containing SHA256 checksums for all release artifacts (Windows .zip, macOS .zip, Linux .tar.gz, .deb). The checksum file is uploaded alongside the binaries in GitHub Releases, allowing users to verify download integrity.
+
+#### Rust Toolchain Version Pinning
+- Added `rust-toolchain.toml` pinning the Rust compiler to version 1.93.1 with `rustfmt` and `clippy` components. This ensures reproducible builds across all developer machines and CI environments, preventing surprise failures from new Rust releases.
+
 #### Platform-Standard Config and Data Directories
 - Configuration (`rust-pad.json`) is now stored in the platform-standard config directory: `~/.config/rust-pad/` (Linux), `~/Library/Application Support/rust-pad/` (macOS), `%APPDATA%\rust-pad\` (Windows).
 - Data files (`history.redb`, `rust-pad-session.redb`) are now stored in the platform-standard data directory: `~/.local/share/rust-pad/` (Linux), `~/Library/Application Support/rust-pad/` (macOS), `%APPDATA%\rust-pad\` (Windows).
