@@ -85,32 +85,7 @@ impl App {
     /// Encodes the document content on the UI thread, then sends both
     /// the content and dialog parameters to the background thread.
     pub(crate) fn save_as_dialog(&mut self) {
-        if self.io_activity.dialog_open {
-            return;
-        }
-
-        let doc = self.tabs.active_doc();
-        let content = match doc.encode_for_save() {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!("Failed to encode document: {e:#}");
-                return;
-            }
-        };
-
-        self.io_activity.dialog_open = true;
-        self.io_activity.save_as_context = Some(SaveAsContext {
-            content_version: doc.content_version,
-            session_id: doc.session_id.clone(),
-            original_path: doc.file_path.clone(),
-            is_copy: false,
-        });
-
-        self.io_worker.send(IoRequest::SaveAsDialog {
-            content,
-            suggested_name: doc.title.clone(),
-            start_dir: self.file_dialog.resolve_directory(),
-        });
+        self.save_as_dialog_impl(false);
     }
 
     /// Creates a new empty tab and assigns it a session ID.
@@ -165,6 +140,14 @@ impl App {
     /// Opens a save-a-copy dialog: saves content to a new path without
     /// changing the active document's path, title, or modified state.
     pub(crate) fn save_copy_dialog(&mut self) {
+        self.save_as_dialog_impl(true);
+    }
+
+    /// Shared implementation for save-as and save-a-copy dialogs.
+    ///
+    /// When `is_copy` is true, the document state is not updated after
+    /// the file is written (title, path, and modified flag remain unchanged).
+    fn save_as_dialog_impl(&mut self, is_copy: bool) {
         if self.io_activity.dialog_open {
             return;
         }
@@ -183,7 +166,7 @@ impl App {
             content_version: doc.content_version,
             session_id: doc.session_id.clone(),
             original_path: doc.file_path.clone(),
-            is_copy: true,
+            is_copy,
         });
 
         self.io_worker.send(IoRequest::SaveAsDialog {
