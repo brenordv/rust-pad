@@ -7,6 +7,7 @@
 use egui::{
     text::LayoutJob, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, TextFormat, Ui, Vec2,
 };
+use rust_pad_core::bookmarks::BookmarkManager;
 use rust_pad_core::cursor::Position;
 use rust_pad_core::document::{Document, ScrollbarDrag};
 
@@ -91,6 +92,8 @@ pub struct EditorWidget<'a> {
     pub dialog_open: bool,
     /// Zoom factor from Ctrl+scroll (1.0 = no change). Read by the app after `show()`.
     pub zoom_request: f32,
+    /// Optional bookmark manager for rendering bookmark indicators in the gutter.
+    pub bookmarks: Option<&'a BookmarkManager>,
 }
 
 impl<'a> EditorWidget<'a> {
@@ -110,6 +113,7 @@ impl<'a> EditorWidget<'a> {
             show_line_numbers: true,
             dialog_open: false,
             zoom_request: 1.0,
+            bookmarks: None,
         }
     }
 
@@ -1182,6 +1186,18 @@ impl<'a> EditorWidget<'a> {
                 );
                 gutter_painter.rect_filled(indicator_rect, 0.0, color);
             }
+        }
+
+        // Bookmark indicator
+        if self.show_line_numbers
+            && show_line_number
+            && self
+                .bookmarks
+                .is_some_and(|bm| bm.is_bookmarked(logical_line))
+        {
+            let radius = line_height * 0.2;
+            let center = Pos2::new(gutter_rect.min.x + radius + 4.0, line_y + line_height * 0.5);
+            gutter_painter.circle_filled(center, radius, self.theme.bookmark_marker_color);
         }
 
         // Line number

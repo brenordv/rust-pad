@@ -71,6 +71,8 @@ pub struct SaveAsContext {
     pub session_id: Option<String>,
     /// Original file path of the tab (for file-backed tabs doing "Save As").
     pub original_path: Option<PathBuf>,
+    /// When true, this is a "Save a Copy" — the document state is not updated.
+    pub is_copy: bool,
 }
 
 /// A pending save-to-known-path operation, stored on the UI side.
@@ -317,6 +319,7 @@ mod tests {
                 content_version: 1,
                 session_id: None,
                 original_path: None,
+                is_copy: false,
             }),
             ..Default::default()
         };

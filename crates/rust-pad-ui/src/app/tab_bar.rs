@@ -9,6 +9,20 @@ use egui::{Color32, Rect, RichText, ScrollArea, Sense, Stroke, Vec2, Visuals};
 
 use super::App;
 
+/// Deferred tab bar action to execute after the rendering loop completes.
+///
+/// Context menu actions that modify the tab list cannot run during the
+/// rendering loop because the loop iterates over tab indices that would
+/// become stale. These are collected and executed afterwards.
+enum DeferredTabAction {
+    /// Close all tabs except the one at the given index.
+    Others(usize),
+    /// Close all unchanged tabs.
+    Unchanged,
+    /// Close all tabs.
+    All,
+}
+
 /// Horizontal padding on each side of the tab content.
 const TAB_PADDING: f32 = 8.0;
 /// Gap between the title text and the close button area.
@@ -40,6 +54,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let mut tab_to_close: Option<usize> = None;
+            let mut deferred_action: Option<DeferredTabAction> = None;
 
             // Collect tab rects for auto-scroll calculation.
             let mut tab_rects: Vec<Rect> = Vec::with_capacity(self.tabs.tab_count());
@@ -67,7 +82,13 @@ impl App {
                 .show(ui, |ui: &mut egui::Ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     for idx in 0..self.tabs.tab_count() {
-                        let rect = self.render_tab_button(ui, idx, &visuals, &mut tab_to_close);
+                        let rect = self.render_tab_button(
+                            ui,
+                            idx,
+                            &visuals,
+                            &mut tab_to_close,
+                            &mut deferred_action,
+                        );
                         tab_rects.push(rect);
                     }
                 });
@@ -94,8 +115,23 @@ impl App {
             self.render_new_tab_button(ui, &visuals);
             self.render_empty_tab_bar_area(ui);
 
+            // 6. Execute deferred actions after the rendering loop.
             if let Some(idx) = tab_to_close {
                 self.request_close_tab(idx);
+            }
+            if let Some(action) = deferred_action {
+                match action {
+                    DeferredTabAction::Others(keep_idx) => {
+                        self.tabs.switch_to(keep_idx);
+                        self.close_all_but_active();
+                    }
+                    DeferredTabAction::Unchanged => {
+                        self.close_unchanged_tabs();
+                    }
+                    DeferredTabAction::All => {
+                        self.close_all_tabs();
+                    }
+                }
             }
         });
     }
@@ -110,6 +146,7 @@ impl App {
         idx: usize,
         visuals: &Visuals,
         tab_to_close: &mut Option<usize>,
+        deferred_action: &mut Option<DeferredTabAction>,
     ) -> Rect {
         let doc = &self.tabs.documents[idx];
         let is_active = idx == self.tabs.active;
@@ -239,7 +276,7 @@ impl App {
             );
         }
 
-        self.render_tab_context_menu(ui, idx, &response, tab_to_close);
+        self.render_tab_context_menu(ui, idx, &response, tab_to_close, deferred_action);
 
         tab_rect
     }
@@ -322,12 +359,16 @@ impl App {
     }
 
     /// Renders the right-click context menu for a tab.
+    ///
+    /// Bulk-close actions are deferred to avoid mutating the tab list while
+    /// the rendering loop is still iterating over tab indices.
     fn render_tab_context_menu(
         &mut self,
         _ui: &mut egui::Ui,
         idx: usize,
         response: &egui::Response,
         tab_to_close: &mut Option<usize>,
+        deferred_action: &mut Option<DeferredTabAction>,
     ) {
         response.context_menu(|ui| {
             if ui.button("Close").clicked() {
@@ -335,15 +376,15 @@ impl App {
                 ui.close();
             }
             if ui.button("Close Others").clicked() {
-                let mut i = self.tabs.tab_count();
-                while i > 0 {
-                    i -= 1;
-                    if i != idx {
-                        self.cleanup_session_for_tab(i);
-                        self.tabs.close_tab(i);
-                    }
-                }
-                self.tabs.active = 0;
+                *deferred_action = Some(DeferredTabAction::Others(idx));
+                ui.close();
+            }
+            if ui.button("Close Unchanged").clicked() {
+                *deferred_action = Some(DeferredTabAction::Unchanged);
+                ui.close();
+            }
+            if ui.button("Close All").clicked() {
+                *deferred_action = Some(DeferredTabAction::All);
                 ui.close();
             }
         });
