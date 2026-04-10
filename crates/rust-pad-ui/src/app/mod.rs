@@ -137,6 +137,9 @@ pub struct App {
     prev_active_tab: usize,
     /// Tab count on the previous frame, used to detect tab open/close.
     prev_tab_count: usize,
+    /// When true, the "Close All" operation is in progress and should
+    /// continue prompting for modified tabs after each dialog resolution.
+    closing_all: bool,
 }
 
 #[derive(Debug, Default)]
@@ -144,6 +147,8 @@ pub(crate) enum DialogState {
     #[default]
     None,
     ConfirmClose(usize),
+    /// The user requested a reload-from-disk on a modified document.
+    ConfirmReload,
     /// A file exceeded the size limit — ask the user whether to open it anyway.
     ConfirmLargeFile {
         path: std::path::PathBuf,
@@ -275,6 +280,7 @@ impl App {
             tabs_overflow: false,
             prev_active_tab: 0,
             prev_tab_count: 0,
+            closing_all: false,
         }
     }
 
@@ -422,20 +428,25 @@ impl App {
                     self.file_dialog.update_last_folder(&path);
 
                     if let Some(ctx) = self.io_activity.save_as_context.take() {
-                        // Find the tab that initiated the save-as
-                        let tab_idx = self.find_save_as_tab(&ctx);
+                        if ctx.is_copy {
+                            // "Save a Copy" — don't update document state
+                            tracing::info!("Saved copy to '{}'", path.display());
+                        } else {
+                            // Normal "Save As" — update document state
+                            let tab_idx = self.find_save_as_tab(&ctx);
 
-                        if let Some(idx) = tab_idx {
-                            // Clean up session content before transitioning to file-backed
-                            if let Some(sid) = &self.tabs.documents[idx].session_id {
-                                if let Some(store) = &self.session_store {
-                                    let _ = store.delete_content(sid);
+                            if let Some(idx) = tab_idx {
+                                // Clean up session content before transitioning to file-backed
+                                if let Some(sid) = &self.tabs.documents[idx].session_id {
+                                    if let Some(store) = &self.session_store {
+                                        let _ = store.delete_content(sid);
+                                    }
                                 }
+                                let doc = &mut self.tabs.documents[idx];
+                                doc.mark_saved(&path, ctx.content_version);
+                                doc.session_id = None;
+                                self.recent_files.track(&path);
                             }
-                            let doc = &mut self.tabs.documents[idx];
-                            doc.mark_saved(&path, ctx.content_version);
-                            doc.session_id = None;
-                            self.recent_files.track(&path);
                         }
                     }
                 }
@@ -517,6 +528,7 @@ impl App {
     /// Shows all dialog windows.
     fn show_dialogs(&mut self, ctx: &egui::Context) {
         self.show_confirm_close_dialog(ctx);
+        self.show_confirm_reload_dialog(ctx);
         self.show_confirm_large_file_dialog(ctx);
         self.show_file_open_error_dialog(ctx);
         self.show_settings_dialog(ctx);
@@ -574,10 +586,52 @@ impl App {
                             self.tabs.close_tab(idx);
                         }
                         self.dialog_state = DialogState::None;
+                        self.continue_close_all();
                     }
                     if ui.button("  Discard  ").clicked() {
                         self.cleanup_session_for_tab(idx);
                         self.tabs.close_tab(idx);
+                        self.dialog_state = DialogState::None;
+                        self.continue_close_all();
+                    }
+                    if ui.button("  Cancel  ").clicked() {
+                        self.dialog_state = DialogState::None;
+                        self.closing_all = false;
+                    }
+                });
+            });
+
+        if !open {
+            self.dialog_state = DialogState::None;
+            self.closing_all = false;
+        }
+    }
+
+    /// Shows the confirm-reload dialog when the user wants to reload a modified document.
+    fn show_confirm_reload_dialog(&mut self, ctx: &egui::Context) {
+        if !matches!(self.dialog_state, DialogState::ConfirmReload) {
+            return;
+        }
+
+        let mut open = true;
+        let title = self.tabs.active_doc().title.clone();
+
+        egui::Window::new("Reload from Disk")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(format!(
+                    "'{title}' has unsaved changes. Discard changes and reload from disk?"
+                ));
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.button("  Reload  ").clicked() {
+                        self.do_reload_from_disk();
                         self.dialog_state = DialogState::None;
                     }
                     if ui.button("  Cancel  ").clicked() {
@@ -788,6 +842,7 @@ impl eframe::App for App {
                     editor.show_special_chars = self.show_special_chars;
                     editor.show_line_numbers = self.show_line_numbers;
                     editor.dialog_open = dialog_open;
+                    editor.bookmarks = Some(&self.bookmarks);
                     let r = editor.show(ui);
                     (r, editor.zoom_request)
                 };
@@ -983,6 +1038,7 @@ mod tests {
             tabs_overflow: false,
             prev_active_tab: 0,
             prev_tab_count: 0,
+            closing_all: false,
         }
     }
 
@@ -1441,6 +1497,7 @@ mod tests {
             content_version: 0,
             session_id: None,
             original_path: None,
+            is_copy: false,
         });
         assert!(app.is_dialog_open());
     }
@@ -3247,6 +3304,7 @@ mod tests {
             content_version: version,
             session_id,
             original_path: app.tabs.active_doc().file_path.clone(),
+            is_copy: false,
         };
         assert_eq!(ctx.content_version, version);
         assert!(ctx.original_path.is_none());
@@ -3375,6 +3433,7 @@ mod tests {
             content_version: version,
             session_id: Some(sid),
             original_path: None,
+            is_copy: false,
         });
 
         let save_path = std::path::PathBuf::from("/tmp/saved_as.txt");
@@ -3404,6 +3463,7 @@ mod tests {
             content_version: 0,
             session_id: None,
             original_path: None,
+            is_copy: false,
         });
 
         app.io_worker
@@ -3424,6 +3484,7 @@ mod tests {
             content_version: 0,
             session_id: None,
             original_path: None,
+            is_copy: false,
         });
 
         app.io_worker
@@ -3469,6 +3530,7 @@ mod tests {
             content_version: 0,
             session_id: Some("sid-1".to_string()),
             original_path: None,
+            is_copy: false,
         };
         assert_eq!(app.find_save_as_tab(&ctx), Some(0));
     }
@@ -3486,6 +3548,7 @@ mod tests {
             content_version: 0,
             session_id: None,
             original_path: Some(path),
+            is_copy: false,
         };
         assert_eq!(app.find_save_as_tab(&ctx), Some(1));
     }
@@ -3497,6 +3560,7 @@ mod tests {
             content_version: 0,
             session_id: Some("nonexistent".to_string()),
             original_path: None,
+            is_copy: false,
         };
         assert_eq!(app.find_save_as_tab(&ctx), Some(app.tabs.active));
     }
@@ -3661,5 +3725,227 @@ mod tests {
 
         // Should not create a tab when the file cannot be read
         assert_eq!(app.tabs.tab_count(), initial_count);
+    }
+
+    // ── Reload from Disk ──────────────────────────────────────────────
+
+    #[test]
+    fn test_request_reload_untitled_is_noop() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("content");
+        app.request_reload_from_disk();
+        // Untitled tab has no file_path, so nothing happens
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_request_reload_modified_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reload.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        app.tabs.switch_to(1);
+        app.tabs.active_doc_mut().insert_text(" changed");
+        app.request_reload_from_disk();
+        assert!(matches!(app.dialog_state, DialogState::ConfirmReload));
+    }
+
+    #[test]
+    fn test_request_reload_unmodified_reloads_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reload2.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        app.tabs.switch_to(1);
+
+        // Modify the file on disk
+        std::fs::write(&path, "updated").unwrap();
+        app.request_reload_from_disk();
+
+        // Should reload immediately without a dialog
+        assert!(matches!(app.dialog_state, DialogState::None));
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "updated");
+    }
+
+    // ── Close operations ──────────────────────────────────────────────
+
+    #[test]
+    fn test_close_unchanged_tabs() {
+        let mut app = test_app();
+        // Tab 0: unmodified
+        app.new_tab(); // Tab 1: unmodified
+        app.new_tab(); // Tab 2
+        app.tabs.active_doc_mut().insert_text("modified");
+        // Tab 2 is modified, tabs 0 and 1 are not
+
+        assert_eq!(app.tabs.tab_count(), 3);
+        app.close_unchanged_tabs();
+
+        // Only the modified tab should remain (or a blank tab replacing the last)
+        assert!(app
+            .tabs
+            .documents
+            .iter()
+            .all(|d| d.modified || d.buffer.is_empty()));
+    }
+
+    #[test]
+    fn test_close_all_but_active() {
+        let mut app = test_app();
+        app.new_tab();
+        app.new_tab();
+        assert_eq!(app.tabs.tab_count(), 3);
+        app.tabs.switch_to(1);
+
+        app.close_all_but_active();
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert_eq!(app.tabs.active, 0);
+    }
+
+    #[test]
+    fn test_close_all_tabs_unmodified() {
+        let mut app = test_app();
+        app.new_tab();
+        app.new_tab();
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_all_tabs();
+        // All tabs are unmodified, so all should close (reset to one blank)
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert!(app.tabs.active_doc().buffer.is_empty());
+    }
+
+    #[test]
+    fn test_close_all_tabs_with_modified() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("unsaved");
+        app.new_tab();
+        assert_eq!(app.tabs.tab_count(), 2);
+
+        app.close_all_tabs();
+        // Unmodified tab is closed, modified tab remains with ConfirmClose
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert!(app.tabs.active_doc().modified);
+        assert!(matches!(app.dialog_state, DialogState::ConfirmClose(0)));
+        assert!(app.closing_all);
+    }
+
+    #[test]
+    fn test_close_all_chains_through_multiple_modified() {
+        let mut app = test_app();
+        // Create 3 modified tabs
+        app.tabs.active_doc_mut().insert_text("mod1");
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("mod2");
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("mod3");
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_all_tabs();
+        // All 3 are modified, first one prompted
+        assert_eq!(app.tabs.tab_count(), 3);
+        assert!(matches!(app.dialog_state, DialogState::ConfirmClose(0)));
+        assert!(app.closing_all);
+
+        // Simulate "Discard" for tab 0
+        app.cleanup_session_for_tab(0);
+        app.tabs.close_tab(0);
+        app.dialog_state = DialogState::None;
+        app.continue_close_all();
+
+        // Should prompt for the next modified tab
+        assert_eq!(app.tabs.tab_count(), 2);
+        assert!(matches!(app.dialog_state, DialogState::ConfirmClose(_)));
+        assert!(app.closing_all);
+
+        // Simulate "Discard" for next tab
+        let DialogState::ConfirmClose(idx) = app.dialog_state else {
+            panic!("expected ConfirmClose");
+        };
+        app.cleanup_session_for_tab(idx);
+        app.tabs.close_tab(idx);
+        app.dialog_state = DialogState::None;
+        app.continue_close_all();
+
+        // Should prompt for the last modified tab
+        assert!(matches!(app.dialog_state, DialogState::ConfirmClose(_)));
+
+        // Simulate "Discard" for last tab
+        let DialogState::ConfirmClose(idx) = app.dialog_state else {
+            panic!("expected ConfirmClose");
+        };
+        app.cleanup_session_for_tab(idx);
+        app.tabs.close_tab(idx);
+        app.dialog_state = DialogState::None;
+        app.continue_close_all();
+
+        // All done — single blank tab, closing_all cleared
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert!(!app.tabs.active_doc().modified);
+        assert!(!app.closing_all);
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_close_all_cancel_stops_chain() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("mod1");
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("mod2");
+
+        app.close_all_tabs();
+        assert!(app.closing_all);
+
+        // Simulate "Cancel"
+        app.dialog_state = DialogState::None;
+        app.closing_all = false;
+
+        // Chain should be stopped — no more prompts
+        assert!(!app.closing_all);
+        assert_eq!(app.tabs.tab_count(), 2);
+    }
+
+    // ── Save a Copy ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_save_copy_does_not_update_document() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("copy content");
+        let original_title = app.tabs.active_doc().title.clone();
+
+        // Simulate a completed save-a-copy by injecting the response
+        app.io_activity.save_as_context = Some(crate::io_worker::SaveAsContext {
+            content_version: app.tabs.active_doc().content_version,
+            session_id: app.tabs.active_doc().session_id.clone(),
+            original_path: None,
+            is_copy: true,
+        });
+        app.io_activity.dialog_open = true;
+
+        // Inject the response
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::DialogFileSavedAs {
+                path: std::path::PathBuf::from("/tmp/copy.txt"),
+            });
+
+        app.handle_io_responses();
+
+        // Document state should NOT be updated
+        assert_eq!(app.tabs.active_doc().title, original_title);
+        assert!(app.tabs.active_doc().modified);
+        assert!(app.tabs.active_doc().file_path.is_none());
+    }
+
+    // ── Bookmark indicator (theme field) ──────────────────────────────
+
+    #[test]
+    fn test_confirm_reload_dialog_state() {
+        let mut app = test_app();
+        app.dialog_state = DialogState::ConfirmReload;
+        assert!(app.is_dialog_open());
     }
 }

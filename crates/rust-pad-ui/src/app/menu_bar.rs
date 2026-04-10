@@ -61,12 +61,33 @@ impl App {
                 self.save_as_dialog();
                 ui.close();
             }
+            if ui.button("Save a Copy As...").clicked() {
+                self.save_copy_dialog();
+                ui.close();
+            }
+            ui.separator();
+            let has_file = self.tabs.active_doc().file_path.is_some();
+            if ui
+                .add_enabled(has_file, egui::Button::new("Reload from Disk"))
+                .clicked()
+            {
+                self.request_reload_from_disk();
+                ui.close();
+            }
             ui.separator();
             if ui
                 .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
                 .clicked()
             {
                 self.request_close_tab(self.tabs.active);
+                ui.close();
+            }
+            if ui.button("Close Unchanged Tabs").clicked() {
+                self.close_unchanged_tabs();
+                ui.close();
+            }
+            if ui.button("Close All Tabs").clicked() {
+                self.close_all_tabs();
                 ui.close();
             }
             ui.separator();

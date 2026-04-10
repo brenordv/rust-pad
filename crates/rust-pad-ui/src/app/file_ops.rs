@@ -103,6 +103,7 @@ impl App {
             content_version: doc.content_version,
             session_id: doc.session_id.clone(),
             original_path: doc.file_path.clone(),
+            is_copy: false,
         });
 
         self.io_worker.send(IoRequest::SaveAsDialog {
@@ -134,6 +135,131 @@ impl App {
         } else if idx < self.tabs.tab_count() {
             self.cleanup_session_for_tab(idx);
             self.tabs.close_tab(idx);
+        }
+    }
+
+    /// Requests a reload of the active document from disk.
+    ///
+    /// If the document is modified, prompts for confirmation first.
+    /// If unmodified (or untitled), reloads immediately.
+    pub(crate) fn request_reload_from_disk(&mut self) {
+        let doc = self.tabs.active_doc();
+        if doc.file_path.is_none() {
+            return;
+        }
+        if doc.modified {
+            self.dialog_state = DialogState::ConfirmReload;
+        } else {
+            self.do_reload_from_disk();
+        }
+    }
+
+    /// Performs the actual reload from disk on the active document.
+    pub(crate) fn do_reload_from_disk(&mut self) {
+        let doc = self.tabs.active_doc_mut();
+        if let Err(e) = doc.reload_from_disk(self.max_file_size_bytes) {
+            tracing::error!("Failed to reload from disk: {e:#}");
+        }
+    }
+
+    /// Opens a save-a-copy dialog: saves content to a new path without
+    /// changing the active document's path, title, or modified state.
+    pub(crate) fn save_copy_dialog(&mut self) {
+        if self.io_activity.dialog_open {
+            return;
+        }
+
+        let doc = self.tabs.active_doc();
+        let content = match doc.encode_for_save() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("Failed to encode document: {e:#}");
+                return;
+            }
+        };
+
+        self.io_activity.dialog_open = true;
+        self.io_activity.save_as_context = Some(SaveAsContext {
+            content_version: doc.content_version,
+            session_id: doc.session_id.clone(),
+            original_path: doc.file_path.clone(),
+            is_copy: true,
+        });
+
+        self.io_worker.send(IoRequest::SaveAsDialog {
+            content,
+            suggested_name: doc.title.clone(),
+            start_dir: self.file_dialog.resolve_directory(),
+        });
+    }
+
+    /// Closes all tabs that have no unsaved changes.
+    ///
+    /// Pinned tabs are skipped (when pin support is added).
+    /// Iterates in reverse to keep indices stable.
+    pub(crate) fn close_unchanged_tabs(&mut self) {
+        let mut i = self.tabs.tab_count();
+        while i > 0 {
+            i -= 1;
+            if !self.tabs.documents[i].modified {
+                self.cleanup_session_for_tab(i);
+                self.tabs.close_tab(i);
+            }
+        }
+    }
+
+    /// Closes all tabs except the active one.
+    ///
+    /// Modified tabs are closed without prompting (same as existing "Close Others").
+    pub(crate) fn close_all_but_active(&mut self) {
+        let keep = self.tabs.active;
+        let mut i = self.tabs.tab_count();
+        while i > 0 {
+            i -= 1;
+            if i != keep {
+                self.cleanup_session_for_tab(i);
+                self.tabs.close_tab(i);
+            }
+        }
+        self.tabs.active = 0;
+    }
+
+    /// Closes all tabs: first closes unmodified ones silently, then
+    /// prompts sequentially for each remaining modified tab.
+    pub(crate) fn close_all_tabs(&mut self) {
+        // First pass: close all unmodified tabs silently
+        let mut i = self.tabs.tab_count();
+        while i > 0 {
+            i -= 1;
+            if !self.tabs.documents[i].modified {
+                self.cleanup_session_for_tab(i);
+                self.tabs.close_tab(i);
+            }
+        }
+
+        // If modified tabs remain, enter close-all mode and prompt for the first one
+        if self.tabs.tab_count() > 0 && self.tabs.documents[0].modified {
+            self.closing_all = true;
+            self.tabs.switch_to(0);
+            self.dialog_state = DialogState::ConfirmClose(0);
+        }
+    }
+
+    /// Continues the close-all flow by prompting for the next modified tab.
+    ///
+    /// Called after a ConfirmClose dialog resolves when `closing_all` is true.
+    pub(crate) fn continue_close_all(&mut self) {
+        if !self.closing_all {
+            return;
+        }
+
+        // Find the next modified tab
+        if let Some(idx) = self.tabs.documents.iter().position(|d| d.modified) {
+            self.tabs.switch_to(idx);
+            self.dialog_state = DialogState::ConfirmClose(idx);
+        } else {
+            // No more modified tabs — close-all is complete
+            self.closing_all = false;
         }
     }
 }

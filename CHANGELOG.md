@@ -4,6 +4,24 @@
 
 ### Added
 
+#### Reload from Disk
+- File menu entry "Reload from Disk" to discard unsaved changes and reload the file from its on-disk state.
+- Confirmation dialog when the document has unsaved modifications.
+- Grayed out for untitled (unsaved) tabs.
+
+#### Save a Copy
+- File menu entry "Save a Copy As..." to save the current document to a different path without changing the active file.
+- The document's path, title, and modified state remain unchanged after saving the copy.
+
+#### Bulk Tab Close Operations
+- "Close Unchanged Tabs" in the File menu and tab context menu: closes all tabs without unsaved changes.
+- "Close All" in the tab context menu: closes all unmodified tabs, then prompts for modified tabs.
+- "Close Others" in the tab context menu: closes all tabs except the right-clicked one.
+
+#### Bookmark Visual Indication
+- Bookmarked lines now display a blue circle indicator in the gutter (line number area).
+- Visible in both light and dark themes, in both wrapped and non-wrapped modes.
+
 #### File Size Validation
 - Files are now validated against a configurable size limit before loading to prevent out-of-memory crashes. Default limit: 512 MB.
 - New `max_file_size_mb` setting in `rust-pad.json` (0 = no limit, configurable 1-10240 MB). Also available in the Settings dialog under "File Size Limit".

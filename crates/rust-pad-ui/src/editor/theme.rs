@@ -35,6 +35,7 @@ pub struct EditorTheme {
     pub occurrence_highlight_color: Color32,
     pub matching_bracket_color: Color32,
     pub special_char_color: Color32,
+    pub bookmark_marker_color: Color32,
 }
 
 impl Default for EditorTheme {
@@ -73,6 +74,7 @@ impl EditorTheme {
             occurrence_highlight_color: hex_to_color32(editor.occurrence_highlight_color),
             matching_bracket_color: hex_to_color32(editor.matching_bracket_color),
             special_char_color: hex_to_color32(editor.special_char_color),
+            bookmark_marker_color: Color32::from_rgb(66, 133, 244),
         }
     }
 
