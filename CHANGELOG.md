@@ -22,7 +22,7 @@
 
 #### Drag-and-Drop Tab Reordering
 - Click and hold any tab, then drag horizontally to reorder it in the tab bar. The dragged tab is dimmed in place and a vertical accent-colored indicator shows where it will be dropped on release.
-- Pinned tabs are clamped to the pinned section and unpinned tabs to the unpinned section — drags cannot cross the boundary, preserving the pin/unpin layout.
+- Pinned tabs are clamped to the pinned section and unpinned tabs to the unpinned section: drags cannot cross the boundary, preserving the pin/unpin layout.
 - Pressing `Escape` during a drag cancels it and leaves the tab order unchanged.
 - Moving the pointer vertically out of the tab bar does **not** cancel the drag (accessibility: users who cannot hold a perfectly horizontal line do not lose an in-progress reorder). The drag continues until the mouse button is released or `Escape` is pressed.
 - The active tab always follows its document through the reorder.
