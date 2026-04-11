@@ -4,6 +4,25 @@
 
 ### Added
 
+#### Pin Tabs
+- Right-click any tab → "Pin Tab" / "Unpin Tab" toggle. Pinned tabs are marked with the 📌 pushpin emoji prepended to the title.
+- Pinned tabs are always rendered to the left of unpinned tabs. Pinning a tab moves it to the rightmost slot of the pinned section; unpinning moves it to the leftmost slot of the unpinned section. The active tab follows its document throughout the move.
+- Bulk-close operations skip pinned tabs:
+  - "Close Unchanged Tabs" keeps pinned tabs even if they are unchanged.
+  - "Close Others" keeps pinned tabs other than the right-clicked one.
+  - "Close All" leaves pinned tabs alone (modified or not) and only prompts for unpinned modified tabs.
+- The × button and middle-click still close pinned tabs individually — pinning prevents accidental bulk close, not deliberate per-tab close.
+- Pin state is persisted across app restarts via the session store.
+
+#### Tab Coloring
+- Right-click any tab → "Set Tab Color" submenu with a 9-color palette (Red, Orange, Yellow, Green, Cyan, Blue, Purple, Pink, Gray) plus "Clear Color".
+- A tab with an assigned color always shows its colored accent stripe at the top, even when inactive — useful for visually grouping related tabs at a glance.
+- Inactive tabs without an assigned color still show no accent. Active tabs without an assigned color continue to show the theme accent.
+- Tab color is persisted across app restarts via the session store.
+
+#### One-Time Session Reset on Upgrade
+- Adding pin and color metadata to the session store schema is a breaking change to the bincode-encoded `SessionTabEntry` format. On the first launch after upgrading to v2.0.0, the previous session file will fail to deserialize and the app will start with a fresh, empty session (a warning is logged). Open files will not be reopened automatically that one time. From v2.0.0 onward, the new fields are persisted and restored normally.
+
 #### Reload from Disk
 - File menu entry "Reload from Disk" to discard unsaved changes and reload the file from its on-disk state.
 - Confirmation dialog when the document has unsaved modifications.

@@ -178,13 +178,15 @@ impl App {
 
     /// Closes all tabs that have no unsaved changes.
     ///
-    /// Pinned tabs are skipped (when pin support is added).
-    /// Iterates in reverse to keep indices stable.
+    /// Pinned tabs are always skipped, even if unchanged — the user explicitly
+    /// asked the editor to keep them around. Iterates in reverse to keep
+    /// indices stable.
     pub(crate) fn close_unchanged_tabs(&mut self) {
         let mut i = self.tabs.tab_count();
         while i > 0 {
             i -= 1;
-            if !self.tabs.documents[i].modified {
+            let doc = &self.tabs.documents[i];
+            if !doc.modified && !doc.pinned {
                 self.cleanup_session_for_tab(i);
                 self.tabs.close_tab(i);
             }
@@ -193,38 +195,55 @@ impl App {
 
     /// Closes all tabs except the active one.
     ///
-    /// Modified tabs are closed without prompting (same as existing "Close Others").
+    /// Pinned tabs other than the active one are skipped. Modified tabs are
+    /// closed without prompting (same as existing "Close Others").
+    ///
+    /// Iterates in reverse so removals don't shift indices we still need
+    /// to visit. The active tab is identified by comparing against the
+    /// live `self.tabs.active`, which `TabManager::close_tab` keeps in
+    /// sync after each removal — guaranteeing the originally-active
+    /// document remains active throughout.
     pub(crate) fn close_all_but_active(&mut self) {
-        let keep = self.tabs.active;
         let mut i = self.tabs.tab_count();
         while i > 0 {
             i -= 1;
-            if i != keep {
-                self.cleanup_session_for_tab(i);
-                self.tabs.close_tab(i);
+            if i == self.tabs.active {
+                continue;
             }
+            if self.tabs.documents[i].pinned {
+                continue;
+            }
+            self.cleanup_session_for_tab(i);
+            self.tabs.close_tab(i);
         }
-        self.tabs.active = 0;
     }
 
     /// Closes all tabs: first closes unmodified ones silently, then
-    /// prompts sequentially for each remaining modified tab.
+    /// prompts sequentially for each remaining modified tab. Pinned tabs
+    /// are always skipped.
     pub(crate) fn close_all_tabs(&mut self) {
-        // First pass: close all unmodified tabs silently
+        // First pass: close all unmodified, unpinned tabs silently
         let mut i = self.tabs.tab_count();
         while i > 0 {
             i -= 1;
-            if !self.tabs.documents[i].modified {
+            let doc = &self.tabs.documents[i];
+            if !doc.modified && !doc.pinned {
                 self.cleanup_session_for_tab(i);
                 self.tabs.close_tab(i);
             }
         }
 
-        // If modified tabs remain, enter close-all mode and prompt for the first one
-        if self.tabs.tab_count() > 0 && self.tabs.documents[0].modified {
+        // If modified, unpinned tabs remain, enter close-all mode and prompt
+        // for the first one.
+        if let Some(idx) = self
+            .tabs
+            .documents
+            .iter()
+            .position(|d| d.modified && !d.pinned)
+        {
             self.closing_all = true;
-            self.tabs.switch_to(0);
-            self.dialog_state = DialogState::ConfirmClose(0);
+            self.tabs.switch_to(idx);
+            self.dialog_state = DialogState::ConfirmClose(idx);
         }
     }
 
@@ -236,8 +255,13 @@ impl App {
             return;
         }
 
-        // Find the next modified tab
-        if let Some(idx) = self.tabs.documents.iter().position(|d| d.modified) {
+        // Find the next modified, unpinned tab
+        if let Some(idx) = self
+            .tabs
+            .documents
+            .iter()
+            .position(|d| d.modified && !d.pinned)
+        {
             self.tabs.switch_to(idx);
             self.dialog_state = DialogState::ConfirmClose(idx);
         } else {

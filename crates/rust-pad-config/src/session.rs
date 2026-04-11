@@ -31,12 +31,33 @@ pub fn generate_session_id() -> String {
 }
 
 /// Describes one tab in the session.
+///
+/// Serialization format note: this enum is persisted via **bincode**, which
+/// is a positional binary format with no per-field schema. Adding fields to
+/// existing variants is therefore a breaking change — old session files will
+/// fail to deserialize and the existing corruption handler in
+/// [`SessionStore::load_session`] will discard them, starting fresh. This
+/// trade-off is intentional; documented in `CHANGELOG.md` for v2.0.0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionTabEntry {
     /// A file-backed tab (just needs its path to reopen).
-    File { path: String },
+    File {
+        path: String,
+        /// Whether this tab is pinned.
+        pinned: bool,
+        /// Optional tab color, stored as a stable string identifier (see
+        /// `rust_pad_core::tab_color::TabColor::as_serde_str`). Stored as a
+        /// string rather than the enum so future palette additions don't
+        /// require an enum-tag bump.
+        tab_color: Option<String>,
+    },
     /// An unsaved/untitled tab whose content is stored in the session DB.
-    Unsaved { session_id: String, title: String },
+    Unsaved {
+        session_id: String,
+        title: String,
+        pinned: bool,
+        tab_color: Option<String>,
+    },
 }
 
 /// The full session state: ordered list of tabs + which one was active.
@@ -269,10 +290,14 @@ mod tests {
             tabs: vec![
                 SessionTabEntry::File {
                     path: "/tmp/foo.rs".to_string(),
+                    pinned: true,
+                    tab_color: Some("blue".to_string()),
                 },
                 SessionTabEntry::Unsaved {
                     session_id: "sess-0".to_string(),
                     title: "Untitled".to_string(),
+                    pinned: false,
+                    tab_color: None,
                 },
             ],
             active_tab_index: 1,
@@ -285,13 +310,28 @@ mod tests {
         assert_eq!(loaded.active_tab_index, 1);
 
         match &loaded.tabs[0] {
-            SessionTabEntry::File { path } => assert_eq!(path, "/tmp/foo.rs"),
+            SessionTabEntry::File {
+                path,
+                pinned,
+                tab_color,
+            } => {
+                assert_eq!(path, "/tmp/foo.rs");
+                assert!(*pinned);
+                assert_eq!(tab_color.as_deref(), Some("blue"));
+            }
             _ => panic!("expected File entry"),
         }
         match &loaded.tabs[1] {
-            SessionTabEntry::Unsaved { session_id, title } => {
+            SessionTabEntry::Unsaved {
+                session_id,
+                title,
+                pinned,
+                tab_color,
+            } => {
                 assert_eq!(session_id, "sess-0");
                 assert_eq!(title, "Untitled");
+                assert!(!*pinned);
+                assert!(tab_color.is_none());
             }
             _ => panic!("expected Unsaved entry"),
         }
@@ -338,26 +378,45 @@ mod tests {
     fn test_session_tab_entry_serde() {
         let file_entry = SessionTabEntry::File {
             path: "test.txt".to_string(),
+            pinned: true,
+            tab_color: Some("red".to_string()),
         };
         let unsaved_entry = SessionTabEntry::Unsaved {
             session_id: "sess-42".to_string(),
             title: "My Tab".to_string(),
+            pinned: false,
+            tab_color: None,
         };
 
         // bincode round-trip
         let bytes1 = bincode::serialize(&file_entry).expect("serialize");
         let decoded1: SessionTabEntry = bincode::deserialize(&bytes1).expect("deserialize");
         match decoded1 {
-            SessionTabEntry::File { path } => assert_eq!(path, "test.txt"),
+            SessionTabEntry::File {
+                path,
+                pinned,
+                tab_color,
+            } => {
+                assert_eq!(path, "test.txt");
+                assert!(pinned);
+                assert_eq!(tab_color.as_deref(), Some("red"));
+            }
             _ => panic!("expected File"),
         }
 
         let bytes2 = bincode::serialize(&unsaved_entry).expect("serialize");
         let decoded2: SessionTabEntry = bincode::deserialize(&bytes2).expect("deserialize");
         match decoded2 {
-            SessionTabEntry::Unsaved { session_id, title } => {
+            SessionTabEntry::Unsaved {
+                session_id,
+                title,
+                pinned,
+                tab_color,
+            } => {
                 assert_eq!(session_id, "sess-42");
                 assert_eq!(title, "My Tab");
+                assert!(!pinned);
+                assert!(tab_color.is_none());
             }
             _ => panic!("expected Unsaved"),
         }
@@ -393,6 +452,8 @@ mod tests {
         let data = SessionData {
             tabs: vec![SessionTabEntry::File {
                 path: "/tmp/foo.rs".to_string(),
+                pinned: false,
+                tab_color: None,
             }],
             active_tab_index: 0,
         };

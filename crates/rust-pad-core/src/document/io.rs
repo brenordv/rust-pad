@@ -129,6 +129,8 @@ impl Document {
             cached_max_line_chars: None,
             cached_occurrences: None,
             render_cache: None,
+            pinned: false,
+            tab_color: None,
         })
     }
 

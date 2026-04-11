@@ -21,6 +21,12 @@ enum DeferredTabAction {
     Unchanged,
     /// Close all tabs.
     All,
+    /// Pin the tab at the given index.
+    Pin(usize),
+    /// Unpin the tab at the given index.
+    Unpin(usize),
+    /// Set the tab color (or clear it when `None`) on the tab at the given index.
+    SetTabColor(usize, Option<rust_pad_core::tab_color::TabColor>),
 }
 
 /// Horizontal padding on each side of the tab content.
@@ -131,6 +137,17 @@ impl App {
                     DeferredTabAction::All => {
                         self.close_all_tabs();
                     }
+                    DeferredTabAction::Pin(idx) => {
+                        self.tabs.pin_tab(idx);
+                    }
+                    DeferredTabAction::Unpin(idx) => {
+                        self.tabs.unpin_tab(idx);
+                    }
+                    DeferredTabAction::SetTabColor(idx, color) => {
+                        if idx < self.tabs.documents.len() {
+                            self.tabs.documents[idx].tab_color = color;
+                        }
+                    }
                 }
             }
         });
@@ -150,11 +167,16 @@ impl App {
     ) -> Rect {
         let doc = &self.tabs.documents[idx];
         let is_active = idx == self.tabs.active;
+        let tab_color = doc.tab_color;
 
-        let title = if doc.modified {
-            format!("{} *", doc.title)
-        } else {
-            doc.title.clone()
+        // Title composition: optional pin glyph + title + optional modified marker.
+        // The pushpin emoji (U+1F4CC) renders via NotoEmoji-Regular.ttf which egui
+        // ships in its default font set, so no font setup is required.
+        let title = match (doc.pinned, doc.modified) {
+            (true, true) => format!("\u{1F4CC} {} *", doc.title),
+            (true, false) => format!("\u{1F4CC} {}", doc.title),
+            (false, true) => format!("{} *", doc.title),
+            (false, false) => doc.title.clone(),
         };
 
         // -- Measure title text --
@@ -204,14 +226,26 @@ impl App {
             fill,
         );
 
-        // -- Paint accent line on active tab --
-        if is_active {
+        // -- Paint accent line --
+        // Priority: user-assigned tab color > active theme accent.
+        // A tab with a custom color always shows its accent, even when
+        // inactive. An active tab without a custom color falls back to
+        // the theme accent (existing behavior).
+        let accent_stroke_color = match tab_color {
+            Some(c) => {
+                let [r, g, b] = c.to_rgb();
+                Some(Color32::from_rgb(r, g, b))
+            }
+            None if is_active => Some(self.theme_ctrl.accent_color),
+            None => None,
+        };
+        if let Some(color) = accent_stroke_color {
             painter.line_segment(
                 [
                     egui::Pos2::new(tab_rect.min.x, tab_rect.min.y),
                     egui::Pos2::new(tab_rect.max.x, tab_rect.min.y),
                 ],
-                Stroke::new(2.0, self.theme_ctrl.accent_color),
+                Stroke::new(2.0, color),
             );
         }
 
@@ -370,6 +404,7 @@ impl App {
         tab_to_close: &mut Option<usize>,
         deferred_action: &mut Option<DeferredTabAction>,
     ) {
+        let is_pinned = self.tabs.documents[idx].pinned;
         response.context_menu(|ui| {
             if ui.button("Close").clicked() {
                 *tab_to_close = Some(idx);
@@ -387,6 +422,32 @@ impl App {
                 *deferred_action = Some(DeferredTabAction::All);
                 ui.close();
             }
+            ui.separator();
+            let pin_label = if is_pinned { "Unpin Tab" } else { "Pin Tab" };
+            if ui.button(pin_label).clicked() {
+                *deferred_action = Some(if is_pinned {
+                    DeferredTabAction::Unpin(idx)
+                } else {
+                    DeferredTabAction::Pin(idx)
+                });
+                ui.close();
+            }
+            ui.menu_button("Set Tab Color", |ui| {
+                for variant in rust_pad_core::tab_color::TabColor::ALL {
+                    let [r, g, b] = variant.to_rgb();
+                    let label =
+                        egui::RichText::new(variant.label()).color(Color32::from_rgb(r, g, b));
+                    if ui.button(label).clicked() {
+                        *deferred_action = Some(DeferredTabAction::SetTabColor(idx, Some(variant)));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Clear Color").clicked() {
+                    *deferred_action = Some(DeferredTabAction::SetTabColor(idx, None));
+                    ui.close();
+                }
+            });
         });
     }
 
