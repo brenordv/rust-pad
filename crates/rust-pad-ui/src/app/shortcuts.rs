@@ -102,7 +102,7 @@ impl App {
         }
     }
 
-    /// File operation shortcuts (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+W).
+    /// File operation shortcuts (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+P, Ctrl+W).
     /// Returns `true` if the key was consumed.
     fn handle_file_shortcut(&mut self, key: egui::Key, ctrl: bool, shift: bool) -> bool {
         if !ctrl {
@@ -113,6 +113,11 @@ impl App {
             egui::Key::O => self.open_file_dialog(),
             egui::Key::S if shift => self.save_as_dialog(),
             egui::Key::S => self.save_active(),
+            egui::Key::P => {
+                if self.can_print_active() {
+                    self.request_print();
+                }
+            }
             egui::Key::W => {
                 let active = self.tabs.active;
                 self.request_close_tab(active);

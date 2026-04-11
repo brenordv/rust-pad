@@ -9,6 +9,7 @@ mod file_dialog_state;
 mod file_ops;
 mod live_monitor;
 mod menu_bar;
+mod print;
 mod recent_files;
 mod search;
 mod settings_dialog;
@@ -142,6 +143,19 @@ pub struct App {
     closing_all: bool,
     /// Active tab drag-and-drop state (`None` when no drag is in progress).
     pub(crate) tab_drag: Option<tab_bar::TabDragState>,
+    /// Background worker that renders PDFs for the "Print..." and
+    /// "Export as PDF..." actions.
+    pub(crate) print_worker: print::PrintWorker,
+    /// `true` while a print/export job is in flight. Menu entries, the
+    /// shortcut, and the status bar all gate on this.
+    pub(crate) print_in_progress: bool,
+    /// Whether the PDF pipeline renders a line-number gutter. Persisted
+    /// in `AppConfig::print_show_line_numbers`.
+    pub(crate) print_show_line_numbers: bool,
+    /// Transient status text shown briefly after a print/export
+    /// completed successfully. Cleared the next time the user takes any
+    /// new action.
+    pub(crate) print_last_status: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -162,6 +176,13 @@ pub(crate) enum DialogState {
         message: String,
         /// When true, offer a "recover as UTF-8 (lossy)" option.
         can_recover_utf8: bool,
+    },
+    /// A Print / Export-as-PDF job failed. When `temp_path` is `Some`,
+    /// the PDF was written but the viewer could not be launched; we
+    /// offer a "Reveal in File Manager" button pointing at that file.
+    PrintError {
+        message: String,
+        temp_path: Option<std::path::PathBuf>,
     },
 }
 
@@ -232,6 +253,9 @@ impl App {
 
         let max_file_size_bytes = app_config.max_file_size_bytes();
 
+        // Best-effort cleanup of stale temp PDFs from previous sessions.
+        Self::cleanup_stale_print_temp_files();
+
         Self {
             tabs,
             theme_ctrl,
@@ -284,6 +308,10 @@ impl App {
             prev_tab_count: 0,
             closing_all: false,
             tab_drag: None,
+            print_worker: print::PrintWorker::new(),
+            print_in_progress: false,
+            print_show_line_numbers: app_config.print_show_line_numbers,
+            print_last_status: None,
         }
     }
 
@@ -565,6 +593,7 @@ impl App {
         self.show_confirm_reload_dialog(ctx);
         self.show_confirm_large_file_dialog(ctx);
         self.show_file_open_error_dialog(ctx);
+        self.show_print_error_dialog(ctx);
         self.show_settings_dialog(ctx);
 
         if self.about_open {
@@ -897,6 +926,9 @@ impl eframe::App for App {
         // Process completed background I/O operations
         self.handle_io_responses();
 
+        // Process completed print / export-as-PDF jobs
+        self.handle_print_responses();
+
         // Live file monitoring: check for external changes every second
         self.live_monitor
             .tick(&mut self.tabs, self.max_file_size_bytes);
@@ -1002,6 +1034,7 @@ impl eframe::App for App {
             recent_files: self.recent_files.to_config_strings(),
             max_file_size_mb: self.max_file_size_bytes.map_or(0, |b| b / (1024 * 1024)),
             session_content_max_kb: self.session_content_max_kb,
+            print_show_line_numbers: self.print_show_line_numbers,
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
@@ -1079,6 +1112,10 @@ mod tests {
             prev_tab_count: 0,
             closing_all: false,
             tab_drag: None,
+            print_worker: print::PrintWorker::new(),
+            print_in_progress: false,
+            print_show_line_numbers: true,
+            print_last_status: None,
         }
     }
 

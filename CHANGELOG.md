@@ -4,6 +4,16 @@
 
 ### Added
 
+#### Print / Export as PDF
+- New **File → Print...** entry (Ctrl+P) renders the active document to a temporary PDF and opens it in the system's default PDF viewer, so the user can print from there. Works on Windows, macOS, and Linux with no per-platform configuration.
+- New **File → Export as PDF...** entry uses the same pipeline but writes the PDF to a user-chosen path instead of opening a viewer.
+- PDF output: A4 portrait, monospace (DejaVu Sans Mono, bundled — OFL-compatible license), header with filename + full path + generation timestamp, footer with `Page N of M`, optional line-number gutter.
+- Pagination, tab expansion, CRLF handling, and soft-wrap of very long lines are all correct for documents of any size. Unicode content (Latin supplement, Cyrillic, CJK) renders natively; glyphs not in the bundled font fall back to `.notdef`.
+- PDF generation runs on a dedicated background worker thread so the UI stays responsive during large jobs. A `Generating PDF…` indicator appears in the status bar while a job is in flight, and the menu entries plus shortcut gate on in-flight state to prevent duplicate jobs.
+- On startup, any stale `rust-pad-print-*.pdf` temp files older than 24 hours are cleaned up best-effort.
+- If the default viewer cannot be launched (rare), a "Print / Export Failed" dialog surfaces the error and offers a "Reveal in File Manager" button so the generated PDF is still reachable.
+- New `print_show_line_numbers` config setting (default `true`) controls whether the line-number gutter appears in the generated PDF. Persisted in `rust-pad.json`.
+
 #### Pin Tabs
 - Right-click any tab → "Pin Tab" / "Unpin Tab" toggle. Pinned tabs are marked with the 📌 pushpin emoji prepended to the title.
 - Pinned tabs are always rendered to the left of unpinned tabs. Pinning a tab moves it to the rightmost slot of the pinned section; unpinning moves it to the leftmost slot of the unpinned section. The active tab follows its document throughout the move.
