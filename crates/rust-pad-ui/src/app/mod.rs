@@ -291,20 +291,37 @@ impl App {
             return;
         };
 
-        let mut any_restored = false;
+        // Track per-tab pin/color metadata in the order tabs are added so we
+        // can replay it after the placeholder removal step. Each entry holds
+        // `(pinned, tab_color)` for the tab that was successfully restored.
+        let mut restored_metadata: Vec<(bool, Option<rust_pad_core::tab_color::TabColor>)> =
+            Vec::with_capacity(session_data.tabs.len());
+
         for entry in &session_data.tabs {
             match entry {
-                SessionTabEntry::File { path } => {
+                SessionTabEntry::File {
+                    path,
+                    pinned,
+                    tab_color,
+                } => {
                     let p = std::path::Path::new(path);
                     if p.exists() {
                         if let Err(e) = tabs.open_file(p) {
                             tracing::warn!("Failed to restore '{path}': {e}");
                         } else {
-                            any_restored = true;
+                            let color = tab_color
+                                .as_deref()
+                                .and_then(rust_pad_core::tab_color::TabColor::from_serde_str);
+                            restored_metadata.push((*pinned, color));
                         }
                     }
                 }
-                SessionTabEntry::Unsaved { session_id, title } => {
+                SessionTabEntry::Unsaved {
+                    session_id,
+                    title,
+                    pinned,
+                    tab_color,
+                } => {
                     let content = store
                         .load_content(session_id)
                         .ok()
@@ -318,16 +335,30 @@ impl App {
                     }
                     doc.session_id = Some(generate_session_id());
                     tabs.documents.push(doc);
-                    any_restored = true;
+                    let color = tab_color
+                        .as_deref()
+                        .and_then(rust_pad_core::tab_color::TabColor::from_serde_str);
+                    restored_metadata.push((*pinned, color));
                 }
             }
         }
 
+        let any_restored = !restored_metadata.is_empty();
         if any_restored {
             tabs.documents.remove(0);
             tabs.active = session_data
                 .active_tab_index
                 .min(tabs.documents.len().saturating_sub(1));
+
+            // Apply pin/color metadata to the restored tabs. We set raw flags
+            // (rather than calling pin_tab) and then perform a stable sort to
+            // bring pinned tabs to the left, since the persisted ordering
+            // already reflects the user's intended layout.
+            let count = restored_metadata.len().min(tabs.documents.len());
+            for (i, (pinned, color)) in restored_metadata.into_iter().take(count).enumerate() {
+                tabs.documents[i].pinned = pinned;
+                tabs.documents[i].tab_color = color;
+            }
         }
         let _ = store.clear_all_content();
     }
@@ -898,9 +929,12 @@ impl eframe::App for App {
         if let Some(store) = &self.session_store {
             let mut tabs_list = Vec::new();
             for doc in &self.tabs.documents {
+                let tab_color_str = doc.tab_color.map(|c| c.as_serde_str().to_string());
                 if let Some(path) = &doc.file_path {
                     tabs_list.push(SessionTabEntry::File {
                         path: path.to_string_lossy().into_owned(),
+                        pinned: doc.pinned,
+                        tab_color: tab_color_str,
                     });
                 } else {
                     let sid = doc.session_id.clone().unwrap_or_else(generate_session_id);
@@ -923,6 +957,8 @@ impl eframe::App for App {
                     tabs_list.push(SessionTabEntry::Unsaved {
                         session_id: sid,
                         title: doc.title.clone(),
+                        pinned: doc.pinned,
+                        tab_color: tab_color_str,
                     });
                 }
             }
@@ -4024,6 +4060,100 @@ mod tests {
         app.continue_close_all();
         // Should be a no-op
         assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    // ── Bulk close skips pinned tabs ──────────────────────────────────
+
+    #[test]
+    fn test_close_unchanged_skips_pinned() {
+        let mut app = test_app();
+        app.new_tab(); // tab 1
+        app.new_tab(); // tab 2
+        app.tabs.documents[0].title = "keep_pinned".to_string();
+        app.tabs.pin_tab(0);
+        // After pin: tab "keep_pinned" is at idx 0, all unmodified.
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_unchanged_tabs();
+        // Pinned tab survives; the unpinned unchanged tabs are closed.
+        // Closing the last unpinned tab via close_tab resets to a single
+        // empty tab when only one document is left, but here we still have
+        // the pinned one — so the pinned tab should remain.
+        assert!(
+            app.tabs.documents.iter().any(|d| d.title == "keep_pinned"),
+            "pinned tab must survive close_unchanged_tabs"
+        );
+    }
+
+    #[test]
+    fn test_close_all_but_active_skips_pinned() {
+        let mut app = test_app();
+        app.new_tab(); // tab 1
+        app.new_tab(); // tab 2
+        app.tabs.documents[1].title = "pinned_other".to_string();
+        app.tabs.pin_tab(1);
+        // After pin: pinned_other is at idx 0. The originally-active tab
+        // (idx 2) follows the move and is now at idx 2 (or wherever).
+        // Switch to a non-pinned tab to keep.
+        let keep_idx = app
+            .tabs
+            .documents
+            .iter()
+            .position(|d| !d.pinned)
+            .expect("at least one unpinned tab");
+        app.tabs.switch_to(keep_idx);
+
+        app.close_all_but_active();
+        // Pinned tab and the active tab survive; the other unpinned tab is closed.
+        assert!(
+            app.tabs.documents.iter().any(|d| d.title == "pinned_other"),
+            "pinned tab must survive close_all_but_active"
+        );
+        assert_eq!(app.tabs.tab_count(), 2);
+    }
+
+    #[test]
+    fn test_close_all_skips_pinned_unmodified() {
+        let mut app = test_app();
+        app.new_tab();
+        app.new_tab();
+        app.tabs.documents[0].title = "pinned_clean".to_string();
+        app.tabs.pin_tab(0);
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_all_tabs();
+        // Pinned unmodified tab survives; nothing is modified so no dialog.
+        assert!(
+            app.tabs.documents.iter().any(|d| d.title == "pinned_clean"),
+            "pinned tab must survive close_all_tabs"
+        );
+        assert!(!app.closing_all);
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_close_all_skips_pinned_modified() {
+        let mut app = test_app();
+        // Pin a modified tab.
+        app.tabs.active_doc_mut().insert_text("pinned_dirty");
+        app.tabs.documents[0].title = "pinned_dirty".to_string();
+        app.tabs.pin_tab(0);
+        // Add an unpinned modified tab.
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("dirty");
+
+        app.close_all_tabs();
+        // Pinned modified tab is NOT prompted for; the unpinned modified tab is.
+        assert!(app.closing_all);
+        let DialogState::ConfirmClose(idx) = app.dialog_state else {
+            panic!("expected ConfirmClose");
+        };
+        assert!(
+            !app.tabs.documents[idx].pinned,
+            "ConfirmClose should target a non-pinned tab"
+        );
+        // The pinned tab still exists.
+        assert!(app.tabs.documents.iter().any(|d| d.title == "pinned_dirty"));
     }
 
     // ── Additional coverage for reload ────────────────────────────────

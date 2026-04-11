@@ -10,10 +10,14 @@ fn test_session_store_save_load_round_trip() {
         tabs: vec![
             SessionTabEntry::File {
                 path: "/home/user/file.rs".to_string(),
+                pinned: false,
+                tab_color: None,
             },
             SessionTabEntry::Unsaved {
                 session_id: "sess-0".to_string(),
                 title: "Untitled".to_string(),
+                pinned: false,
+                tab_color: None,
             },
         ],
         active_tab_index: 1,
@@ -29,7 +33,7 @@ fn test_session_store_save_load_round_trip() {
     assert_eq!(loaded.tabs.len(), 2);
     assert_eq!(loaded.active_tab_index, 1);
     match &loaded.tabs[0] {
-        SessionTabEntry::File { path } => assert_eq!(path, "/home/user/file.rs"),
+        SessionTabEntry::File { path, .. } => assert_eq!(path, "/home/user/file.rs"),
         _ => panic!("expected File entry"),
     }
 }
@@ -65,6 +69,8 @@ fn test_session_store_overwrite_session() {
     let data1 = SessionData {
         tabs: vec![SessionTabEntry::File {
             path: "old.rs".to_string(),
+            pinned: false,
+            tab_color: None,
         }],
         active_tab_index: 0,
     };
@@ -75,9 +81,13 @@ fn test_session_store_overwrite_session() {
         tabs: vec![
             SessionTabEntry::File {
                 path: "new1.rs".to_string(),
+                pinned: false,
+                tab_color: None,
             },
             SessionTabEntry::File {
                 path: "new2.rs".to_string(),
+                pinned: false,
+                tab_color: None,
             },
         ],
         active_tab_index: 1,
@@ -156,6 +166,8 @@ fn test_session_store_clear_all_content() {
     let data = SessionData {
         tabs: vec![SessionTabEntry::File {
             path: "test.rs".to_string(),
+            pinned: false,
+            tab_color: None,
         }],
         active_tab_index: 0,
     };
@@ -178,10 +190,14 @@ fn test_session_store_full_workflow() {
             tabs: vec![
                 SessionTabEntry::File {
                     path: "main.rs".to_string(),
+                    pinned: true,
+                    tab_color: Some("green".to_string()),
                 },
                 SessionTabEntry::Unsaved {
                     session_id: sid.clone(),
                     title: "Untitled 2".to_string(),
+                    pinned: false,
+                    tab_color: None,
                 },
             ],
             active_tab_index: 0,
@@ -201,11 +217,24 @@ fn test_session_store_full_workflow() {
         // Restore content for unsaved tabs
         for tab in &session.tabs {
             match tab {
-                SessionTabEntry::File { path } => {
+                SessionTabEntry::File {
+                    path,
+                    pinned,
+                    tab_color,
+                } => {
                     assert_eq!(path, "main.rs");
+                    assert!(*pinned);
+                    assert_eq!(tab_color.as_deref(), Some("green"));
                 }
-                SessionTabEntry::Unsaved { session_id, title } => {
+                SessionTabEntry::Unsaved {
+                    session_id,
+                    title,
+                    pinned,
+                    tab_color,
+                } => {
                     assert_eq!(title, "Untitled 2");
+                    assert!(!*pinned);
+                    assert!(tab_color.is_none());
                     let content = store.load_content(session_id).unwrap().unwrap();
                     assert_eq!(content, "unsaved content here");
                 }

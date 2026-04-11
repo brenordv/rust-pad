@@ -123,6 +123,11 @@ pub struct Document {
     /// Typed as `Box<dyn Any + Send>` so that the core crate doesn't depend on egui types.
     /// The UI layer downcasts this to its concrete `RenderCache` struct.
     pub render_cache: Option<Box<dyn std::any::Any + Send>>,
+    /// Whether this tab is pinned. Pinned tabs are excluded from bulk-close
+    /// operations and are always rendered to the left of unpinned tabs.
+    pub pinned: bool,
+    /// Optional user-assigned color used to highlight the tab in the tab bar.
+    pub tab_color: Option<crate::tab_color::TabColor>,
 }
 
 impl std::fmt::Debug for Document {
@@ -191,6 +196,8 @@ impl Document {
             cached_max_line_chars: None,
             cached_occurrences: None,
             render_cache: None,
+            pinned: false,
+            tab_color: None,
         }
     }
 

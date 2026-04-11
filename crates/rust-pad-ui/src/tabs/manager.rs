@@ -218,6 +218,74 @@ impl TabManager {
         self.documents.len()
     }
 
+    /// Returns the number of pinned tabs.
+    ///
+    /// Pinned tabs are always kept at the start of `documents`, so this is
+    /// equivalent to the index of the first unpinned tab (or `tab_count()`
+    /// if every tab is pinned).
+    pub fn pinned_count(&self) -> usize {
+        self.documents
+            .iter()
+            .position(|d| !d.pinned)
+            .unwrap_or(self.documents.len())
+    }
+
+    /// Pins the tab at `idx`. The tab is moved to the rightmost position
+    /// among pinned tabs and `self.active` is updated to track whichever
+    /// document was active before the call.
+    ///
+    /// No-op if `idx` is out of range or the tab is already pinned.
+    pub fn pin_tab(&mut self, idx: usize) {
+        if idx >= self.documents.len() || self.documents[idx].pinned {
+            return;
+        }
+        self.documents[idx].pinned = true;
+        // The total number of pinned tabs (including the one we just
+        // flipped) tells us how big the pinned section will be after the
+        // move. The new tab goes to the last slot of that section.
+        let total_pinned = self.documents.iter().filter(|d| d.pinned).count();
+        let target = total_pinned - 1;
+        self.move_tab_preserving_active(idx, target);
+    }
+
+    /// Unpins the tab at `idx`. The tab is moved to the leftmost position
+    /// among unpinned tabs and `self.active` is updated to track whichever
+    /// document was active before the call.
+    ///
+    /// No-op if `idx` is out of range or the tab is not pinned.
+    pub fn unpin_tab(&mut self, idx: usize) {
+        if idx >= self.documents.len() || !self.documents[idx].pinned {
+            return;
+        }
+        self.documents[idx].pinned = false;
+        // The remaining pinned count tells us where the unpinned section
+        // starts after the move. The newly-unpinned tab goes there.
+        let total_pinned = self.documents.iter().filter(|d| d.pinned).count();
+        let target = total_pinned;
+        self.move_tab_preserving_active(idx, target);
+    }
+
+    /// Moves a tab from `from` to `to` while keeping `self.active` pointing
+    /// at the same `Document` it pointed to before the move.
+    fn move_tab_preserving_active(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.documents.len() || to >= self.documents.len() {
+            return;
+        }
+        let doc = self.documents.remove(from);
+        self.documents.insert(to, doc);
+
+        // Track which Document the active index pointed to.
+        if self.active == from {
+            self.active = to;
+        } else if from < self.active && to >= self.active {
+            // Tab moved past the active position from the left.
+            self.active -= 1;
+        } else if from > self.active && to <= self.active {
+            // Tab moved past the active position from the right.
+            self.active += 1;
+        }
+    }
+
     /// Flushes undo history for all open documents to disk.
     pub fn flush_all_history(&mut self) {
         for doc in &mut self.documents {
@@ -644,6 +712,131 @@ mod tests {
         assert_eq!(tm.active, 1); // switched to existing
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Pin / unpin ─────────────────────────────────────────────────
+
+    /// Builds a tab manager with `n` named tabs (no real files).
+    fn make_n_tabs(n: usize) -> TabManager {
+        let mut tm = TabManager::new();
+        tm.documents[0].title = "tab0".to_string();
+        for i in 1..n {
+            tm.new_tab();
+            tm.documents[i].title = format!("tab{i}");
+        }
+        tm
+    }
+
+    #[test]
+    fn test_pinned_count_default_zero() {
+        let tm = make_n_tabs(3);
+        assert_eq!(tm.pinned_count(), 0);
+    }
+
+    #[test]
+    fn test_pin_tab_moves_to_pinned_section_end() {
+        let mut tm = make_n_tabs(4);
+        // Pin tab 2 ("tab2") — should move to index 0 (no pinned yet).
+        tm.pin_tab(2);
+        assert_eq!(tm.pinned_count(), 1);
+        assert_eq!(tm.documents[0].title, "tab2");
+        assert!(tm.documents[0].pinned);
+        // Pin tab 3 ("tab3", now at index 3) — should move to index 1.
+        tm.pin_tab(3);
+        assert_eq!(tm.pinned_count(), 2);
+        assert_eq!(tm.documents[0].title, "tab2");
+        assert_eq!(tm.documents[1].title, "tab3");
+        assert!(tm.documents[1].pinned);
+    }
+
+    #[test]
+    fn test_unpin_tab_moves_to_unpinned_section_start() {
+        let mut tm = make_n_tabs(4);
+        tm.pin_tab(0); // tab0 → index 0 (pinned)
+        tm.pin_tab(2); // tab2 → index 1 (pinned). Order: [tab0*, tab2*, tab1, tab3]
+        assert_eq!(tm.pinned_count(), 2);
+
+        // Unpin tab0 (idx 0) — should move to leftmost unpinned position (idx 1).
+        tm.unpin_tab(0);
+        assert_eq!(tm.pinned_count(), 1);
+        assert_eq!(tm.documents[0].title, "tab2");
+        assert_eq!(tm.documents[1].title, "tab0");
+        assert!(!tm.documents[1].pinned);
+    }
+
+    #[test]
+    fn test_pin_tab_idempotent() {
+        let mut tm = make_n_tabs(3);
+        tm.pin_tab(1);
+        let snapshot: Vec<_> = tm.documents.iter().map(|d| d.title.clone()).collect();
+        tm.pin_tab(0); // already pinned (was tab1, now at idx 0)
+        let after: Vec<_> = tm.documents.iter().map(|d| d.title.clone()).collect();
+        assert_eq!(snapshot, after);
+        assert_eq!(tm.pinned_count(), 1);
+    }
+
+    #[test]
+    fn test_unpin_tab_idempotent() {
+        let mut tm = make_n_tabs(3);
+        // Unpin a tab that isn't pinned — no-op.
+        tm.unpin_tab(1);
+        assert_eq!(tm.pinned_count(), 0);
+        assert!(!tm.documents[1].pinned);
+    }
+
+    #[test]
+    fn test_pin_tab_out_of_range_noop() {
+        let mut tm = make_n_tabs(2);
+        tm.pin_tab(99);
+        assert_eq!(tm.pinned_count(), 0);
+    }
+
+    #[test]
+    fn test_pinning_active_tab_keeps_same_document_active() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(2); // active = "tab2"
+        tm.pin_tab(2);
+        // After pin, "tab2" should be at index 0 and still active.
+        assert_eq!(tm.documents[tm.active].title, "tab2");
+        assert_eq!(tm.active, 0);
+    }
+
+    #[test]
+    fn test_pinning_non_active_tab_after_active_keeps_same_document() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(1); // active = "tab1"
+        tm.pin_tab(3); // pin a tab to the right of active
+                       // tab1 was not moved; tab3 jumped to idx 0; so active should now be 2.
+        assert_eq!(tm.documents[tm.active].title, "tab1");
+    }
+
+    #[test]
+    fn test_pinning_non_active_tab_before_active_keeps_same_document() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(2); // active = "tab2"
+        tm.pin_tab(0); // pin tab0 — already at idx 0, so move is a no-op.
+        assert_eq!(tm.documents[tm.active].title, "tab2");
+    }
+
+    #[test]
+    fn test_unpinning_active_tab_keeps_same_document_active() {
+        let mut tm = make_n_tabs(4);
+        tm.pin_tab(0);
+        tm.pin_tab(1); // both pinned at indices 0..2
+        tm.switch_to(0); // active = "tab0" (pinned)
+        tm.unpin_tab(0);
+        // "tab0" should now be at index 1 (start of unpinned section) and still active.
+        assert_eq!(tm.documents[tm.active].title, "tab0");
+        assert_eq!(tm.active, 1);
+    }
+
+    #[test]
+    fn test_pinned_count_all_pinned() {
+        let mut tm = make_n_tabs(3);
+        tm.pin_tab(0);
+        tm.pin_tab(1);
+        tm.pin_tab(2);
+        assert_eq!(tm.pinned_count(), 3);
     }
 
     #[test]
