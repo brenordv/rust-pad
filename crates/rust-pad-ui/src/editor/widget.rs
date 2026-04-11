@@ -1789,8 +1789,10 @@ mod tests {
 
     #[test]
     fn syntax_path_with_file_path() {
-        let mut doc = Document::default();
-        doc.file_path = Some(std::path::PathBuf::from("/tmp/test.rs"));
+        let mut doc = Document {
+            file_path: Some(std::path::PathBuf::from("/tmp/test.rs")),
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
         let result = widget.syntax_path();
@@ -1799,8 +1801,10 @@ mod tests {
 
     #[test]
     fn syntax_path_with_titled_extension() {
-        let mut doc = Document::default();
-        doc.title = "Untitled.py".to_string();
+        let mut doc = Document {
+            title: "Untitled.py".to_string(),
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
         let result = widget.syntax_path();
@@ -1809,8 +1813,10 @@ mod tests {
 
     #[test]
     fn syntax_path_without_extension() {
-        let mut doc = Document::default();
-        doc.title = "Untitled".to_string();
+        let mut doc = Document {
+            title: "Untitled".to_string(),
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
         assert!(widget.syntax_path().is_none());
@@ -1818,9 +1824,11 @@ mod tests {
 
     #[test]
     fn syntax_path_file_path_takes_priority() {
-        let mut doc = Document::default();
-        doc.file_path = Some(std::path::PathBuf::from("/tmp/test.rs"));
-        doc.title = "something.py".to_string();
+        let mut doc = Document {
+            file_path: Some(std::path::PathBuf::from("/tmp/test.rs")),
+            title: "something.py".to_string(),
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
         let result = widget.syntax_path();
@@ -1831,10 +1839,12 @@ mod tests {
 
     #[test]
     fn ensure_cursor_visible_scrolls_down() {
-        let mut doc = Document::default();
-        doc.buffer = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into();
+        let mut doc = Document {
+            buffer: "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into(),
+            scroll_y: 0.0,
+            ..Default::default()
+        };
         doc.cursor.position = Position::new(9, 0);
-        doc.scroll_y = 0.0;
         let theme = EditorTheme::default();
         let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
         widget.ensure_cursor_visible(5, 100.0, 10.0, None);
@@ -1843,10 +1853,12 @@ mod tests {
 
     #[test]
     fn ensure_cursor_visible_scrolls_up() {
-        let mut doc = Document::default();
-        doc.buffer = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into();
+        let mut doc = Document {
+            buffer: "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into(),
+            scroll_y: 5.0,
+            ..Default::default()
+        };
         doc.cursor.position = Position::new(0, 0);
-        doc.scroll_y = 5.0;
         let theme = EditorTheme::default();
         let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
         widget.ensure_cursor_visible(5, 100.0, 10.0, None);
@@ -1855,10 +1867,12 @@ mod tests {
 
     #[test]
     fn ensure_cursor_visible_horizontal_scroll_right() {
-        let mut doc = Document::default();
-        doc.buffer = "abcdefghijklmnopqrstuvwxyz".into();
+        let mut doc = Document {
+            buffer: "abcdefghijklmnopqrstuvwxyz".into(),
+            scroll_x: 0.0,
+            ..Default::default()
+        };
         doc.cursor.position = Position::new(0, 25);
-        doc.scroll_x = 0.0;
         let theme = EditorTheme::default();
         let char_width = 10.0;
         let text_width = 100.0; // only 10 chars visible
@@ -1869,10 +1883,12 @@ mod tests {
 
     #[test]
     fn ensure_cursor_visible_horizontal_scroll_left() {
-        let mut doc = Document::default();
-        doc.buffer = "abcdefghijklmnopqrstuvwxyz".into();
+        let mut doc = Document {
+            buffer: "abcdefghijklmnopqrstuvwxyz".into(),
+            scroll_x: 100.0,
+            ..Default::default()
+        };
         doc.cursor.position = Position::new(0, 0);
-        doc.scroll_x = 100.0;
         let theme = EditorTheme::default();
         let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
         widget.ensure_cursor_visible(10, 200.0, 10.0, None);
@@ -1881,9 +1897,11 @@ mod tests {
 
     #[test]
     fn ensure_cursor_visible_wrap_mode_resets_scroll_x() {
-        let mut doc = Document::default();
-        doc.buffer = "hello world".into();
-        doc.scroll_x = 50.0;
+        let mut doc = Document {
+            buffer: "hello world".into(),
+            scroll_x: 50.0,
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let wm = WrapMap::build(&doc, 5);
         let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
@@ -1985,10 +2003,12 @@ mod tests {
 
     #[test]
     fn screen_to_position_basic() {
-        let mut doc = Document::default();
-        doc.buffer = "hello\nworld\n".into();
-        doc.scroll_y = 0.0;
-        doc.scroll_x = 0.0;
+        let mut doc = Document {
+            buffer: "hello\nworld\n".into(),
+            scroll_y: 0.0,
+            scroll_x: 0.0,
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
 
@@ -2009,10 +2029,12 @@ mod tests {
 
     #[test]
     fn screen_to_position_second_line() {
-        let mut doc = Document::default();
-        doc.buffer = "hello\nworld\n".into();
-        doc.scroll_y = 0.0;
-        doc.scroll_x = 0.0;
+        let mut doc = Document {
+            buffer: "hello\nworld\n".into(),
+            scroll_y: 0.0,
+            scroll_x: 0.0,
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
 
@@ -2033,9 +2055,11 @@ mod tests {
 
     #[test]
     fn screen_to_position_far_below_returns_large_line() {
-        let mut doc = Document::default();
-        doc.buffer = "hello\n".into();
-        doc.scroll_y = 0.0;
+        let mut doc = Document {
+            buffer: "hello\n".into(),
+            scroll_y: 0.0,
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
 
@@ -2050,8 +2074,10 @@ mod tests {
 
     #[test]
     fn is_position_in_selection_no_selection() {
-        let mut doc = Document::default();
-        doc.buffer = "hello world".into();
+        let mut doc = Document {
+            buffer: "hello world".into(),
+            ..Default::default()
+        };
         doc.cursor.position = Position::new(0, 3);
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
@@ -2060,8 +2086,10 @@ mod tests {
 
     #[test]
     fn is_position_in_selection_inside() {
-        let mut doc = Document::default();
-        doc.buffer = "hello world".into();
+        let mut doc = Document {
+            buffer: "hello world".into(),
+            ..Default::default()
+        };
         doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
@@ -2072,8 +2100,10 @@ mod tests {
 
     #[test]
     fn is_position_in_selection_outside() {
-        let mut doc = Document::default();
-        doc.buffer = "hello world".into();
+        let mut doc = Document {
+            buffer: "hello world".into(),
+            ..Default::default()
+        };
         doc.cursor.move_to(Position::new(0, 0), &doc.buffer);
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
@@ -2084,8 +2114,10 @@ mod tests {
 
     #[test]
     fn is_position_in_selection_at_boundary_start() {
-        let mut doc = Document::default();
-        doc.buffer = "hello world".into();
+        let mut doc = Document {
+            buffer: "hello world".into(),
+            ..Default::default()
+        };
         doc.cursor.move_to(Position::new(0, 2), &doc.buffer);
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(0, 7), &doc.buffer);
@@ -2097,8 +2129,10 @@ mod tests {
 
     #[test]
     fn is_position_in_selection_at_boundary_end() {
-        let mut doc = Document::default();
-        doc.buffer = "hello world".into();
+        let mut doc = Document {
+            buffer: "hello world".into(),
+            ..Default::default()
+        };
         doc.cursor.move_to(Position::new(0, 2), &doc.buffer);
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(0, 7), &doc.buffer);
@@ -2110,8 +2144,10 @@ mod tests {
 
     #[test]
     fn is_position_in_selection_secondary_cursor() {
-        let mut doc = Document::default();
-        doc.buffer = "hello world foo".into();
+        let mut doc = Document {
+            buffer: "hello world foo".into(),
+            ..Default::default()
+        };
         // Primary cursor: no selection
         doc.cursor.position = Position::new(0, 0);
         // Secondary cursor: selects "world" (6..11)
@@ -2130,8 +2166,10 @@ mod tests {
 
     #[test]
     fn is_position_in_selection_multiline() {
-        let mut doc = Document::default();
-        doc.buffer = "hello\nworld\nfoo".into();
+        let mut doc = Document {
+            buffer: "hello\nworld\nfoo".into(),
+            ..Default::default()
+        };
         doc.cursor.move_to(Position::new(0, 2), &doc.buffer);
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(1, 3), &doc.buffer);
