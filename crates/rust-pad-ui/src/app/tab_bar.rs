@@ -60,6 +60,112 @@ const ARROW_BUTTON_WIDTH: f32 = 20.0;
 /// Width of the vertical insertion indicator drawn between tabs while dragging.
 const DRAG_INDICATOR_WIDTH: f32 = 3.0;
 
+/// Returns the `[start, end)` index range for the drag section that contains
+/// `source_idx`.
+///
+/// Pinned tabs occupy `0..pinned_count`; unpinned tabs occupy
+/// `pinned_count..tab_count`. Drag-and-drop reorders are clamped to the
+/// source tab's own section so pinned and unpinned tabs cannot cross the
+/// boundary.
+fn drag_section(source_idx: usize, pinned_count: usize, tab_count: usize) -> (usize, usize) {
+    if source_idx < pinned_count {
+        (0, pinned_count)
+    } else {
+        (pinned_count, tab_count)
+    }
+}
+
+/// Computes the target `insert_idx` for a tab drag, given the pointer's
+/// current x coordinate.
+///
+/// The result is the argument that should be passed to
+/// [`TabManager::move_tab`]: it is the index the dragged tab will occupy in
+/// the vector *after* the move, counted as if the source tab had already
+/// been removed. The result is clamped to `[section_start, section_end - 1]`.
+///
+/// The algorithm counts how many non-source tabs in the source's section
+/// have their centers to the left of the pointer; that count, offset by
+/// `section_start`, is the insert index.
+fn compute_insert_idx(
+    tab_rects: &[Rect],
+    source_idx: usize,
+    section_start: usize,
+    section_end: usize,
+    pointer_x: f32,
+) -> usize {
+    let mut left_count = 0usize;
+    for (i, rect) in tab_rects
+        .iter()
+        .enumerate()
+        .take(section_end)
+        .skip(section_start)
+    {
+        if i == source_idx {
+            continue;
+        }
+        if rect.center().x < pointer_x {
+            left_count += 1;
+        }
+    }
+    section_start + left_count
+}
+
+/// Computes the screen-x position where the vertical insertion indicator
+/// should be drawn for the given `insert_idx`.
+///
+/// The indicator sits at the gap between two tabs in the *post-removal*
+/// list. This function translates that back to the current (source-still-
+/// in-place) `tab_rects` layout so the line can be drawn without mutating
+/// the tab vector.
+///
+/// Falls back to the source tab's left edge when the section contains only
+/// the source tab; callers typically skip drawing the indicator entirely in
+/// that case.
+fn compute_drag_indicator_x(
+    tab_rects: &[Rect],
+    source_idx: usize,
+    section_start: usize,
+    section_end: usize,
+    insert_idx: usize,
+) -> f32 {
+    // Walk the non-source tabs in order; the `left_count`-th gap lies
+    // immediately to the left of the (left_count)-th non-source tab.
+    let left_count = insert_idx.saturating_sub(section_start);
+    let mut seen = 0usize;
+    for (i, rect) in tab_rects
+        .iter()
+        .enumerate()
+        .take(section_end)
+        .skip(section_start)
+    {
+        if i == source_idx {
+            continue;
+        }
+        if seen == left_count {
+            return rect.min.x;
+        }
+        seen += 1;
+    }
+    // Pointer is past every non-source tab — draw at the right edge of the
+    // last non-source tab in the section.
+    for (i, rect) in tab_rects
+        .iter()
+        .enumerate()
+        .take(section_end)
+        .skip(section_start)
+        .rev()
+    {
+        if i != source_idx {
+            return rect.max.x;
+        }
+    }
+    // Fallback: the section contains only the source tab.
+    tab_rects
+        .get(source_idx)
+        .map(|r| r.min.x)
+        .unwrap_or_default()
+}
+
 impl App {
     /// Renders the tab bar with active tab highlighting, close buttons,
     /// and horizontal scrolling when tabs overflow.
@@ -420,11 +526,8 @@ impl App {
         // Clamp the insert range to the section the source tab belongs to,
         // so pinned tabs cannot cross into the unpinned area and vice versa.
         let pinned_count = self.tabs.pinned_count();
-        let (section_start, section_end) = if drag.source_idx < pinned_count {
-            (0usize, pinned_count)
-        } else {
-            (pinned_count, tab_rects.len())
-        };
+        let (section_start, section_end) =
+            drag_section(drag.source_idx, pinned_count, tab_rects.len());
 
         // Read the latest pointer position. `latest_pos` survives the
         // pointer leaving any widget, which is exactly what we need for the
@@ -434,25 +537,13 @@ impl App {
             .map(|p| p.x)
             .unwrap_or(tab_rects[drag.source_idx].center().x);
 
-        // Count non-source tabs in the section whose centers lie to the
-        // left of the pointer. `left_count` becomes the offset into the
-        // post-removal section, which equals the target `insert_idx`
-        // argument to `TabManager::move_tab`.
-        let mut left_count = 0usize;
-        for (i, rect) in tab_rects
-            .iter()
-            .enumerate()
-            .take(section_end)
-            .skip(section_start)
-        {
-            if i == drag.source_idx {
-                continue;
-            }
-            if rect.center().x < pointer_x {
-                left_count += 1;
-            }
-        }
-        let new_insert_idx = section_start + left_count;
+        let new_insert_idx = compute_insert_idx(
+            tab_rects,
+            drag.source_idx,
+            section_start,
+            section_end,
+            pointer_x,
+        );
 
         // Persist the latest insert target so the next frame still knows
         // where the drop would land if the pointer stops moving.
@@ -466,7 +557,7 @@ impl App {
         let section_len_excluding_source =
             section_end.saturating_sub(section_start).saturating_sub(1);
         if section_len_excluding_source > 0 {
-            let indicator_x = self.compute_drag_indicator_x(
+            let indicator_x = compute_drag_indicator_x(
                 tab_rects,
                 drag.source_idx,
                 section_start,
@@ -500,50 +591,6 @@ impl App {
                 self.tab_drag = None;
             }
         }
-    }
-
-    /// Computes the screen-x position where the vertical insertion
-    /// indicator should be drawn for the given `insert_idx`.
-    ///
-    /// The indicator is drawn at the gap between two tabs in the *post-
-    /// removal* list. We translate that back to the current (source-still-
-    /// in-place) `tab_rects` layout.
-    fn compute_drag_indicator_x(
-        &self,
-        tab_rects: &[Rect],
-        source_idx: usize,
-        section_start: usize,
-        section_end: usize,
-        insert_idx: usize,
-    ) -> f32 {
-        // Walk the non-source tabs in order; the `left_count`-th gap lies
-        // immediately to the left of the (left_count)-th non-source tab.
-        let left_count = insert_idx - section_start;
-        let mut seen = 0usize;
-        for (i, rect) in tab_rects
-            .iter()
-            .enumerate()
-            .take(section_end)
-            .skip(section_start)
-        {
-            if i == source_idx {
-                continue;
-            }
-            if seen == left_count {
-                return rect.min.x;
-            }
-            seen += 1;
-        }
-        // Pointer is past every non-source tab — draw at the right edge of
-        // the last non-source tab in the section.
-        for i in (section_start..section_end).rev() {
-            if i != source_idx {
-                return tab_rects[i].max.x;
-            }
-        }
-        // Fallback: section only contains the source tab. Shouldn't be
-        // reached because process_tab_drag skips the indicator in that case.
-        tab_rects[source_idx].min.x
     }
 
     /// Adjusts the scroll offset so that `target_rect` (in scroll content
@@ -706,5 +753,211 @@ impl App {
                 self.new_tab();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Pos2, Rect};
+
+    /// Builds `count` non-overlapping tab rects of width 100 at y=0..32.
+    /// Tab `i` occupies x in `[i * 100, i * 100 + 100)`, so its center is at
+    /// `i * 100 + 50`.
+    fn rects(count: usize) -> Vec<Rect> {
+        (0..count)
+            .map(|i| {
+                Rect::from_min_max(
+                    Pos2::new(i as f32 * 100.0, 0.0),
+                    Pos2::new(i as f32 * 100.0 + 100.0, 32.0),
+                )
+            })
+            .collect()
+    }
+
+    // ── drag_section ────────────────────────────────────────────────
+
+    #[test]
+    fn drag_section_no_pinned_covers_full_range() {
+        // 4 tabs, none pinned → section is the whole bar for any source.
+        assert_eq!(drag_section(0, 0, 4), (0, 4));
+        assert_eq!(drag_section(3, 0, 4), (0, 4));
+    }
+
+    #[test]
+    fn drag_section_all_pinned_covers_full_range() {
+        // 4 tabs, all pinned → section is the whole bar for any source.
+        assert_eq!(drag_section(0, 4, 4), (0, 4));
+        assert_eq!(drag_section(3, 4, 4), (0, 4));
+    }
+
+    #[test]
+    fn drag_section_pinned_source_uses_pinned_section() {
+        // 5 tabs, 2 pinned. Source in pinned section → range = [0, 2).
+        assert_eq!(drag_section(0, 2, 5), (0, 2));
+        assert_eq!(drag_section(1, 2, 5), (0, 2));
+    }
+
+    #[test]
+    fn drag_section_unpinned_source_uses_unpinned_section() {
+        // 5 tabs, 2 pinned. Source in unpinned section → range = [2, 5).
+        assert_eq!(drag_section(2, 2, 5), (2, 5));
+        assert_eq!(drag_section(4, 2, 5), (2, 5));
+    }
+
+    // ── compute_insert_idx ──────────────────────────────────────────
+
+    #[test]
+    fn insert_idx_left_of_everything_returns_section_start() {
+        let r = rects(4);
+        // Pointer far to the left of tab 0; source = 2.
+        // Section = [0, 4). No non-source tabs with center < pointer.
+        assert_eq!(compute_insert_idx(&r, 2, 0, 4, -50.0), 0);
+    }
+
+    #[test]
+    fn insert_idx_right_of_everything_returns_section_end_minus_one() {
+        let r = rects(4);
+        // Pointer far to the right of tab 3; source = 0.
+        // After removing source, 3 non-source tabs remain; all have center
+        // < pointer → left_count = 3 → insert_idx = section_start + 3 = 3.
+        assert_eq!(compute_insert_idx(&r, 0, 0, 4, 9999.0), 3);
+    }
+
+    #[test]
+    fn insert_idx_pointer_between_neighbors_picks_left_count() {
+        let r = rects(4);
+        // Source = 0 (removed from count). Tabs 1,2,3 have centers 150,250,350.
+        // Pointer at 200: tab 1 center (150) < 200, tab 2 (250) ≥ 200, tab 3 same.
+        // left_count = 1 → insert_idx = 1.
+        assert_eq!(compute_insert_idx(&r, 0, 0, 4, 200.0), 1);
+    }
+
+    #[test]
+    fn insert_idx_source_exclusion_prevents_self_count() {
+        let r = rects(4);
+        // Source = 2 (center 250). Pointer at 260 → source's center (250)
+        // would count if we didn't exclude it. Non-source centers:
+        // tab0=50, tab1=150, tab3=350. Only tabs 0 and 1 have center < 260
+        // → left_count = 2 → insert_idx = 2.
+        assert_eq!(compute_insert_idx(&r, 2, 0, 4, 260.0), 2);
+    }
+
+    #[test]
+    fn insert_idx_clamped_to_pinned_section() {
+        let r = rects(5);
+        // 5 tabs, pinned_count = 2, source = 0 (pinned). Section = [0, 2).
+        // Pointer far right — should still clamp inside pinned section.
+        // Non-source in section: only tab 1. left_count = 1 → insert_idx = 1.
+        assert_eq!(compute_insert_idx(&r, 0, 0, 2, 9999.0), 1);
+    }
+
+    #[test]
+    fn insert_idx_clamped_to_unpinned_section() {
+        let r = rects(5);
+        // 5 tabs, pinned_count = 2, source = 4 (unpinned, last).
+        // Section = [2, 5). Pointer far left → left_count = 0 → insert_idx = 2.
+        assert_eq!(compute_insert_idx(&r, 4, 2, 5, -50.0), 2);
+    }
+
+    #[test]
+    fn insert_idx_same_position_when_pointer_matches_source_center() {
+        let r = rects(4);
+        // Source = 1 (center 150). Pointer at 150 → only tab 0 (center 50)
+        // has center < 150 → left_count = 1 → insert_idx = 1 (same slot).
+        assert_eq!(compute_insert_idx(&r, 1, 0, 4, 150.0), 1);
+    }
+
+    // ── compute_drag_indicator_x ────────────────────────────────────
+
+    #[test]
+    fn indicator_x_at_section_start_is_left_edge_of_first_non_source() {
+        let r = rects(4);
+        // Source = 2; insert_idx = 0 → indicator at left edge of tab 0.
+        assert_eq!(compute_drag_indicator_x(&r, 2, 0, 4, 0), r[0].min.x);
+    }
+
+    #[test]
+    fn indicator_x_when_source_is_first_skips_to_second_tab() {
+        let r = rects(4);
+        // Source = 0; insert_idx = 0 → first non-source in [0, 4) is tab 1
+        // → indicator at left edge of tab 1.
+        assert_eq!(compute_drag_indicator_x(&r, 0, 0, 4, 0), r[1].min.x);
+    }
+
+    #[test]
+    fn indicator_x_between_middle_tabs() {
+        let r = rects(4);
+        // Source = 0, insert_idx = 2. Non-source walk: tab 1 (seen 0), tab 2
+        // (seen 1), tab 3 (seen 2 == left_count=2) → returns tab 3's left edge.
+        assert_eq!(compute_drag_indicator_x(&r, 0, 0, 4, 2), r[3].min.x);
+    }
+
+    #[test]
+    fn indicator_x_past_everything_returns_last_non_source_right_edge() {
+        let r = rects(4);
+        // Source = 0, insert_idx = 3 (section end). Walk finds no tab with
+        // seen == 3, falls through to reverse scan → last non-source is
+        // tab 3 → returns its right edge.
+        assert_eq!(compute_drag_indicator_x(&r, 0, 0, 4, 3), r[3].max.x);
+    }
+
+    #[test]
+    fn indicator_x_past_everything_when_source_is_last() {
+        let r = rects(4);
+        // Source = 3 (last), insert_idx = 3 (end of section [0,4)). Walk:
+        // tab 0 (seen 0), tab 1 (seen 1), tab 2 (seen 2), tab 3 skipped.
+        // No match at seen == 3 → reverse scan returns tab 2's right edge.
+        assert_eq!(compute_drag_indicator_x(&r, 3, 0, 4, 3), r[2].max.x);
+    }
+
+    #[test]
+    fn indicator_x_within_pinned_section_only() {
+        let r = rects(5);
+        // 5 tabs, pinned_count = 2, source = 0, insert_idx = 1.
+        // Section [0, 2). Non-source walk: tab 1 (seen 0 == left_count=1? no,
+        // left_count = 1 - 0 = 1, so seen must equal 1). tab 1 has seen = 0,
+        // no match; reverse scan returns tab 1's right edge.
+        assert_eq!(compute_drag_indicator_x(&r, 0, 0, 2, 1), r[1].max.x);
+    }
+
+    #[test]
+    fn indicator_x_unpinned_section_ignores_pinned_tabs() {
+        let r = rects(5);
+        // 5 tabs, source = 2 (first unpinned), section [2, 5), insert_idx = 2.
+        // left_count = 0. First non-source tab in section is tab 3 (seen 0 ==
+        // 0) → returns tab 3's left edge. Pinned tabs 0/1 are never touched.
+        assert_eq!(compute_drag_indicator_x(&r, 2, 2, 5, 2), r[3].min.x);
+    }
+
+    #[test]
+    fn indicator_x_single_tab_section_falls_back_to_source_left_edge() {
+        let r = rects(3);
+        // Section [0, 1) with source = 0 — the source is the only tab in
+        // the section. No non-source tabs found; fallback returns source
+        // left edge. (In practice process_tab_drag skips drawing in this
+        // case, but the function should still be safe.)
+        assert_eq!(compute_drag_indicator_x(&r, 0, 0, 1, 0), r[0].min.x);
+    }
+
+    #[test]
+    fn indicator_x_empty_rects_fallback_returns_zero() {
+        let r: Vec<Rect> = Vec::new();
+        // No rects at all; fallback returns Default (0.0). Guards against
+        // out-of-bounds if the caller ever invokes this with an empty slice.
+        assert_eq!(compute_drag_indicator_x(&r, 0, 0, 0, 0), 0.0);
+    }
+
+    // ── TabDragState construction ──────────────────────────────────
+
+    #[test]
+    fn tab_drag_state_is_copy_and_preserves_fields() {
+        let s = TabDragState {
+            source_idx: 3,
+            insert_idx: 7,
+        };
+        let c = s; // Copy
+        assert_eq!(c.source_idx, 3);
+        assert_eq!(c.insert_idx, 7);
     }
 }
