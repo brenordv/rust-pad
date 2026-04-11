@@ -62,6 +62,26 @@ pub enum ScrollbarDrag {
     Horizontal,
 }
 
+/// Origin of the most recent scroll position write this frame.
+///
+/// Used by the synchronized-scrolling feature in the UI layer to decide
+/// whether a scroll change should be mirrored to the other pane: only
+/// continuous, user-initiated scrolls (`UserInput`) propagate. Programmatic
+/// jumps from Goto / Find / Bookmark do not. The widget resets this back
+/// to `None` at the start of every frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollOrigin {
+    /// No scroll write this frame.
+    #[default]
+    None,
+    /// Wheel, scrollbar drag, or keyboard navigation that scrolled the
+    /// viewport. Eligible for sync-scroll mirroring.
+    UserInput,
+    /// Programmatic jump from Go to Line, Find/Replace, bookmark, etc.
+    /// Never mirrored.
+    Programmatic,
+}
+
 /// A single document with its buffer, cursor, history, and metadata.
 pub struct Document {
     /// The text buffer.
@@ -95,6 +115,11 @@ pub struct Document {
     pub cursor_activity_time: f64,
     /// Which scrollbar is currently being dragged, if any.
     pub scrollbar_drag: ScrollbarDrag,
+    /// Origin of the most recent scroll-position write this frame.
+    /// Reset to [`ScrollOrigin::None`] at the start of every frame by the
+    /// editor widget; consulted by the UI layer's synchronized-scrolling
+    /// step to decide whether to propagate the change to the other pane.
+    pub scroll_origin: ScrollOrigin,
     /// Links unsaved tabs to session store content for restore-on-startup.
     pub session_id: Option<String>,
     /// Flag requesting the UI to scroll the viewport so the cursor is visible.
@@ -187,6 +212,7 @@ impl Document {
             scroll_x: 0.0,
             cursor_activity_time: 0.0,
             scrollbar_drag: ScrollbarDrag::None,
+            scroll_origin: ScrollOrigin::None,
             session_id: None,
             scroll_to_cursor: false,
             last_saved_at: None,

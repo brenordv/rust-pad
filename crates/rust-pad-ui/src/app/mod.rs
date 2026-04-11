@@ -14,7 +14,9 @@ mod recent_files;
 mod search;
 mod settings_dialog;
 mod shortcuts;
+mod split;
 mod status_bar;
+mod sync_scroll;
 mod tab_bar;
 mod theme_controller;
 
@@ -23,6 +25,7 @@ pub use file_dialog_state::FileDialogState;
 pub use live_monitor::LiveMonitorController;
 pub use recent_files::RecentFilesManager;
 pub use settings_dialog::SettingsTab;
+pub use split::SplitState;
 pub use theme_controller::ThemeController;
 
 use std::path::PathBuf;
@@ -156,6 +159,21 @@ pub struct App {
     /// completed successfully. Cleared the next time the user takes any
     /// new action.
     pub(crate) print_last_status: Option<String>,
+    /// Split-view (dual pane) UI state. `None` = single pane (the default).
+    /// Per-pane tab ownership lives on `self.tabs`; this field carries the
+    /// orientation, divider ratio, and divider drag flag.
+    pub split: Option<SplitState>,
+    /// Whether synchronized scrolling is enabled. Persisted in
+    /// `AppConfig::sync_scroll_enabled` but only takes effect when split
+    /// view is active.
+    pub sync_scroll_enabled: bool,
+    /// Whether sync scrolling mirrors horizontal deltas in addition to
+    /// vertical. Persisted in `AppConfig::sync_scroll_horizontal`.
+    pub sync_scroll_horizontal: bool,
+    /// Last frame's per-pane `(scroll_y, scroll_x)` snapshot, used to
+    /// compute deltas for sync-scroll propagation. Cleared whenever sync
+    /// scrolling is off or split view is collapsed.
+    pub(crate) sync_scroll_last: Option<sync_scroll::SyncScrollSnapshot>,
 }
 
 #[derive(Debug, Default)]
@@ -243,9 +261,12 @@ impl App {
             }
         };
 
-        // Restore session if enabled
+        // Restore session if enabled. The split-view layout is reapplied
+        // after the App is fully constructed, since `apply_session_split`
+        // needs `&mut self`.
+        let mut restored_split: Option<rust_pad_config::session::SessionSplit> = None;
         if app_config.restore_open_files {
-            Self::restore_session(&mut tabs, &session_store);
+            restored_split = Self::restore_session(&mut tabs, &session_store);
         }
 
         // Open files requested via CLI arguments
@@ -256,7 +277,7 @@ impl App {
         // Best-effort cleanup of stale temp PDFs from previous sessions.
         Self::cleanup_stale_print_temp_files();
 
-        Self {
+        let mut app = Self {
             tabs,
             theme_ctrl,
             word_wrap: app_config.word_wrap,
@@ -312,14 +333,32 @@ impl App {
             print_in_progress: false,
             print_show_line_numbers: app_config.print_show_line_numbers,
             print_last_status: None,
+            split: None,
+            sync_scroll_enabled: app_config.sync_scroll_enabled,
+            sync_scroll_horizontal: app_config.sync_scroll_horizontal,
+            sync_scroll_last: None,
+        };
+
+        // Reapply persisted split-view layout once the App is fully built.
+        if let Some(split) = restored_split {
+            app.apply_session_split(&split);
         }
+
+        app
     }
 
-    /// Restores a previous session from the session store.
-    fn restore_session(tabs: &mut TabManager, session_store: &Option<SessionStore>) {
-        let Some(store) = session_store else { return };
+    /// Restores a previous session from the session store. Returns the
+    /// persisted split-view layout (if any) so the caller can apply it
+    /// after the App finishes constructing.
+    fn restore_session(
+        tabs: &mut TabManager,
+        session_store: &Option<SessionStore>,
+    ) -> Option<rust_pad_config::session::SessionSplit> {
+        let Some(store) = session_store else {
+            return None;
+        };
         let Ok(Some(session_data)) = store.load_session() else {
-            return;
+            return None;
         };
 
         // Track per-tab pin/color metadata in the order tabs are added so we
@@ -392,6 +431,12 @@ impl App {
             }
         }
         let _ = store.clear_all_content();
+        // Caller will reapply the split layout once the App is built.
+        if any_restored {
+            session_data.split
+        } else {
+            None
+        }
     }
 
     /// Opens files from startup arguments (CLI).
@@ -865,16 +910,20 @@ impl eframe::App for App {
                 self.show_menu_bar(ui, &ctx);
             });
 
-        // Tab bar
-        egui::Panel::top("tab_bar")
-            .frame(
-                egui::Frame::new()
-                    .fill(faint_bg)
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
-            )
-            .show_inside(ui, |ui| {
-                self.show_tab_bar(ui);
-            });
+        // Tab bar — only the global single-pane bar. In split-view mode the
+        // tab strips are rendered inside each pane by `render_split_panes`,
+        // so the outer tab bar is suppressed to avoid stacking two strips.
+        if !self.is_split() {
+            egui::Panel::top("tab_bar")
+                .frame(
+                    egui::Frame::new()
+                        .fill(faint_bg)
+                        .inner_margin(egui::Margin::symmetric(8, 4)),
+                )
+                .show_inside(ui, |ui| {
+                    self.show_tab_bar(ui);
+                });
+        }
 
         // Status bar
         egui::Panel::bottom("status_bar")
@@ -893,6 +942,14 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme_ctrl.theme.bg_color))
             .show_inside(ui, |ui| {
+                if self.is_split() {
+                    // Split-pane render path. Each pane renders its own
+                    // tab strip + editor. Routing to the focused pane is
+                    // handled inside `render_split_panes`.
+                    self.render_split_panes(ui, dialog_open);
+                    return;
+                }
+
                 let (response, zoom_request) = {
                     let doc = self.tabs.active_doc_mut();
                     let mut editor = EditorWidget::new(
@@ -919,6 +976,12 @@ impl eframe::App for App {
                         .clamp(0.5, self.theme_ctrl.max_zoom_level);
                 }
             });
+
+        // Synchronized scrolling: propagate user-initiated viewport
+        // deltas from the focused pane to the other pane. Runs after
+        // both panes have rendered (i.e. after the central panel
+        // closure) so it observes whatever the editor widgets wrote.
+        self.propagate_sync_scroll();
 
         // Dialogs
         self.show_dialogs(&ctx);
@@ -997,9 +1060,11 @@ impl eframe::App for App {
                     });
                 }
             }
+            let split = self.build_session_split();
             let session_data = SessionData {
                 tabs: tabs_list,
                 active_tab_index: self.tabs.active,
+                split,
             };
             if let Err(e) = store.save_session(&session_data) {
                 tracing::warn!("Failed to save session: {e}");
@@ -1035,6 +1100,8 @@ impl eframe::App for App {
             max_file_size_mb: self.max_file_size_bytes.map_or(0, |b| b / (1024 * 1024)),
             session_content_max_kb: self.session_content_max_kb,
             print_show_line_numbers: self.print_show_line_numbers,
+            sync_scroll_enabled: self.sync_scroll_enabled,
+            sync_scroll_horizontal: self.sync_scroll_horizontal,
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
@@ -1054,7 +1121,7 @@ mod tests {
     use rust_pad_core::line_ops::{CaseConversion, SortOrder};
 
     /// Helper: create an App for unit-testing (no rendering needed).
-    fn test_app() -> App {
+    pub(crate) fn test_app() -> App {
         App {
             tabs: TabManager::new(),
             theme_ctrl: ThemeController {
@@ -1116,6 +1183,10 @@ mod tests {
             print_in_progress: false,
             print_show_line_numbers: true,
             print_last_status: None,
+            split: None,
+            sync_scroll_enabled: false,
+            sync_scroll_horizontal: true,
+            sync_scroll_last: None,
         }
     }
 

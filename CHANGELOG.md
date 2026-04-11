@@ -14,6 +14,20 @@
 - If the default viewer cannot be launched (rare), a "Print / Export Failed" dialog surfaces the error and offers a "Reveal in File Manager" button so the generated PDF is still reachable.
 - New `print_show_line_numbers` config setting (default `true`) controls whether the line-number gutter appears in the generated PDF. Persisted in `rust-pad.json`.
 
+#### Split View
+- New **View → Split Vertically** (Ctrl+Alt+V) and **View → Split Horizontally** (Ctrl+Alt+H) entries divide the editor area into two panes separated by a draggable divider. **View → Remove Split** collapses back to a single pane.
+- Each pane owns its own tab strip and active tab. The previously active document is moved into the right (or bottom) pane on enable; if only one tab is open, a fresh untitled tab is created so both panes have content immediately.
+- The divider can be dragged to resize the panes (clamped so neither pane shrinks below ~80 px). Double-click the divider to reset to a 50/50 split.
+- Right-click any tab in a pane and choose "Move to Other Pane" to reassign it without drag-and-drop. Closing the last tab in a pane automatically collapses the split.
+- A 1px accent border around the focused pane shows which pane currently receives keyboard input and menu actions.
+- Split layout (orientation, divider ratio, per-pane tab assignment, focused pane) is persisted across app restarts via the session store.
+
+#### Synchronized Scrolling
+- New **View → Synchronized Scrolling** entry (Ctrl+Alt+S) mirrors user-initiated scroll deltas from the focused pane to the other pane while split view is active. Useful for diffing two versions of the same file side by side.
+- Only continuous, user-initiated scrolls (mouse wheel, scrollbar drag, keyboard navigation) propagate. Programmatic jumps from Go to Line, Find/Replace, and bookmark navigation keep the other pane in place.
+- Each pane's viewport is independently clamped to its own content height, so deltas that would push one pane past its content boundary are silently capped without causing drift.
+- New `sync_scroll_enabled` (default `false`) and `sync_scroll_horizontal` (default `true`) config settings persist the user's choice across runs. The menu entry is gated on split view being active.
+
 #### Pin Tabs
 - Right-click any tab → "Pin Tab" / "Unpin Tab" toggle. Pinned tabs are marked with the 📌 pushpin emoji prepended to the title.
 - Pinned tabs are always rendered to the left of unpinned tabs. Pinning a tab moves it to the rightmost slot of the pinned section; unpinning moves it to the leftmost slot of the unpinned section. The active tab follows its document throughout the move.

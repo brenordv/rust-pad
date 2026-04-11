@@ -56,6 +56,13 @@ pub struct AppConfig {
     /// Whether the "Print..." / "Export as PDF..." pipeline renders a
     /// line-number gutter in the generated PDF.
     pub print_show_line_numbers: bool,
+    /// Whether synchronized scrolling between split panes is enabled.
+    /// Only takes effect when split view is active. Persisted across runs
+    /// but treated as off until the user actually splits.
+    pub sync_scroll_enabled: bool,
+    /// Whether synchronized scrolling mirrors horizontal deltas in addition
+    /// to vertical. Has no effect when `sync_scroll_enabled` is false.
+    pub sync_scroll_horizontal: bool,
     pub themes: Vec<ThemeDefinition>,
 }
 
@@ -84,6 +91,8 @@ impl Default for AppConfig {
             max_file_size_mb: 512,
             session_content_max_kb: 10_240,
             print_show_line_numbers: true,
+            sync_scroll_enabled: false,
+            sync_scroll_horizontal: true,
             themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
         }
     }

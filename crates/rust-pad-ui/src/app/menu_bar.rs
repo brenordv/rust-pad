@@ -443,6 +443,46 @@ impl App {
                 ui.close();
             }
             ui.separator();
+            // ── Split view ────────────────────────────────────────────
+            if ui
+                .add(egui::Button::new("Split Vertically").shortcut_text("Ctrl+Alt+V"))
+                .clicked()
+            {
+                self.toggle_split_vertical();
+                ui.close();
+            }
+            if ui
+                .add(egui::Button::new("Split Horizontally").shortcut_text("Ctrl+Alt+H"))
+                .clicked()
+            {
+                self.toggle_split_horizontal();
+                ui.close();
+            }
+            let split_active = self.is_split();
+            if ui
+                .add_enabled(split_active, egui::Button::new("Remove Split"))
+                .clicked()
+            {
+                self.remove_split();
+                ui.close();
+            }
+            // Synchronized scrolling — only meaningful when split is active.
+            // The flag itself is persisted in AppConfig regardless, so
+            // disabling/re-enabling the split preserves the user's choice.
+            let sync_button = egui::Button::new(if self.sync_scroll_enabled {
+                "✓ Synchronized Scrolling"
+            } else {
+                "  Synchronized Scrolling"
+            })
+            .shortcut_text("Ctrl+Alt+S");
+            let sync_response = ui.add_enabled(split_active, sync_button);
+            if !split_active {
+                sync_response.on_hover_text("Enable Split View first");
+            } else if sync_response.clicked() {
+                self.toggle_sync_scroll();
+                ui.close();
+            }
+            ui.separator();
             self.show_theme_submenu(ui, ctx);
         });
     }

@@ -141,6 +141,12 @@ impl<'a> EditorWidget<'a> {
         let rect = response.rect;
         let version_before_input = self.doc.content_version;
 
+        // Reset the scroll-origin tag at the top of every frame. Code paths
+        // that move the viewport (`handle_scroll_input`, scrollbar drag,
+        // `follow_cursor`) write to it during this frame; the synchronized-
+        // scrolling step in `App` consults the tag after the widget returns.
+        self.doc.scroll_origin = rust_pad_core::document::ScrollOrigin::None;
+
         let mut wrap_map = self.build_initial_wrap_map(rect, ui);
         let layout = self.compute_layout(ui, rect, wrap_map.as_ref());
 
@@ -328,11 +334,13 @@ impl<'a> EditorWidget<'a> {
         if scroll_delta.y != 0.0 {
             self.doc.scroll_y -= scroll_delta.y / layout.line_height;
             self.doc.scroll_y = self.doc.scroll_y.clamp(0.0, layout.max_scroll_y);
+            self.doc.scroll_origin = rust_pad_core::document::ScrollOrigin::UserInput;
         }
         if !self.word_wrap && scroll_delta.x != 0.0 {
             let max_scroll_x = (layout.content_width - layout.text_area.width()).max(0.0);
             self.doc.scroll_x -= scroll_delta.x;
             self.doc.scroll_x = self.doc.scroll_x.clamp(0.0, max_scroll_x);
+            self.doc.scroll_origin = rust_pad_core::document::ScrollOrigin::UserInput;
         }
     }
 
@@ -1607,11 +1615,14 @@ impl<'a> EditorWidget<'a> {
                 as f32
         });
 
+        let mut moved = false;
         if cursor_visual_y < self.doc.scroll_y + margin {
             self.doc.scroll_y = (cursor_visual_y - margin).max(0.0);
+            moved = true;
         }
         if cursor_visual_y >= self.doc.scroll_y + visible_lines as f32 - margin {
             self.doc.scroll_y = cursor_visual_y - visible_lines as f32 + margin + 1.0;
+            moved = true;
         }
 
         // Horizontal scroll — only in non-wrap mode.
@@ -1628,10 +1639,20 @@ impl<'a> EditorWidget<'a> {
             let scroll_margin = char_width * 4.0;
             if cursor_x < self.doc.scroll_x + scroll_margin {
                 self.doc.scroll_x = (cursor_x - scroll_margin).max(0.0);
+                moved = true;
             }
             if cursor_x > self.doc.scroll_x + text_width - scroll_margin {
                 self.doc.scroll_x = cursor_x - text_width + scroll_margin;
+                moved = true;
             }
+        }
+
+        // Tag a follow-cursor scroll as Programmatic so the synchronized
+        // scrolling step does not propagate Goto / Find / Bookmark jumps
+        // to the other pane. Direct user wheel/drag scrolls bypass this
+        // path and tag themselves as `UserInput`.
+        if moved {
+            self.doc.scroll_origin = rust_pad_core::document::ScrollOrigin::Programmatic;
         }
     }
 

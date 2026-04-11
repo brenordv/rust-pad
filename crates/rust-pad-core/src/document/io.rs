@@ -120,6 +120,7 @@ impl Document {
             scroll_x: 0.0,
             cursor_activity_time: 0.0,
             scrollbar_drag: ScrollbarDrag::None,
+            scroll_origin: crate::document::ScrollOrigin::None,
             session_id: None,
             scroll_to_cursor: false,
             last_saved_at: None,

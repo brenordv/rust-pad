@@ -8,6 +8,7 @@ use eframe::egui;
 use egui::{Color32, Rect, RichText, ScrollArea, Sense, Stroke, Vec2, Visuals};
 
 use super::App;
+use crate::tabs::PaneId;
 
 /// Transient state tracked while the user is dragging a tab to reorder it.
 ///
@@ -752,6 +753,236 @@ impl App {
             if empty_response.double_clicked() {
                 self.new_tab();
             }
+        }
+    }
+
+    /// Renders a pane-aware tab strip showing only the documents owned by
+    /// `pane`. Used by [`App::render_split_panes`] when split view is active.
+    ///
+    /// Compared to [`App::show_tab_bar`], this version is intentionally
+    /// minimal: no horizontal overflow scrolling, no auto-scroll, no
+    /// cross-pane drag-and-drop reordering. The right-click context menu
+    /// adds "Move to Other Pane" so users can reassign tabs without DnD.
+    pub(crate) fn show_pane_tab_bar(&mut self, ui: &mut egui::Ui, pane: PaneId) {
+        let visuals = ui.visuals().clone();
+        let order = self.tabs.pane_tab_order(pane);
+        let active_doc = self.tabs.pane_active_doc(pane);
+
+        let mut switch_to: Option<usize> = None;
+        let mut tab_to_close: Option<usize> = None;
+        let mut move_to_other: Option<usize> = None;
+        let mut pin_action: Option<(usize, bool)> = None;
+        let mut color_action: Option<(usize, Option<rust_pad_core::tab_color::TabColor>)> = None;
+        let mut new_tab_in_pane = false;
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+
+            for &doc_idx in &order {
+                let doc = &self.tabs.documents[doc_idx];
+                let title = match (doc.pinned, doc.modified) {
+                    (true, true) => format!("\u{1F4CC} {} *", doc.title),
+                    (true, false) => format!("\u{1F4CC} {}", doc.title),
+                    (false, true) => format!("{} *", doc.title),
+                    (false, false) => doc.title.clone(),
+                };
+                let is_active = doc_idx == active_doc;
+                let title_color = if is_active {
+                    if visuals.dark_mode {
+                        Color32::from_rgb(220, 220, 220)
+                    } else {
+                        Color32::from_rgb(30, 30, 30)
+                    }
+                } else {
+                    visuals.widgets.noninteractive.fg_stroke.color
+                };
+                let title_font = egui::FontId::proportional(14.0);
+                let title_galley =
+                    ui.painter()
+                        .layout_no_wrap(title.clone(), title_font, title_color);
+                let title_width = title_galley.size().x;
+                let tab_width =
+                    TAB_PADDING + title_width + TITLE_CLOSE_GAP + CLOSE_AREA_SIZE + TAB_PADDING;
+                let tab_size = Vec2::new(tab_width, TAB_HEIGHT);
+                let (tab_rect, response) = ui.allocate_exact_size(tab_size, Sense::click());
+                let is_hovered = response.hovered();
+                let painter = ui.painter();
+
+                let fill = if is_active {
+                    visuals.widgets.active.bg_fill
+                } else if is_hovered {
+                    visuals.widgets.hovered.weak_bg_fill
+                } else {
+                    visuals.faint_bg_color
+                };
+                painter.rect_filled(
+                    tab_rect,
+                    egui::CornerRadius {
+                        nw: 4,
+                        ne: 4,
+                        sw: 0,
+                        se: 0,
+                    },
+                    fill,
+                );
+
+                // Accent line on active tab.
+                let accent_stroke_color = match doc.tab_color {
+                    Some(c) => {
+                        let [r, g, b] = c.to_rgb();
+                        Some(Color32::from_rgb(r, g, b))
+                    }
+                    None if is_active => Some(self.theme_ctrl.accent_color),
+                    None => None,
+                };
+                if let Some(color) = accent_stroke_color {
+                    painter.line_segment(
+                        [
+                            egui::Pos2::new(tab_rect.min.x, tab_rect.min.y),
+                            egui::Pos2::new(tab_rect.max.x, tab_rect.min.y),
+                        ],
+                        Stroke::new(2.0, color),
+                    );
+                }
+
+                // Title text.
+                let title_pos = egui::Pos2::new(
+                    tab_rect.min.x + TAB_PADDING,
+                    tab_rect.center().y - title_galley.size().y / 2.0,
+                );
+                painter.galley(title_pos, title_galley, title_color);
+
+                // Close button area.
+                let close_rect = Rect::from_min_size(
+                    egui::Pos2::new(
+                        tab_rect.max.x - TAB_PADDING - CLOSE_AREA_SIZE,
+                        tab_rect.center().y - CLOSE_AREA_SIZE / 2.0,
+                    ),
+                    Vec2::splat(CLOSE_AREA_SIZE),
+                );
+                let pointer_in_close = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .is_some_and(|pos| close_rect.contains(pos));
+                if is_active || is_hovered {
+                    if pointer_in_close {
+                        painter.rect_filled(close_rect, 2.0, visuals.widgets.hovered.bg_fill);
+                    }
+                    let close_font = egui::FontId::proportional(14.0);
+                    let close_color = visuals.widgets.noninteractive.fg_stroke.color;
+                    let close_galley =
+                        painter.layout_no_wrap("\u{00D7}".to_owned(), close_font, close_color);
+                    let close_text_pos = egui::Pos2::new(
+                        close_rect.center().x - close_galley.size().x / 2.0,
+                        close_rect.center().y - close_galley.size().y / 2.0,
+                    );
+                    painter.galley(close_text_pos, close_galley, close_color);
+                }
+
+                // Click → switch tab in this pane (or close).
+                if response.clicked() {
+                    if pointer_in_close && (is_active || is_hovered) {
+                        tab_to_close = Some(doc_idx);
+                    } else {
+                        switch_to = Some(doc_idx);
+                    }
+                }
+                if response.middle_clicked() {
+                    tab_to_close = Some(doc_idx);
+                }
+
+                // Context menu: mirrors the single-pane tab bar's per-tab
+                // actions, plus "Move to Other Pane". Bulk-close actions
+                // (Close Others / All / Unchanged) are deliberately omitted
+                // since they don't have an obvious pane scope in v1.
+                let is_pinned = self.tabs.documents[doc_idx].pinned;
+                response.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        tab_to_close = Some(doc_idx);
+                        ui.close();
+                    }
+                    if ui.button("Move to Other Pane").clicked() {
+                        move_to_other = Some(doc_idx);
+                        ui.close();
+                    }
+                    ui.separator();
+                    let pin_label = if is_pinned { "Unpin Tab" } else { "Pin Tab" };
+                    if ui.button(pin_label).clicked() {
+                        pin_action = Some((doc_idx, !is_pinned));
+                        ui.close();
+                    }
+                    ui.menu_button("Set Tab Color", |ui| {
+                        for variant in rust_pad_core::tab_color::TabColor::ALL {
+                            let [r, g, b] = variant.to_rgb();
+                            let label = egui::RichText::new(variant.label())
+                                .color(Color32::from_rgb(r, g, b));
+                            if ui.button(label).clicked() {
+                                color_action = Some((doc_idx, Some(variant)));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Clear Color").clicked() {
+                            color_action = Some((doc_idx, None));
+                            ui.close();
+                        }
+                    });
+                });
+            }
+
+            // "+" button at the end of the strip — opens a new tab in the
+            // focused pane (which is whichever pane has focus, not necessarily
+            // this one — but we focus this pane on the click).
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let new_btn = egui::Button::new(
+                RichText::new("+")
+                    .color(visuals.widgets.noninteractive.fg_stroke.color)
+                    .size(16.0),
+            )
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE);
+            if ui.add(new_btn).clicked() {
+                new_tab_in_pane = true;
+            }
+
+            // Double-click on the empty area to the right of the "+" button
+            // also opens a new tab — matches the single-pane bar's behavior
+            // in `render_empty_tab_bar_area`.
+            let remaining = ui.available_size();
+            if remaining.x > 0.0 {
+                let empty = ui.allocate_response(remaining, Sense::click());
+                if empty.double_clicked() {
+                    new_tab_in_pane = true;
+                }
+            }
+        });
+
+        // Apply deferred actions outside the render loop.
+        if let Some(idx) = switch_to {
+            self.tabs.switch_pane_to(pane, idx);
+            self.tabs.focus_pane(pane);
+        }
+        if let Some(idx) = tab_to_close {
+            self.tabs.focus_pane(pane);
+            self.request_close_tab(idx);
+        }
+        if let Some(idx) = move_to_other {
+            self.tabs.move_tab_to_pane(idx, pane.other());
+        }
+        if let Some((idx, pin)) = pin_action {
+            if pin {
+                self.tabs.pin_tab(idx);
+            } else {
+                self.tabs.unpin_tab(idx);
+            }
+        }
+        if let Some((idx, color)) = color_action {
+            if idx < self.tabs.documents.len() {
+                self.tabs.documents[idx].tab_color = color;
+            }
+        }
+        if new_tab_in_pane {
+            self.tabs.focus_pane(pane);
+            self.new_tab();
         }
     }
 }

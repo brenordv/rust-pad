@@ -4,7 +4,7 @@
 //! drag interaction, and click-to-jump behavior.
 
 use egui::{Pos2, Rect, Response, Ui, Vec2};
-use rust_pad_core::document::ScrollbarDrag;
+use rust_pad_core::document::{ScrollOrigin, ScrollbarDrag};
 
 use super::widget::{EditorWidget, SCROLLBAR_MIN_THUMB, SCROLLBAR_WIDTH};
 
@@ -121,6 +121,11 @@ impl<'a> EditorWidget<'a> {
             max_scroll,
             |p| p.y,
         );
+        // Tag any drag/click that actually moved the thumb as user input
+        // so the synchronized-scrolling step mirrors it to the other pane.
+        if (is_dragging && response.dragged()) || response.clicked() {
+            self.doc.scroll_origin = ScrollOrigin::UserInput;
+        }
     }
 
     /// Renders the horizontal scrollbar and handles interaction.
@@ -182,5 +187,8 @@ impl<'a> EditorWidget<'a> {
             max_scroll,
             |p| p.x,
         );
+        if (is_dragging && response.dragged()) || response.clicked() {
+            self.doc.scroll_origin = ScrollOrigin::UserInput;
+        }
     }
 }
