@@ -20,6 +20,13 @@
 - Inactive tabs without an assigned color still show no accent. Active tabs without an assigned color continue to show the theme accent.
 - Tab color is persisted across app restarts via the session store.
 
+#### Drag-and-Drop Tab Reordering
+- Click and hold any tab, then drag horizontally to reorder it in the tab bar. The dragged tab is dimmed in place and a vertical accent-colored indicator shows where it will be dropped on release.
+- Pinned tabs are clamped to the pinned section and unpinned tabs to the unpinned section — drags cannot cross the boundary, preserving the pin/unpin layout.
+- Pressing `Escape` during a drag cancels it and leaves the tab order unchanged.
+- Moving the pointer vertically out of the tab bar does **not** cancel the drag (accessibility: users who cannot hold a perfectly horizontal line do not lose an in-progress reorder). The drag continues until the mouse button is released or `Escape` is pressed.
+- The active tab always follows its document through the reorder.
+
 #### One-Time Session Reset on Upgrade
 - Adding pin and color metadata to the session store schema is a breaking change to the bincode-encoded `SessionTabEntry` format. On the first launch after upgrading to v2.0.0, the previous session file will fail to deserialize and the app will start with a fresh, empty session (a warning is logged). Open files will not be reopened automatically that one time. From v2.0.0 onward, the new fields are persisted and restored normally.
 

@@ -140,6 +140,8 @@ pub struct App {
     /// When true, the "Close All" operation is in progress and should
     /// continue prompting for modified tabs after each dialog resolution.
     closing_all: bool,
+    /// Active tab drag-and-drop state (`None` when no drag is in progress).
+    pub(crate) tab_drag: Option<tab_bar::TabDragState>,
 }
 
 #[derive(Debug, Default)]
@@ -281,6 +283,7 @@ impl App {
             prev_active_tab: 0,
             prev_tab_count: 0,
             closing_all: false,
+            tab_drag: None,
         }
     }
 
@@ -1075,6 +1078,7 @@ mod tests {
             prev_active_tab: 0,
             prev_tab_count: 0,
             closing_all: false,
+            tab_drag: None,
         }
     }
 

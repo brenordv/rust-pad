@@ -245,7 +245,7 @@ impl TabManager {
         // move. The new tab goes to the last slot of that section.
         let total_pinned = self.documents.iter().filter(|d| d.pinned).count();
         let target = total_pinned - 1;
-        self.move_tab_preserving_active(idx, target);
+        self.move_tab(idx, target);
     }
 
     /// Unpins the tab at `idx`. The tab is moved to the leftmost position
@@ -262,12 +262,16 @@ impl TabManager {
         // starts after the move. The newly-unpinned tab goes there.
         let total_pinned = self.documents.iter().filter(|d| d.pinned).count();
         let target = total_pinned;
-        self.move_tab_preserving_active(idx, target);
+        self.move_tab(idx, target);
     }
 
     /// Moves a tab from `from` to `to` while keeping `self.active` pointing
     /// at the same `Document` it pointed to before the move.
-    fn move_tab_preserving_active(&mut self, from: usize, to: usize) {
+    ///
+    /// No-op when `from == to` or either index is out of range. Callers are
+    /// responsible for any domain-level constraints (e.g. keeping pinned
+    /// tabs clamped to the pinned section during drag-and-drop).
+    pub fn move_tab(&mut self, from: usize, to: usize) {
         if from == to || from >= self.documents.len() || to >= self.documents.len() {
             return;
         }
@@ -837,6 +841,70 @@ mod tests {
         tm.pin_tab(1);
         tm.pin_tab(2);
         assert_eq!(tm.pinned_count(), 3);
+    }
+
+    // ── move_tab ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_move_tab_reorders_documents() {
+        let mut tm = make_n_tabs(3);
+        // Order: [tab0, tab1, tab2] → move 0 to 2 → [tab1, tab2, tab0]
+        tm.move_tab(0, 2);
+        assert_eq!(tm.documents[0].title, "tab1");
+        assert_eq!(tm.documents[1].title, "tab2");
+        assert_eq!(tm.documents[2].title, "tab0");
+    }
+
+    #[test]
+    fn test_move_tab_active_follows_moved_tab() {
+        let mut tm = make_n_tabs(3);
+        tm.switch_to(0); // active = tab0
+        tm.move_tab(0, 2);
+        // tab0 is now at index 2 and should still be active.
+        assert_eq!(tm.documents[tm.active].title, "tab0");
+        assert_eq!(tm.active, 2);
+    }
+
+    #[test]
+    fn test_move_tab_active_shifts_when_tab_crosses_left_to_right() {
+        let mut tm = make_n_tabs(3);
+        tm.switch_to(2); // active = tab2
+        tm.move_tab(0, 1);
+        // tab0 moved from before active to after (on its way past); active should shift left.
+        // Order becomes [tab1, tab0, tab2]; tab2 is still active at idx 2.
+        assert_eq!(tm.documents[tm.active].title, "tab2");
+        assert_eq!(tm.active, 2);
+    }
+
+    #[test]
+    fn test_move_tab_right_to_left_with_active_at_zero() {
+        let mut tm = make_n_tabs(3);
+        tm.switch_to(0); // active = tab0
+        tm.move_tab(1, 0);
+        // Order becomes [tab1, tab0, tab2]; tab0 is now at idx 1.
+        assert_eq!(tm.documents[tm.active].title, "tab0");
+        assert_eq!(tm.active, 1);
+    }
+
+    #[test]
+    fn test_move_tab_same_index_is_noop() {
+        let mut tm = make_n_tabs(3);
+        tm.switch_to(1);
+        let before: Vec<_> = tm.documents.iter().map(|d| d.title.clone()).collect();
+        tm.move_tab(1, 1);
+        let after: Vec<_> = tm.documents.iter().map(|d| d.title.clone()).collect();
+        assert_eq!(before, after);
+        assert_eq!(tm.active, 1);
+    }
+
+    #[test]
+    fn test_move_tab_out_of_range_is_noop() {
+        let mut tm = make_n_tabs(3);
+        let before: Vec<_> = tm.documents.iter().map(|d| d.title.clone()).collect();
+        tm.move_tab(99, 0);
+        tm.move_tab(0, 99);
+        let after: Vec<_> = tm.documents.iter().map(|d| d.title.clone()).collect();
+        assert_eq!(before, after);
     }
 
     #[test]

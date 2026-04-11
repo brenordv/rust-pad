@@ -9,6 +9,22 @@ use egui::{Color32, Rect, RichText, ScrollArea, Sense, Stroke, Vec2, Visuals};
 
 use super::App;
 
+/// Transient state tracked while the user is dragging a tab to reorder it.
+///
+/// Created on `drag_started`, updated every frame while the pointer moves,
+/// and cleared on drag stop (commit) or cancel (Escape). The visual cue is
+/// "dim the source tab in place + paint an insertion indicator at the drop
+/// target", so the struct only needs to remember which tab is being dragged
+/// and where it would be dropped on release.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TabDragState {
+    /// Current index of the tab being dragged.
+    pub source_idx: usize,
+    /// Insertion position where the tab would be dropped on release.
+    /// This is the index the dragged tab will occupy after the move.
+    pub insert_idx: usize,
+}
+
 /// Deferred tab bar action to execute after the rendering loop completes.
 ///
 /// Context menu actions that modify the tab list cannot run during the
@@ -41,6 +57,8 @@ const TAB_HEIGHT: f32 = 32.0;
 const SCROLL_STEP: f32 = 120.0;
 /// Width of each scroll arrow button.
 const ARROW_BUTTON_WIDTH: f32 = 20.0;
+/// Width of the vertical insertion indicator drawn between tabs while dragging.
+const DRAG_INDICATOR_WIDTH: f32 = 3.0;
 
 impl App {
     /// Renders the tab bar with active tab highlighting, close buttons,
@@ -57,10 +75,20 @@ impl App {
         self.prev_active_tab = self.tabs.active;
         self.prev_tab_count = self.tabs.tab_count();
 
+        // Handle Escape cancellation before the render loop so the drag state
+        // is cleared before we read it for visual feedback. Vertical pointer
+        // departure is deliberately NOT treated as cancel — see the Phase 3
+        // spec (accessibility: users who cannot hold a straight horizontal
+        // line must not lose an in-progress drag).
+        if self.tab_drag.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.tab_drag = None;
+        }
+
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let mut tab_to_close: Option<usize> = None;
             let mut deferred_action: Option<DeferredTabAction> = None;
+            let mut drag_commit: Option<(usize, usize)> = None;
 
             // Collect tab rects for auto-scroll calculation.
             let mut tab_rects: Vec<Rect> = Vec::with_capacity(self.tabs.tab_count());
@@ -97,6 +125,13 @@ impl App {
                         );
                         tab_rects.push(rect);
                     }
+
+                    // Process in-progress drag: update insert_idx, paint the
+                    // insertion indicator, and detect drop. Done inside the
+                    // ScrollArea closure so the indicator is drawn in the
+                    // same coordinate space as the tabs and is naturally
+                    // clipped to the visible tab region.
+                    self.process_tab_drag(ui, &tab_rects, &mut drag_commit);
                 });
 
             // 2. Update scroll state from ScrollArea output.
@@ -121,7 +156,15 @@ impl App {
             self.render_new_tab_button(ui, &visuals);
             self.render_empty_tab_bar_area(ui);
 
-            // 6. Execute deferred actions after the rendering loop.
+            // 6. Commit any completed drag. The drop was detected inside
+            // process_tab_drag, but the actual move happens here to keep
+            // mutations of `self.tabs.documents` out of the render loop.
+            if let Some((from, to)) = drag_commit {
+                self.tabs.move_tab(from, to);
+                self.tab_drag = None;
+            }
+
+            // 7. Execute deferred actions after the rendering loop.
             if let Some(idx) = tab_to_close {
                 self.request_close_tab(idx);
             }
@@ -168,6 +211,7 @@ impl App {
         let doc = &self.tabs.documents[idx];
         let is_active = idx == self.tabs.active;
         let tab_color = doc.tab_color;
+        let is_drag_source = self.tab_drag.is_some_and(|d| d.source_idx == idx);
 
         // Title composition: optional pin glyph + title + optional modified marker.
         // The pushpin emoji (U+1F4CC) renders via NotoEmoji-Regular.ttf which egui
@@ -213,6 +257,13 @@ impl App {
             visuals.widgets.hovered.weak_bg_fill
         } else {
             visuals.faint_bg_color
+        };
+        // Dim the dragged tab so the user sees where it came from while the
+        // drop position is indicated separately by the insertion line.
+        let fill = if is_drag_source {
+            fill.gamma_multiply(0.45)
+        } else {
+            fill
         };
 
         painter.rect_filled(
@@ -287,6 +338,8 @@ impl App {
         }
 
         // -- Interaction handling --
+        // `clicked()` does NOT fire if the widget was dragged, so the click
+        // and drag handlers are naturally mutually exclusive.
         if response.clicked() {
             if pointer_in_close && (is_active || is_hovered) {
                 *tab_to_close = Some(idx);
@@ -297,6 +350,27 @@ impl App {
 
         if response.middle_clicked() {
             *tab_to_close = Some(idx);
+        }
+
+        // -- Drag start detection --
+        // Ignore drags that originated on the close button: the user is
+        // about to click close, not reorder. We check `press_origin` (the
+        // point the button was first pressed) rather than the current
+        // hover position so a drag that *started* over the × but has since
+        // moved is still excluded from starting a reorder.
+        if response.drag_started() {
+            let press_in_close = ui
+                .input(|i| i.pointer.press_origin())
+                .is_some_and(|p| close_rect.contains(p));
+            if !press_in_close {
+                self.tab_drag = Some(TabDragState {
+                    source_idx: idx,
+                    insert_idx: idx,
+                });
+                // Also make sure the dragged tab becomes active so the
+                // editor reflects what the user is manipulating.
+                self.tabs.switch_to(idx);
+            }
         }
 
         // -- 1px separator between tabs --
@@ -313,6 +387,163 @@ impl App {
         self.render_tab_context_menu(ui, idx, &response, tab_to_close, deferred_action);
 
         tab_rect
+    }
+
+    /// Processes an in-progress tab drag: updates the target insert index,
+    /// paints the vertical insertion indicator, and detects drop.
+    ///
+    /// Called once per frame inside the ScrollArea closure, after all tab
+    /// buttons have been rendered, so it has the full set of `tab_rects` to
+    /// hit-test against. The commit is deferred through `drag_commit` so the
+    /// caller performs the actual `move_tab` outside the render loop.
+    ///
+    /// The pointer may leave the tab bar vertically without cancelling the
+    /// drag (accessibility: users who cannot hold a perfectly horizontal
+    /// line must not lose an in-progress reorder).
+    fn process_tab_drag(
+        &mut self,
+        ui: &mut egui::Ui,
+        tab_rects: &[Rect],
+        drag_commit: &mut Option<(usize, usize)>,
+    ) {
+        let Some(drag) = self.tab_drag else {
+            return;
+        };
+
+        // Guard: if the document vector shrank underneath us (e.g. via some
+        // other action this frame), abort the drag cleanly.
+        if drag.source_idx >= tab_rects.len() {
+            self.tab_drag = None;
+            return;
+        }
+
+        // Clamp the insert range to the section the source tab belongs to,
+        // so pinned tabs cannot cross into the unpinned area and vice versa.
+        let pinned_count = self.tabs.pinned_count();
+        let (section_start, section_end) = if drag.source_idx < pinned_count {
+            (0usize, pinned_count)
+        } else {
+            (pinned_count, tab_rects.len())
+        };
+
+        // Read the latest pointer position. `latest_pos` survives the
+        // pointer leaving any widget, which is exactly what we need for the
+        // "don't cancel on vertical departure" requirement.
+        let pointer_x = ui
+            .input(|i| i.pointer.latest_pos())
+            .map(|p| p.x)
+            .unwrap_or(tab_rects[drag.source_idx].center().x);
+
+        // Count non-source tabs in the section whose centers lie to the
+        // left of the pointer. `left_count` becomes the offset into the
+        // post-removal section, which equals the target `insert_idx`
+        // argument to `TabManager::move_tab`.
+        let mut left_count = 0usize;
+        for (i, rect) in tab_rects
+            .iter()
+            .enumerate()
+            .take(section_end)
+            .skip(section_start)
+        {
+            if i == drag.source_idx {
+                continue;
+            }
+            if rect.center().x < pointer_x {
+                left_count += 1;
+            }
+        }
+        let new_insert_idx = section_start + left_count;
+
+        // Persist the latest insert target so the next frame still knows
+        // where the drop would land if the pointer stops moving.
+        if let Some(state) = self.tab_drag.as_mut() {
+            state.insert_idx = new_insert_idx;
+        }
+
+        // Paint the insertion indicator. When the section is effectively
+        // empty (only the source tab), there is nowhere to drop, so skip
+        // the indicator entirely.
+        let section_len_excluding_source =
+            section_end.saturating_sub(section_start).saturating_sub(1);
+        if section_len_excluding_source > 0 {
+            let indicator_x = self.compute_drag_indicator_x(
+                tab_rects,
+                drag.source_idx,
+                section_start,
+                section_end,
+                new_insert_idx,
+            );
+            let indicator_y_min = tab_rects[drag.source_idx].min.y;
+            let indicator_y_max = tab_rects[drag.source_idx].max.y;
+            let accent = self.theme_ctrl.accent_color;
+            ui.painter().line_segment(
+                [
+                    egui::Pos2::new(indicator_x, indicator_y_min),
+                    egui::Pos2::new(indicator_x, indicator_y_max),
+                ],
+                Stroke::new(DRAG_INDICATOR_WIDTH, accent),
+            );
+        }
+
+        // Drop detection. Using the global pointer state (rather than the
+        // source tab's Response) means the drop fires even if the pointer
+        // has left the tab bar entirely, which matches the accessibility
+        // requirement.
+        let released = ui.input(|i| i.pointer.any_released() && !i.pointer.primary_down());
+        if released {
+            if new_insert_idx != drag.source_idx {
+                *drag_commit = Some((drag.source_idx, new_insert_idx));
+            } else {
+                // No movement → nothing to commit, but we still need to
+                // clear the drag state. The caller only clears when
+                // drag_commit is Some, so do it here for the no-op case.
+                self.tab_drag = None;
+            }
+        }
+    }
+
+    /// Computes the screen-x position where the vertical insertion
+    /// indicator should be drawn for the given `insert_idx`.
+    ///
+    /// The indicator is drawn at the gap between two tabs in the *post-
+    /// removal* list. We translate that back to the current (source-still-
+    /// in-place) `tab_rects` layout.
+    fn compute_drag_indicator_x(
+        &self,
+        tab_rects: &[Rect],
+        source_idx: usize,
+        section_start: usize,
+        section_end: usize,
+        insert_idx: usize,
+    ) -> f32 {
+        // Walk the non-source tabs in order; the `left_count`-th gap lies
+        // immediately to the left of the (left_count)-th non-source tab.
+        let left_count = insert_idx - section_start;
+        let mut seen = 0usize;
+        for (i, rect) in tab_rects
+            .iter()
+            .enumerate()
+            .take(section_end)
+            .skip(section_start)
+        {
+            if i == source_idx {
+                continue;
+            }
+            if seen == left_count {
+                return rect.min.x;
+            }
+            seen += 1;
+        }
+        // Pointer is past every non-source tab — draw at the right edge of
+        // the last non-source tab in the section.
+        for i in (section_start..section_end).rev() {
+            if i != source_idx {
+                return tab_rects[i].max.x;
+            }
+        }
+        // Fallback: section only contains the source tab. Shouldn't be
+        // reached because process_tab_drag skips the indicator in that case.
+        tab_rects[source_idx].min.x
     }
 
     /// Adjusts the scroll offset so that `target_rect` (in scroll content
