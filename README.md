@@ -338,17 +338,8 @@ The following features are planned for future releases, inspired by Notepad++ fu
 - [ ] Synchronized scrolling between two panes
 
 ### File
-- [ ] Print support
 - [ ] Open containing folder / open in terminal
-- [ ] Reload from disk (discard unsaved changes)
-- [ ] Save a Copy (save to a different path without changing the active file)
 - [ ] Find in Files (search across files in a directory)
-
-### Tabs
-- [ ] Pin tabs (exclude from "Close All")
-- [ ] Tab coloring
-- [ ] Close All / Close All But Active / Close Unchanged
-- [ ] Drag-and-drop tab reordering
 
 ### Macro Support
 - [ ] Record/playback macros (capture sequences of edits)
@@ -367,6 +358,48 @@ The following features are planned for future releases, inspired by Notepad++ fu
 - [ ] Shortcut mapper (customizable keybindings)
 - [ ] Right-to-left text support
 - [ ] Import/export settings
+
+---
+
+## Dependency audit notes
+
+The CI runs [`safedep/vet`](https://github.com/safedep/vet) on every pull request. As of release `2.0.0`, the report flags ~54 transitive crates under the *Popularity*, *Maintenance*, and *Security Posture* policies. **None** of the findings are vulnerabilities, malware, or license violations — they are heuristic warnings (low GitHub-stars count, dormant upstream, or older GitHub Actions used in the dependency's own CI).
+
+Tracing each warning with `cargo tree -i` shows that the entire set comes from exactly two direct dependencies:
+
+| Direct dependency | Flagged transitive crates | Status                                         |
+|-------------------|---------------------------|------------------------------------------------|
+| `printpdf 0.9.1`  | 53 of 54                  | Already on the latest published version        |
+| `opener 0.8.4`    | 1 (`normpath`)            | Already on the latest published version        |
+
+
+### Why `printpdf 0.9.1` is kept
+
+`printpdf` is the export-to-PDF backend used by `rust-pad-ui`. Since version 0.7 it has been built on top of an internally vendored slice of the Azul GUI toolkit (`azul-core`, `azul-layout`, `azul-css`, `rust-fontconfig`), the `html5ever`/`kuchiki`/`markup5ever` HTML stack, the `allsorts` OpenType shaper, and `lopdf`. That single direct dependency is the source of 53 of the 54 warnings.
+
+- There is **no newer release** on crates.io to bump to.
+- Upstream is in a long migration away from the `azul-*` fork; when that ships, the warnings clean themselves up in one version bump.
+- No flagged crate has a RustSec advisory. Most are "feature-complete and stable for years" (`byteorder`, `unicode-bidi`, `unicode-normalization`, `fst`, `utf-8`, `tinyvec_macros`, …) rather than dangerously abandoned.
+- Replacing `printpdf` with a lower-level crate (`pdf-writer`, `oxidize-pdf`, …) would require re-implementing font selection, line breaking, page layout, special-character handling, and table-of-contents support, requiring a lot of work to refactor that would discard the special-character improvements landed in PR #25, with no security benefit.
+
+**Decision: keep `printpdf 0.9.1`, watch upstream for the azul-removal release, and bump when it ships.**
+
+### Why `opener 0.8.4` is kept
+
+`opener` is used (with the `reveal` feature) to open files in the system default app and to "show in folder/Finder/Explorer" from inside the editor. It pulls in exactly one flagged crate, `normpath`: a small, stable Windows-path helper from the `dunce` family with no RustSec advisory.
+
+The obvious alternative, the [`open` crate](https://crates.io/crates/open), does **not** ship a reveal-in-file-manager equivalent. Re-implementing it cross-platform would mean writing the D-Bus dance against `org.freedesktop.portal.OpenURI` and `org.freedesktop.FileManager1` ourselves (which is exactly what `opener` already does), pulling in a D-Bus client crate (`zbus` and its own dependency tree), and still degrading to a "open the parent folder" fallback on minimal Linux desktops where no compliant file manager is installed. The cost-to-benefit ratio for chasing a single popularity warning on a stable helper crate does not justify the swap.
+
+**Decision: keep `opener 0.8.4` and accept the single `normpath` warning.**
+
+### Re-evaluation triggers
+
+The decisions above should be revisited if any of the following occur:
+
+- A new `printpdf` release ships (especially the azul-removal rewrite).
+- A new `opener` release drops `normpath`.
+- Any of the currently-flagged crates picks up an actual RustSec advisory or CVE.
+- `vet` reports a *Vulnerability*, *Malware*, or *License* finding (currently all green).
 
 ---
 
