@@ -7,7 +7,10 @@
 //! system.
 
 use anyhow::{anyhow, Context, Result};
-use printpdf::*;
+use printpdf::{
+    Color, FontId, Mm, Op, ParsedFont, PdfDocument, PdfFontHandle, PdfFontParseWarning, PdfPage,
+    PdfSaveOptions, PdfWarnMsg, Pt, Rgb, TextItem, TextMatrix,
+};
 
 use super::font::FONT_BYTES;
 use super::layout::{format_gutter, gutter_width_chars, Page, PageLayout};
