@@ -132,6 +132,7 @@ struct StatusBarData {
     bookmark_count: usize,
     zoom_level: f32,
     io_status: Option<String>,
+    print_in_progress: bool,
 }
 
 impl App {
@@ -187,6 +188,7 @@ impl App {
             bookmark_count: self.bookmarks.count(),
             zoom_level: self.theme_ctrl.zoom_level,
             io_status: self.io_activity.status_message().map(String::from),
+            print_in_progress: self.print_in_progress,
         }
     }
 
@@ -298,6 +300,17 @@ impl App {
             ui.add(
                 egui::Label::new(RichText::new(status).color(Color32::from_rgb(255, 200, 50)))
                     .selectable(false),
+            );
+            ui.spinner();
+        }
+
+        if data.print_in_progress {
+            ui.separator();
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Generating PDF…").color(Color32::from_rgb(255, 200, 50)),
+                )
+                .selectable(false),
             );
             ui.spinner();
         }

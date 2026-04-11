@@ -75,6 +75,25 @@ impl App {
                 ui.close();
             }
             ui.separator();
+            let can_print = self.can_print_active();
+            if ui
+                .add_enabled(
+                    can_print,
+                    egui::Button::new("Print...").shortcut_text("Ctrl+P"),
+                )
+                .clicked()
+            {
+                self.request_print();
+                ui.close();
+            }
+            if ui
+                .add_enabled(can_print, egui::Button::new("Export as PDF..."))
+                .clicked()
+            {
+                self.request_export_pdf();
+                ui.close();
+            }
+            ui.separator();
             if ui
                 .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
                 .clicked()

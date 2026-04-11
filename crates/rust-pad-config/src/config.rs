@@ -53,6 +53,9 @@ pub struct AppConfig {
     /// Maximum size (in KB) of unsaved tab content to persist in the session store.
     /// 0 = unlimited. Tabs exceeding this limit are saved as metadata only.
     pub session_content_max_kb: usize,
+    /// Whether the "Print..." / "Export as PDF..." pipeline renders a
+    /// line-number gutter in the generated PDF.
+    pub print_show_line_numbers: bool,
     pub themes: Vec<ThemeDefinition>,
 }
 
@@ -80,6 +83,7 @@ impl Default for AppConfig {
             recent_files: Vec::new(),
             max_file_size_mb: 512,
             session_content_max_kb: 10_240,
+            print_show_line_numbers: true,
             themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
         }
     }
