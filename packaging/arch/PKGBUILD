@@ -35,4 +35,6 @@ package() {
   cd "${pkgname}-${pkgver}"
   install -Dm755 "target/release/rust-pad" "${pkgdir}/usr/bin/rust-pad"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 packaging/linux/rust-pad.desktop "${pkgdir}/usr/share/applications/rust-pad.desktop"
+  install -Dm644 assets/logo.png "${pkgdir}/usr/share/icons/hicolor/128x128/apps/rust-pad.png"
 }

@@ -76,12 +76,66 @@ jobs:
       - name: Package (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          zip -j "${{ matrix.archive_name }}" "target/release/${{ matrix.artifact_name }}"
+          APP_DIR="Rust Pad.app/Contents"
+          mkdir -p "${APP_DIR}/MacOS"
+          mkdir -p "${APP_DIR}/Resources"
+
+          cp target/release/${{ matrix.artifact_name }} "${APP_DIR}/MacOS/rust-pad"
+          chmod 755 "${APP_DIR}/MacOS/rust-pad"
+
+          # Convert PNG to icns
+          mkdir -p rust-pad.iconset
+          sips -z 16 16     assets/logo.png --out rust-pad.iconset/icon_16x16.png
+          sips -z 32 32     assets/logo.png --out rust-pad.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/logo.png --out rust-pad.iconset/icon_32x32.png
+          sips -z 64 64     assets/logo.png --out rust-pad.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/logo.png --out rust-pad.iconset/icon_128x128.png
+          sips -z 256 256   assets/logo.png --out rust-pad.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/logo.png --out rust-pad.iconset/icon_256x256.png
+          sips -z 512 512   assets/logo.png --out rust-pad.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/logo.png --out rust-pad.iconset/icon_512x512.png
+          sips -z 1024 1024 assets/logo.png --out rust-pad.iconset/icon_512x512@2x.png
+          iconutil -c icns rust-pad.iconset -o "${APP_DIR}/Resources/rust-pad.icns"
+
+          # Create Info.plist
+          TAG="${GITHUB_REF#refs/tags/v}"
+          cat > "${APP_DIR}/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Rust Pad</string>
+            <key>CFBundleDisplayName</key>
+            <string>Rust Pad</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.brenordv.rust-pad</string>
+            <key>CFBundleVersion</key>
+            <string>${TAG}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${TAG}</string>
+            <key>CFBundleExecutable</key>
+            <string>rust-pad</string>
+            <key>CFBundleIconFile</key>
+            <string>rust-pad</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          zip -r "${{ matrix.archive_name }}" "Rust Pad.app"
 
       - name: Package (Linux tar.gz)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          tar czf "${{ matrix.archive_name }}" -C target/release "${{ matrix.artifact_name }}"
+          mkdir -p rust-pad-linux
+          cp target/release/${{ matrix.artifact_name }} rust-pad-linux/
+          cp packaging/linux/rust-pad.desktop rust-pad-linux/
+          cp assets/logo.png rust-pad-linux/rust-pad.png
+          tar czf "${{ matrix.archive_name }}" -C rust-pad-linux .
 
       - name: Build .deb package (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -90,9 +144,14 @@ jobs:
           DEB_DIR="rust-pad_${TAG}_amd64"
           mkdir -p "${DEB_DIR}/DEBIAN"
           mkdir -p "${DEB_DIR}/usr/bin"
+          mkdir -p "${DEB_DIR}/usr/share/applications"
+          mkdir -p "${DEB_DIR}/usr/share/icons/hicolor/128x128/apps"
 
           cp target/release/${{ matrix.artifact_name }} "${DEB_DIR}/usr/bin/rust-pad"
           chmod 755 "${DEB_DIR}/usr/bin/rust-pad"
+
+          cp packaging/linux/rust-pad.desktop "${DEB_DIR}/usr/share/applications/rust-pad.desktop"
+          cp assets/logo.png "${DEB_DIR}/usr/share/icons/hicolor/128x128/apps/rust-pad.png"
 
           cat > "${DEB_DIR}/DEBIAN/control" <<EOF
           Package: rust-pad

@@ -3196,7 +3196,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3205,11 +3205,12 @@ dependencies = [
  "rust-pad-ui",
  "tracing",
  "tracing-subscriber",
+ "winresource",
 ]
 
 [[package]]
 name = "rust-pad-config"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3223,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-core"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "chardetng",
@@ -3237,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-mod-history"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3250,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-ui"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3812,10 +3813,12 @@ version = "1.0.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbe30f93627849fa362d4a602212d41bb237dc2bd0f8ba0b2ce785012e124220"
 dependencies = [
+ "indexmap",
  "serde_core",
  "serde_spanned",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -3857,6 +3860,12 @@ checksum = "0742ff5ff03ea7e67c8ae6c93cac239e0d9784833362da3f9a9c1da8dfefcbdc"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tracing"
@@ -5039,6 +5048,16 @@ checksum = "a277a57398d4bfa075df44f501a17cfdf8542d224f0d36095a2adc7aee4ef0a5"
 dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]

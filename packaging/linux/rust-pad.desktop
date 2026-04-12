@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Rust Pad
+Comment=A cross-platform text editor built with Rust and egui
+Exec=rust-pad %F
+Icon=rust-pad
+Terminal=false
+Type=Application
+Categories=Utility;TextEditor;
+MimeType=text/plain;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-java;text/x-python;text/x-shellscript;text/xml;text/html;text/css;application/javascript;application/json;application/x-yaml;
+StartupWMClass=rust-pad
