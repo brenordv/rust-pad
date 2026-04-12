@@ -521,4 +521,70 @@ mod tests {
             SplitOrientation::Vertical
         );
     }
+
+    #[test]
+    fn build_then_apply_session_split_round_trips() {
+        // Set up an app with several tabs and a non-trivial split layout,
+        // serialize via `build_session_split`, then apply that snapshot to
+        // a fresh app and assert the layouts match.
+        let mut app = super::super::tests::test_app();
+        app.tabs.new_tab(); // doc 1
+        app.tabs.new_tab(); // doc 2
+        app.tabs.new_tab(); // doc 3
+        assert_eq!(app.tabs.tab_count(), 4);
+        app.tabs.switch_to(1);
+        app.toggle_split_horizontal();
+        // After enable_split with multi-tab: left=[0,2,3], right=[1],
+        // focused=Right.
+        app.tabs.focus_pane(PaneId::Left);
+
+        if let Some(s) = app.split.as_mut() {
+            s.divider_ratio = 0.42;
+        }
+
+        let snapshot = app.build_session_split().expect("split should be active");
+        assert_eq!(snapshot.orientation, "horizontal");
+        assert_eq!(snapshot.focused, "left");
+
+        // Now build a fresh app with the same number of documents and
+        // apply the snapshot.
+        let mut restored = super::super::tests::test_app();
+        restored.tabs.new_tab();
+        restored.tabs.new_tab();
+        restored.tabs.new_tab();
+        assert_eq!(restored.tabs.tab_count(), 4);
+        restored.apply_session_split(&snapshot);
+
+        assert!(restored.is_split());
+        let r_panes = restored.tabs.panes.as_ref().unwrap();
+        let o_panes = app.tabs.panes.as_ref().unwrap();
+        assert_eq!(r_panes.left_order, o_panes.left_order);
+        assert_eq!(r_panes.right_order, o_panes.right_order);
+        assert_eq!(r_panes.focused, o_panes.focused);
+        assert_eq!(
+            restored.split.as_ref().unwrap().orientation,
+            SplitOrientation::Horizontal
+        );
+        assert!((restored.split.as_ref().unwrap().divider_ratio - 0.42).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_session_split_rejects_out_of_range_indices() {
+        let mut app = super::super::tests::test_app();
+        app.tabs.new_tab(); // 2 docs total
+        let bad_snapshot = SessionSplit {
+            orientation: "vertical".to_string(),
+            divider_ratio: 0.5,
+            left_tab_indices: vec![0],
+            right_tab_indices: vec![99], // out of range
+            left_active: 0,
+            right_active: 0,
+            focused: "right".to_string(),
+        };
+        app.apply_session_split(&bad_snapshot);
+        assert!(
+            !app.is_split(),
+            "applying an out-of-range snapshot must not enable split"
+        );
+    }
 }

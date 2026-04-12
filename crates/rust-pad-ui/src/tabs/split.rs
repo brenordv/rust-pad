@@ -85,6 +85,22 @@ impl PaneTabSplit {
         }
     }
 
+    /// Sets the active document index for the given pane.
+    pub fn set_active(&mut self, pane: PaneId, doc_idx: usize) {
+        match pane {
+            PaneId::Left => self.left_active = doc_idx,
+            PaneId::Right => self.right_active = doc_idx,
+        }
+    }
+
+    /// Returns a mutable reference to the active-doc slot for the given pane.
+    pub fn active_mut(&mut self, pane: PaneId) -> &mut usize {
+        match pane {
+            PaneId::Left => &mut self.left_active,
+            PaneId::Right => &mut self.right_active,
+        }
+    }
+
     /// Returns the pane that currently owns the given document index, if any.
     pub fn pane_of(&self, doc_idx: usize) -> Option<PaneId> {
         if self.left_order.contains(&doc_idx) {

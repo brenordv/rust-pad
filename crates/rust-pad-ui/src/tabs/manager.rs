@@ -80,10 +80,32 @@ impl TabManager {
         let title = self.next_untitled_title();
         let mut doc = self.create_document();
         doc.title = title;
+        self.push_doc_and_activate(doc);
+    }
+
+    /// Appends `doc` to `documents`, assigns it to the focused pane in
+    /// split mode, and makes it the active tab.
+    ///
+    /// Every "open new tab" path goes through here so that newly created
+    /// documents land in whichever pane the user was looking at, and so
+    /// that no caller can forget the per-pane assignment step.
+    fn push_doc_and_activate(&mut self, doc: Document) {
         self.documents.push(doc);
         let new_idx = self.documents.len() - 1;
         self.assign_new_doc_to_focused_pane(new_idx);
         self.active = new_idx;
+    }
+
+    /// If a document with `path` is already open, switches to it and
+    /// returns `true`. Returns `false` otherwise.
+    fn switch_to_path_if_open(&mut self, path: &std::path::Path) -> bool {
+        for (idx, doc) in self.documents.iter().enumerate() {
+            if doc.file_path.as_deref() == Some(path) {
+                self.switch_to(idx);
+                return true;
+            }
+        }
+        false
     }
 
     /// Returns the next available "Untitled" title.
@@ -139,22 +161,14 @@ impl TabManager {
 
     /// Opens a document from file and adds it as a new tab.
     pub fn open_file(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
-        // Check if this file is already open
-        for (idx, doc) in self.documents.iter().enumerate() {
-            if doc.file_path.as_deref() == Some(path) {
-                self.switch_to(idx);
-                return Ok(());
-            }
+        if self.switch_to_path_if_open(path) {
+            return Ok(());
         }
-
         let doc = match &self.persistence {
             Some(pl) => Document::open_with_persistence(path, Arc::clone(pl), &self.config)?,
             None => Document::open(path)?,
         };
-        self.documents.push(doc);
-        let new_idx = self.documents.len() - 1;
-        self.assign_new_doc_to_focused_pane(new_idx);
-        self.active = new_idx;
+        self.push_doc_and_activate(doc);
         Ok(())
     }
 
@@ -163,22 +177,14 @@ impl TabManager {
     /// Used by the async I/O path when file bytes arrive from a background
     /// thread. Handles duplicate detection the same way as `open_file`.
     pub fn open_from_bytes(&mut self, path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
-        // Check if this file is already open
-        for (idx, doc) in self.documents.iter().enumerate() {
-            if doc.file_path.as_deref() == Some(path) {
-                self.switch_to(idx);
-                return Ok(());
-            }
+        if self.switch_to_path_if_open(path) {
+            return Ok(());
         }
-
         let doc = match &self.persistence {
             Some(pl) => Document::from_bytes(bytes, path, Some((Arc::clone(pl), &self.config)))?,
             None => Document::from_bytes(bytes, path, None)?,
         };
-        self.documents.push(doc);
-        let new_idx = self.documents.len() - 1;
-        self.assign_new_doc_to_focused_pane(new_idx);
-        self.active = new_idx;
+        self.push_doc_and_activate(doc);
         Ok(())
     }
 
@@ -214,18 +220,8 @@ impl TabManager {
         // tab order and rewrite indices that shifted left, then collapse
         // the split if either pane became empty.
         if let Some(panes) = self.panes.as_mut() {
-            Self::remove_and_renumber(&mut panes.left_order, idx);
-            Self::remove_and_renumber(&mut panes.right_order, idx);
-            if panes.left_active == idx {
-                panes.left_active = panes.left_order.first().copied().unwrap_or(0);
-            } else if panes.left_active > idx {
-                panes.left_active -= 1;
-            }
-            if panes.right_active == idx {
-                panes.right_active = panes.right_order.first().copied().unwrap_or(0);
-            } else if panes.right_active > idx {
-                panes.right_active -= 1;
-            }
+            Self::renumber_pane_after_remove(&mut panes.left_order, &mut panes.left_active, idx);
+            Self::renumber_pane_after_remove(&mut panes.right_order, &mut panes.right_active, idx);
             if panes.left_order.is_empty() || panes.right_order.is_empty() {
                 self.panes = None;
             }
@@ -255,6 +251,20 @@ impl TabManager {
         }
     }
 
+    /// Drops `removed` from a pane's `order` and rewrites the pane's
+    /// `active` doc index so it continues to point at a valid document.
+    /// If the active doc was the one being removed, falls back to the
+    /// pane's first survivor (or `0` for an empty pane — caller must
+    /// then collapse the split).
+    fn renumber_pane_after_remove(order: &mut Vec<usize>, active: &mut usize, removed: usize) {
+        Self::remove_and_renumber(order, removed);
+        if *active == removed {
+            *active = order.first().copied().unwrap_or(0);
+        } else if *active > removed {
+            *active -= 1;
+        }
+    }
+
     /// Switches to a specific tab.
     ///
     /// In split-view mode, switching to a tab also focuses the pane that
@@ -265,10 +275,7 @@ impl TabManager {
         }
         if let Some(panes) = self.panes.as_mut() {
             if let Some(pane) = panes.pane_of(idx) {
-                match pane {
-                    PaneId::Left => panes.left_active = idx,
-                    PaneId::Right => panes.right_active = idx,
-                }
+                panes.set_active(pane, idx);
                 panes.focused = pane;
             }
         }
@@ -465,10 +472,7 @@ impl TabManager {
             if !owns {
                 return;
             }
-            match pane {
-                PaneId::Left => panes.left_active = doc_idx,
-                PaneId::Right => panes.right_active = doc_idx,
-            }
+            panes.set_active(pane, doc_idx);
             if panes.focused == pane {
                 self.active = doc_idx;
             }
@@ -561,10 +565,7 @@ impl TabManager {
         // Update source pane's active doc if it pointed at the moved tab.
         // Picks any survivor; the empty-source case is handled below.
         let new_src_active = panes.order_for(source).first().copied().unwrap_or(doc_idx);
-        let src_active_ref = match source {
-            PaneId::Left => &mut panes.left_active,
-            PaneId::Right => &mut panes.right_active,
-        };
+        let src_active_ref = panes.active_mut(source);
         if *src_active_ref == doc_idx {
             *src_active_ref = new_src_active;
         }
@@ -574,10 +575,7 @@ impl TabManager {
         if !tgt_order.contains(&doc_idx) {
             tgt_order.push(doc_idx);
         }
-        match target {
-            PaneId::Left => panes.left_active = doc_idx,
-            PaneId::Right => panes.right_active = doc_idx,
-        }
+        panes.set_active(target, doc_idx);
         panes.focused = target;
         self.active = doc_idx;
 
@@ -598,10 +596,7 @@ impl TabManager {
             if !order.contains(&doc_idx) {
                 order.push(doc_idx);
             }
-            match pane {
-                PaneId::Left => panes.left_active = doc_idx,
-                PaneId::Right => panes.right_active = doc_idx,
-            }
+            panes.set_active(pane, doc_idx);
         }
     }
 }
@@ -1212,5 +1207,278 @@ mod tests {
         );
         assert_eq!(tm1.active_doc().encoding, tm2.active_doc().encoding);
         assert_eq!(tm1.active_doc().line_ending, tm2.active_doc().line_ending);
+    }
+
+    // ── Split-view: enable / disable ────────────────────────────────
+
+    #[test]
+    fn enable_split_single_tab_creates_second_doc() {
+        let mut tm = TabManager::new();
+        assert_eq!(tm.tab_count(), 1);
+        tm.enable_split();
+        assert!(tm.is_split());
+        assert_eq!(
+            tm.tab_count(),
+            2,
+            "single-tab case should fabricate a second doc so the right pane has content"
+        );
+        let panes = tm.panes.as_ref().unwrap();
+        assert_eq!(panes.left_order, vec![0]);
+        assert_eq!(panes.right_order, vec![1]);
+        assert_eq!(panes.focused, PaneId::Right);
+        assert_eq!(tm.active, 1);
+    }
+
+    #[test]
+    fn enable_split_multi_tab_partitions_active_into_right() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(2); // active = tab2
+        tm.enable_split();
+        assert!(tm.is_split());
+        let panes = tm.panes.as_ref().unwrap();
+        assert_eq!(panes.right_order, vec![2]);
+        assert_eq!(panes.left_order, vec![0, 1, 3]);
+        assert_eq!(panes.focused, PaneId::Right);
+        assert_eq!(panes.right_active, 2);
+        assert_eq!(tm.active, 2);
+    }
+
+    #[test]
+    fn enable_split_is_idempotent() {
+        let mut tm = make_n_tabs(3);
+        tm.enable_split();
+        let snapshot = tm.panes.clone();
+        tm.enable_split();
+        assert_eq!(
+            format!("{:?}", tm.panes),
+            format!("{:?}", snapshot),
+            "second enable_split should be a no-op"
+        );
+    }
+
+    #[test]
+    fn disable_split_drops_pane_state() {
+        let mut tm = make_n_tabs(3);
+        tm.enable_split();
+        assert!(tm.is_split());
+        tm.disable_split();
+        assert!(!tm.is_split());
+        assert!(tm.panes.is_none());
+        // Documents are kept intact.
+        assert_eq!(tm.tab_count(), 3);
+    }
+
+    // ── Split-view: new_tab / open_file land in focused pane ────────
+
+    #[test]
+    fn new_tab_in_split_mode_lands_in_focused_pane() {
+        let mut tm = make_n_tabs(2);
+        tm.enable_split();
+        // After enable_split with 2 tabs, left has [0], right has [1],
+        // focused is Right.
+        let new_idx_before = tm.tab_count();
+        tm.new_tab();
+        assert_eq!(tm.tab_count(), new_idx_before + 1);
+        let panes = tm.panes.as_ref().unwrap();
+        assert!(
+            panes.right_order.contains(&new_idx_before),
+            "new tab should land in the focused (right) pane"
+        );
+        assert_eq!(panes.right_active, new_idx_before);
+        assert_eq!(tm.active, new_idx_before);
+    }
+
+    #[test]
+    fn new_tab_in_split_mode_after_left_focus_lands_in_left() {
+        let mut tm = make_n_tabs(2);
+        tm.enable_split();
+        tm.focus_pane(PaneId::Left);
+        let new_idx = tm.tab_count();
+        tm.new_tab();
+        let panes = tm.panes.as_ref().unwrap();
+        assert!(panes.left_order.contains(&new_idx));
+        assert_eq!(panes.left_active, new_idx);
+    }
+
+    // ── Split-view: close_tab auto-collapse ─────────────────────────
+
+    #[test]
+    fn close_last_tab_in_pane_auto_collapses_split() {
+        // Reproduces the codepath that caused the "two clicks to split"
+        // bug — when the right pane only has one tab and that tab is
+        // closed, `panes` must drop to None so the UI is consistent.
+        let mut tm = make_n_tabs(3);
+        tm.enable_split(); // left=[0,1], right=[2], focused=Right
+        assert!(tm.is_split());
+
+        // Close the only tab in the right pane.
+        tm.close_tab(2);
+        assert!(
+            !tm.is_split(),
+            "split should auto-collapse when a pane becomes empty"
+        );
+        assert_eq!(tm.tab_count(), 2);
+    }
+
+    #[test]
+    fn close_non_last_tab_in_pane_keeps_split() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2,3], right=[0], focused=Right
+                           // Close one of the left pane's tabs (not the last).
+        tm.close_tab(2); // closes tab2 (idx 2 in documents)
+        assert!(tm.is_split(), "split should stay active");
+        let panes = tm.panes.as_ref().unwrap();
+        // After removing idx 2, indices > 2 are decremented.
+        // Left was [1, 2, 3] → after removing 2 → [1, 2] (3 became 2).
+        assert_eq!(panes.left_order, vec![1, 2]);
+        assert_eq!(panes.right_order, vec![0]);
+    }
+
+    #[test]
+    fn close_active_tab_in_pane_picks_survivor() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2,3], right=[0]
+                           // Switch left pane's active to tab2 (doc idx 2).
+        tm.switch_pane_to(PaneId::Left, 2);
+        assert_eq!(tm.panes.as_ref().unwrap().left_active, 2);
+
+        // Close the active doc in the left pane.
+        tm.close_tab(2);
+        assert!(tm.is_split());
+        let panes = tm.panes.as_ref().unwrap();
+        // Left was [1, 2, 3], left_active was 2. After removing 2:
+        // order becomes [1, 2] (3 → 2), and left_active falls back to
+        // the new first element.
+        assert_eq!(panes.left_order, vec![1, 2]);
+        assert!(panes.left_order.contains(&panes.left_active));
+    }
+
+    // ── Split-view: move_tab_to_pane ────────────────────────────────
+
+    #[test]
+    fn move_tab_to_pane_moves_doc_and_focuses_target() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2,3], right=[0], focused=Right
+                           // Move tab1 from left to right.
+        tm.move_tab_to_pane(1, PaneId::Right);
+        assert!(tm.is_split());
+        let panes = tm.panes.as_ref().unwrap();
+        assert_eq!(panes.left_order, vec![2, 3]);
+        assert_eq!(panes.right_order, vec![0, 1]);
+        assert_eq!(panes.right_active, 1);
+        assert_eq!(panes.focused, PaneId::Right);
+        assert_eq!(tm.active, 1);
+    }
+
+    #[test]
+    fn move_tab_to_pane_collapses_when_source_empty() {
+        let mut tm = make_n_tabs(2);
+        tm.enable_split(); // left=[0], right=[1]
+                           // Move tab0 from left to right — left becomes empty.
+        tm.move_tab_to_pane(0, PaneId::Right);
+        assert!(
+            !tm.is_split(),
+            "split should collapse when the source pane empties"
+        );
+    }
+
+    #[test]
+    fn move_tab_to_pane_same_pane_is_noop() {
+        let mut tm = make_n_tabs(3);
+        tm.enable_split();
+        let before = format!("{:?}", tm.panes);
+        // Tab2 lives in the right pane (the active doc when split was enabled).
+        tm.move_tab_to_pane(2, PaneId::Right);
+        let after = format!("{:?}", tm.panes);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn move_tab_to_pane_when_not_split_is_noop() {
+        let mut tm = make_n_tabs(3);
+        assert!(!tm.is_split());
+        tm.move_tab_to_pane(1, PaneId::Right);
+        assert!(!tm.is_split(), "no-op should not enable split");
+    }
+
+    #[test]
+    fn move_tab_to_pane_out_of_range_is_noop() {
+        let mut tm = make_n_tabs(2);
+        tm.enable_split();
+        let before = format!("{:?}", tm.panes);
+        tm.move_tab_to_pane(99, PaneId::Right);
+        assert_eq!(before, format!("{:?}", tm.panes));
+    }
+
+    // ── Split-view: focus_pane / switch_pane_to / switch_to ─────────
+
+    #[test]
+    fn focus_pane_updates_active_to_that_panes_doc() {
+        let mut tm = make_n_tabs(3);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2], right=[0], focused=Right
+        assert_eq!(tm.active, 0);
+        tm.focus_pane(PaneId::Left);
+        let panes = tm.panes.as_ref().unwrap();
+        assert_eq!(panes.focused, PaneId::Left);
+        assert_eq!(tm.active, panes.left_active);
+    }
+
+    #[test]
+    fn switch_pane_to_only_honours_owned_doc() {
+        let mut tm = make_n_tabs(3);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2], right=[0]
+                           // Try to switch the left pane to a doc that lives in the right pane.
+        tm.switch_pane_to(PaneId::Left, 0);
+        let panes = tm.panes.as_ref().unwrap();
+        assert_ne!(
+            panes.left_active, 0,
+            "left pane should not switch to a right-owned doc"
+        );
+    }
+
+    #[test]
+    fn switch_to_in_split_mode_focuses_owning_pane() {
+        let mut tm = make_n_tabs(3);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2], right=[0], focused=Right
+                           // Switch to a doc that lives in the left pane.
+        tm.switch_to(1);
+        let panes = tm.panes.as_ref().unwrap();
+        assert_eq!(panes.focused, PaneId::Left);
+        assert_eq!(panes.left_active, 1);
+        assert_eq!(tm.active, 1);
+    }
+
+    // ── Split-view: move_tab renumbers pane indices ─────────────────
+
+    #[test]
+    fn move_tab_in_split_mode_renumbers_pane_orders() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2,3], right=[0]
+                           // Move doc 3 to position 0 (in front of everything).
+        tm.move_tab(3, 0);
+        let panes = tm.panes.as_ref().unwrap();
+        // Documents now go [tab3, tab0, tab1, tab2]; the pane orders
+        // must reflect the new indices but track the same Documents.
+        // Originally left held [1,2,3]; after the move tab1 is at idx 2,
+        // tab2 at idx 3, tab3 at idx 0, so left should be [2, 3, 0].
+        assert_eq!(panes.left_order, vec![2, 3, 0]);
+        assert_eq!(panes.right_order, vec![1]); // tab0 is at idx 1 now
+    }
+
+    // ── pane_tab_order in single-pane mode ──────────────────────────
+
+    #[test]
+    fn pane_tab_order_single_pane_left_returns_all() {
+        let tm = make_n_tabs(3);
+        assert!(!tm.is_split());
+        assert_eq!(tm.pane_tab_order(PaneId::Left), vec![0, 1, 2]);
+        assert_eq!(tm.pane_tab_order(PaneId::Right), Vec::<usize>::new());
     }
 }
