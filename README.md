@@ -396,26 +396,11 @@ The following features are planned for future releases, inspired by Notepad++ fu
 
 ## Dependency audit notes
 
-The CI runs [`safedep/vet`](https://github.com/safedep/vet) on every pull request. As of release `2.0.0`, the report flags ~54 transitive crates under the *Popularity*, *Maintenance*, and *Security Posture* policies. **None** of the findings are vulnerabilities, malware, or license violations — they are heuristic warnings (low GitHub-stars count, dormant upstream, or older GitHub Actions used in the dependency's own CI).
-
-Tracing each warning with `cargo tree -i` shows that the entire set comes from exactly two direct dependencies:
+The CI runs [`safedep/vet`](https://github.com/safedep/vet) on every pull request. As of release `2.0.0`, the report originally flagged ~54 transitive crates under the *Popularity*, *Maintenance*, and *Security Posture* policies. In v2.1, 53 of those warnings were eliminated by replacing `printpdf` with `pdf-writer` (see below).
 
 | Direct dependency | Flagged transitive crates | Status                                         |
 |-------------------|---------------------------|------------------------------------------------|
-| `printpdf 0.9.1`  | 53 of 54                  | Already on the latest published version        |
 | `opener 0.8.4`    | 1 (`normpath`)            | Already on the latest published version        |
-
-
-### Why `printpdf 0.9.1` is kept
-
-`printpdf` is the export-to-PDF backend used by `rust-pad-ui`. Since version 0.7 it has been built on top of an internally vendored slice of the Azul GUI toolkit (`azul-core`, `azul-layout`, `azul-css`, `rust-fontconfig`), the `html5ever`/`kuchiki`/`markup5ever` HTML stack, the `allsorts` OpenType shaper, and `lopdf`. That single direct dependency is the source of 53 of the 54 warnings.
-
-- There is **no newer release** on crates.io to bump to.
-- Upstream is in a long migration away from the `azul-*` fork; when that ships, the warnings clean themselves up in one version bump.
-- No flagged crate has a RustSec advisory. Most are "feature-complete and stable for years" (`byteorder`, `unicode-bidi`, `unicode-normalization`, `fst`, `utf-8`, `tinyvec_macros`, …) rather than dangerously abandoned.
-- Replacing `printpdf` with a lower-level crate (`pdf-writer`, `oxidize-pdf`, …) would require re-implementing font selection, line breaking, page layout, special-character handling, and table-of-contents support, requiring a lot of work to refactor that would discard the special-character improvements landed in PR #25, with no security benefit.
-
-**Decision: keep `printpdf 0.9.1`, watch upstream for the azul-removal release, and bump when it ships.**
 
 ### Why `opener 0.8.4` is kept
 
@@ -429,7 +414,6 @@ The obvious alternative, the [`open` crate](https://crates.io/crates/open), does
 
 The decisions above should be revisited if any of the following occur:
 
-- A new `printpdf` release ships (especially the azul-removal rewrite).
 - A new `opener` release drops `normpath`.
 - Any of the currently-flagged crates picks up an actual RustSec advisory or CVE.
 - `vet` reports a *Vulnerability*, *Malware*, or *License* finding (currently all green).

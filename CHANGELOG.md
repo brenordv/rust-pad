@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.1.0]
+
+### Changed
+
+#### Replace `printpdf` with `pdf-writer` for PDF generation
+- Replaced the `printpdf 0.9.1` PDF backend with `pdf-writer 0.14.0` (from the typst team) to resolve RUSTSEC-2023-0019 (`kuchiki 0.8.1` unmaintained advisory).
+- Added `ttf-parser 0.25.1` for font metric extraction and cmap parsing, enabling proper Type0/CIDFont embedding with a ToUnicode CMap (text is now selectable and searchable in generated PDFs).
+- Eliminated 53 transitive dependency warnings from the azul/html5ever/kuchiki subtree. The new `pdf-writer` brings only 4 transitive deps (`bitflags`, `itoa`, `ryu`, `memchr`).
+- PDF output is functionally identical: same A4 layout, same header/footer/gutter, same monospace DejaVu Sans Mono font, same Unicode coverage. No user-facing changes.
+
 ## [2.0.0]
 
 ### Added

@@ -1,16 +1,15 @@
-//! Renders laid-out pages into PDF bytes using `printpdf`.
+//! Renders laid-out pages into PDF bytes using `pdf-writer`.
 //!
 //! The bulk of the complexity (wrapping, tab expansion, page breaks) lives
 //! in [`layout`](super::layout) so this module can focus on translating
-//! a `Vec<Page>` into `printpdf` operations. Header, footer, and line
-//! numbers are drawn here because they depend on the PDF coordinate
-//! system.
+//! a `Vec<Page>` into a PDF. Header, footer, and line numbers are drawn
+//! here because they depend on the PDF coordinate system.
+
+use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Context, Result};
-use printpdf::{
-    Color, FontId, Mm, Op, ParsedFont, PdfDocument, PdfFontHandle, PdfFontParseWarning, PdfPage,
-    PdfSaveOptions, PdfWarnMsg, Pt, Rgb, TextItem, TextMatrix,
-};
+use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
+use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str};
 
 use super::font::FONT_BYTES;
 use super::layout::{format_gutter, gutter_width_chars, Page, PageLayout};
@@ -36,157 +35,301 @@ pub struct PdfInput<'a> {
     pub total_source_lines: usize,
 }
 
+/// Parsed font metrics and char→GID mapping extracted from the bundled TTF.
+struct FontInfo {
+    char_to_gid: BTreeMap<char, u16>,
+    ascender: f32,
+    descender: f32,
+    cap_height: f32,
+    bbox: Rect,
+    default_width: f32,
+}
+
+/// Parses the bundled TTF and extracts metrics and the cmap table needed
+/// for PDF font embedding and text encoding.
+fn parse_font() -> Result<FontInfo> {
+    let face = ttf_parser::Face::parse(FONT_BYTES, 0)
+        .map_err(|e| anyhow!("failed to parse bundled font: {e:?}"))?;
+
+    let units_per_em = face.units_per_em() as f32;
+    let scale = 1000.0 / units_per_em;
+
+    let ascender = face.ascender() as f32 * scale;
+    let descender = face.descender() as f32 * scale;
+    let cap_height = face.capital_height().unwrap_or(face.ascender()) as f32 * scale;
+
+    let ttf_bbox = face.global_bounding_box();
+    let bbox = Rect::new(
+        ttf_bbox.x_min as f32 * scale,
+        ttf_bbox.y_min as f32 * scale,
+        ttf_bbox.x_max as f32 * scale,
+        ttf_bbox.y_max as f32 * scale,
+    );
+
+    // Build char→GID mapping for the Basic Multilingual Plane.
+    let mut char_to_gid = BTreeMap::new();
+    for code_point in 0u32..0x1_0000 {
+        if let Some(ch) = char::from_u32(code_point) {
+            if let Some(gid) = face.glyph_index(ch) {
+                if gid.0 != 0 {
+                    char_to_gid.insert(ch, gid.0);
+                }
+            }
+        }
+    }
+
+    // Monospace advance width in PDF units (1/1000 of em).
+    let default_width = face
+        .glyph_index('M')
+        .and_then(|gid| face.glyph_hor_advance(gid))
+        .map(|w| w as f32 * scale)
+        .unwrap_or(600.0);
+
+    Ok(FontInfo {
+        char_to_gid,
+        ascender,
+        descender,
+        cap_height,
+        bbox,
+        default_width,
+    })
+}
+
+/// Encodes a string as big-endian GID pairs for an Identity-H CIDFont.
+fn encode_text(text: &str, char_to_gid: &BTreeMap<char, u16>) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(text.len() * 2);
+    for ch in text.chars() {
+        let gid = char_to_gid.get(&ch).copied().unwrap_or(0);
+        buf.extend_from_slice(&gid.to_be_bytes());
+    }
+    buf
+}
+
 /// Renders `input` into a complete PDF byte buffer.
 ///
 /// Returns an error if the bundled font cannot be parsed (should not
 /// happen in practice — see the unit test in [`super::font`]) or if
-/// `printpdf` reports a failure during serialization.
+/// `pdf-writer` produces an invalid buffer.
 pub fn render_to_bytes(input: &PdfInput<'_>) -> Result<Vec<u8>> {
-    let mut font_warnings: Vec<PdfFontParseWarning> = Vec::new();
-    let parsed = ParsedFont::from_bytes(FONT_BYTES, 0, &mut font_warnings)
-        .ok_or_else(|| anyhow!("failed to parse bundled monospace font"))?;
-    if !font_warnings.is_empty() {
-        tracing::debug!("printpdf font parse warnings: {:?}", font_warnings);
-    }
-
-    let mut doc = PdfDocument::new(&input.title);
-    let font_id = doc.add_font(&parsed);
-    let mut warnings: Vec<PdfWarnMsg> = Vec::new();
+    let font_info = parse_font()?;
 
     let total_pages = input.pages.len().max(1);
     let gutter_width = gutter_width_chars(input.total_source_lines, input.layout.show_line_numbers);
 
-    let mut pdf_pages: Vec<PdfPage> = Vec::with_capacity(total_pages);
-    for (page_idx, page) in input.pages.iter().enumerate() {
-        let ops = build_page_ops(page, page_idx, total_pages, gutter_width, input, &font_id);
-        pdf_pages.push(PdfPage::new(
-            Mm(pt_to_mm(input.layout.page_width_pt)),
-            Mm(pt_to_mm(input.layout.page_height_pt)),
-            ops,
-        ));
+    // ── Ref allocation ──────────────────────────────────────────────
+    // Layout: catalog, page_tree, [page, content] × N, font objects.
+    let catalog_id = Ref::new(1);
+    let page_tree_id = Ref::new(2);
+    let base = 3i32;
+    let font_base = base + 2 * total_pages as i32;
+    let type0_font_id = Ref::new(font_base);
+    let cid_font_id = Ref::new(font_base + 1);
+    let descriptor_id = Ref::new(font_base + 2);
+    let font_stream_id = Ref::new(font_base + 3);
+    let cmap_id = Ref::new(font_base + 4);
+
+    let page_ids: Vec<Ref> = (0..total_pages)
+        .map(|i| Ref::new(base + 2 * i as i32))
+        .collect();
+    let content_ids: Vec<Ref> = (0..total_pages)
+        .map(|i| Ref::new(base + 2 * i as i32 + 1))
+        .collect();
+
+    // ── Build content streams ───────────────────────────────────────
+    let content_streams: Vec<Vec<u8>> = input
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(idx, page)| {
+            build_page_content(
+                page,
+                idx,
+                total_pages,
+                gutter_width,
+                input,
+                &font_info.char_to_gid,
+            )
+        })
+        .collect();
+
+    // ── Assemble PDF ────────────────────────────────────────────────
+    let mut pdf = Pdf::new();
+
+    // Catalog → page tree
+    pdf.catalog(catalog_id).pages(page_tree_id);
+
+    // Page tree with shared font resources (inherited by all pages).
+    {
+        let mut pages = pdf.pages(page_tree_id);
+        pages.kids(page_ids.iter().copied());
+        pages.count(total_pages as i32);
+        pages.resources().fonts().pair(Name(b"F1"), type0_font_id);
     }
 
-    let bytes = doc
-        .with_pages(pdf_pages)
-        .save(&PdfSaveOptions::default(), &mut warnings);
-    if !warnings.is_empty() {
-        tracing::debug!("printpdf save warnings: {:?}", warnings);
+    // Individual pages + content streams.
+    let media_box = Rect::new(
+        0.0,
+        0.0,
+        input.layout.page_width_pt,
+        input.layout.page_height_pt,
+    );
+    for i in 0..total_pages {
+        {
+            let mut page = pdf.page(page_ids[i]);
+            page.parent(page_tree_id);
+            page.media_box(media_box);
+            page.contents(content_ids[i]);
+        }
+        pdf.stream(content_ids[i], &content_streams[i]);
     }
 
-    // Sanity check — printpdf does not return a Result from save() but we
-    // want to surface a failure if the buffer looks invalid. A valid PDF
-    // starts with `%PDF-` and ends with `%%EOF`.
+    // Font embedding.
+    embed_font(
+        &mut pdf,
+        &font_info,
+        type0_font_id,
+        cid_font_id,
+        descriptor_id,
+        font_stream_id,
+        cmap_id,
+    );
+
+    let bytes = pdf.finish();
     if bytes.len() < 32 || !bytes.starts_with(b"%PDF-") {
-        return Err(anyhow!("printpdf produced an empty or invalid buffer"));
+        return Err(anyhow!("pdf-writer produced an empty or invalid buffer"));
     }
     Ok(bytes)
 }
 
-/// Converts a point value to millimeters (1 mm = 2.83465 pt).
-fn pt_to_mm(pt: f32) -> f32 {
-    pt / 2.834_645_7
-}
+/// Writes the Type0 + CIDFont + FontDescriptor + font stream + ToUnicode
+/// CMap into the PDF.
+fn embed_font(
+    pdf: &mut Pdf,
+    info: &FontInfo,
+    type0_id: Ref,
+    cid_font_id: Ref,
+    descriptor_id: Ref,
+    font_stream_id: Ref,
+    cmap_id: Ref,
+) {
+    let font_name = Name(b"DejaVuSansMono");
 
-/// Builds an `Op::SetTextMatrix` that **absolutely** positions the text
-/// cursor at `(x_pt, y_pt)` measured from the lower-left of the page.
-///
-/// We deliberately do not use `Op::SetTextCursor`: that op serializes to
-/// the PDF `Td` operator, which is *relative* to the start of the current
-/// text line. Issuing several `SetTextCursor` calls in the same text
-/// section therefore makes their offsets compound, sending every line
-/// after the first one off-page. `SetTextMatrix` serializes to `Tm`, which
-/// **replaces** the current text matrix and gives us true absolute
-/// positioning — exactly what we need for laying out independent header,
-/// body, and footer rows.
-fn move_to_pt(x_pt: f32, y_pt: f32) -> Op {
-    Op::SetTextMatrix {
-        matrix: TextMatrix::Translate(Pt(x_pt), Pt(y_pt)),
+    // Type0 (composite) font.
+    {
+        let mut f = pdf.type0_font(type0_id);
+        f.base_font(font_name);
+        f.encoding_predefined(Name(b"Identity-H"));
+        f.descendant_font(cid_font_id);
+        f.to_unicode(cmap_id);
     }
+
+    // CID font (descendant — TrueType outlines).
+    {
+        let mut f = pdf.cid_font(cid_font_id);
+        f.subtype(CidFontType::Type2);
+        f.base_font(font_name);
+        f.system_info(SystemInfo {
+            registry: Str(b"Adobe"),
+            ordering: Str(b"Identity"),
+            supplement: 0,
+        });
+        f.font_descriptor(descriptor_id);
+        f.default_width(info.default_width);
+        f.cid_to_gid_map_predefined(Name(b"Identity"));
+    }
+
+    // Font descriptor.
+    {
+        let mut f = pdf.font_descriptor(descriptor_id);
+        f.name(font_name);
+        f.flags(FontFlags::FIXED_PITCH | FontFlags::NON_SYMBOLIC);
+        f.bbox(info.bbox);
+        f.italic_angle(0.0);
+        f.ascent(info.ascender);
+        f.descent(info.descender);
+        f.cap_height(info.cap_height);
+        f.stem_v(80.0);
+        f.font_file2(font_stream_id);
+    }
+
+    // Raw TTF stream (font file data).
+    pdf.stream(font_stream_id, FONT_BYTES);
+
+    // ToUnicode CMap — enables text selection/search in the PDF.
+    let mut gid_to_char: BTreeMap<u16, char> = BTreeMap::new();
+    for (&ch, &gid) in &info.char_to_gid {
+        gid_to_char.entry(gid).or_insert(ch);
+    }
+    let mut cmap = UnicodeCmap::new(
+        Name(b"Custom"),
+        SystemInfo {
+            registry: Str(b"Adobe"),
+            ordering: Str(b"Identity"),
+            supplement: 0,
+        },
+    );
+    for (&gid, &ch) in &gid_to_char {
+        cmap.pair(gid, ch);
+    }
+    let cmap_data = cmap.finish();
+    pdf.stream(cmap_id, &cmap_data);
 }
 
-/// Builds the full op-list for a single page: header, body, footer.
-fn build_page_ops(
+/// Builds the PDF content stream (raw operator bytes) for a single page:
+/// header, body lines, and footer.
+fn build_page_content(
     page: &Page,
     page_idx: usize,
     total_pages: usize,
     gutter_width: usize,
     input: &PdfInput<'_>,
-    font_id: &FontId,
-) -> Vec<Op> {
+    char_to_gid: &BTreeMap<char, u16>,
+) -> Vec<u8> {
     let layout = input.layout;
-    let font_size = Pt(layout.font_size_pt);
-    let line_h = Pt(layout.line_height_pt);
+    let font_size = layout.font_size_pt;
     let page_height_pt = layout.page_height_pt;
 
-    // PDF coordinates are bottom-left origin. `y_top_body` is the baseline
-    // of the first body line, counted down from the top of the page.
+    // PDF coordinates are bottom-left origin.
     let y_top_body = page_height_pt - layout.margin_pt - layout.header_height_pt;
     let y_footer_baseline = layout.margin_pt;
 
-    let text_color = Color::Rgb(Rgb {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        icc_profile: None,
-    });
-    let gutter_color = Color::Rgb(Rgb {
-        r: 0.45,
-        g: 0.45,
-        b: 0.45,
-        icc_profile: None,
-    });
+    let mut content = Content::new();
+    content.save_state();
+    content.begin_text();
+    content.set_font(Name(b"F1"), font_size);
+    content.set_leading(layout.line_height_pt);
+    content.set_fill_rgb(0.0, 0.0, 0.0);
 
-    let mut ops: Vec<Op> = Vec::with_capacity(page.lines.len() * 4 + 16);
-    ops.push(Op::SaveGraphicsState);
-    ops.push(Op::StartTextSection);
-    ops.push(Op::SetFont {
-        font: PdfFontHandle::External(font_id.clone()),
-        size: font_size,
-    });
-    ops.push(Op::SetLineHeight { lh: line_h });
-    ops.push(Op::SetFillColor {
-        col: text_color.clone(),
-    });
+    // ── Header ──────────────────────────────────────────────────────
+    let header_y = page_height_pt - layout.margin_pt - font_size;
 
-    // -- Header --
-    let header_y = page_height_pt - layout.margin_pt - layout.font_size_pt;
-    ops.push(move_to_pt(layout.margin_pt, header_y));
-    ops.push(Op::ShowText {
-        items: vec![TextItem::Text(truncate_display(&input.title, 80))],
-    });
+    // Title (left-aligned).
+    content.set_text_matrix([1.0, 0.0, 0.0, 1.0, layout.margin_pt, header_y]);
+    let encoded = encode_text(&truncate_display(&input.title, 80), char_to_gid);
+    content.show(Str(&encoded));
 
+    // Subtitle (second row, dimmed).
     if !input.subtitle.is_empty() {
-        // Second header row: subtitle (full path) smaller / lighter.
         let sub_y = header_y - layout.line_height_pt;
-        ops.push(Op::SetFillColor {
-            col: gutter_color.clone(),
-        });
-        ops.push(move_to_pt(layout.margin_pt, sub_y));
-        ops.push(Op::ShowText {
-            items: vec![TextItem::Text(truncate_display(&input.subtitle, 100))],
-        });
-        ops.push(Op::SetFillColor {
-            col: text_color.clone(),
-        });
+        content.set_fill_rgb(0.45, 0.45, 0.45);
+        content.set_text_matrix([1.0, 0.0, 0.0, 1.0, layout.margin_pt, sub_y]);
+        let encoded = encode_text(&truncate_display(&input.subtitle, 100), char_to_gid);
+        content.show(Str(&encoded));
+        content.set_fill_rgb(0.0, 0.0, 0.0);
     }
 
-    // Right-aligned timestamp on the first header row.
+    // Timestamp (right-aligned on the first header row).
     let ts = input.generated_at.format("%Y-%m-%d %H:%M:%S").to_string();
-    let ts_width_pt = ts.chars().count() as f32 * layout.font_size_pt * layout.char_advance_ratio;
+    let ts_width_pt = ts.chars().count() as f32 * font_size * layout.char_advance_ratio;
     let ts_x = (layout.page_width_pt - layout.margin_pt - ts_width_pt).max(layout.margin_pt);
-    ops.push(Op::SetFillColor {
-        col: gutter_color.clone(),
-    });
-    ops.push(move_to_pt(ts_x, header_y));
-    ops.push(Op::ShowText {
-        items: vec![TextItem::Text(ts)],
-    });
-    ops.push(Op::SetFillColor {
-        col: text_color.clone(),
-    });
+    content.set_fill_rgb(0.45, 0.45, 0.45);
+    content.set_text_matrix([1.0, 0.0, 0.0, 1.0, ts_x, header_y]);
+    let encoded = encode_text(&ts, char_to_gid);
+    content.show(Str(&encoded));
+    content.set_fill_rgb(0.0, 0.0, 0.0);
 
-    // -- Body --
-    let char_width_pt = layout.font_size_pt * layout.char_advance_ratio;
+    // ── Body ────────────────────────────────────────────────────────
+    let char_width_pt = font_size * layout.char_advance_ratio;
     let gutter_pt = gutter_width as f32 * char_width_pt;
     let body_x = layout.margin_pt + gutter_pt;
 
@@ -205,39 +348,32 @@ fn build_page_ops(
                 },
                 gutter_width,
             );
-            ops.push(Op::SetFillColor {
-                col: gutter_color.clone(),
-            });
-            ops.push(move_to_pt(layout.margin_pt, baseline_y));
-            ops.push(Op::ShowText {
-                items: vec![TextItem::Text(gutter_text)],
-            });
-            ops.push(Op::SetFillColor {
-                col: text_color.clone(),
-            });
+            content.set_fill_rgb(0.45, 0.45, 0.45);
+            content.set_text_matrix([1.0, 0.0, 0.0, 1.0, layout.margin_pt, baseline_y]);
+            let encoded = encode_text(&gutter_text, char_to_gid);
+            content.show(Str(&encoded));
+            content.set_fill_rgb(0.0, 0.0, 0.0);
         }
 
         if !row.text.is_empty() {
-            ops.push(move_to_pt(body_x, baseline_y));
-            ops.push(Op::ShowText {
-                items: vec![TextItem::Text(row.text.clone())],
-            });
+            content.set_text_matrix([1.0, 0.0, 0.0, 1.0, body_x, baseline_y]);
+            let encoded = encode_text(&row.text, char_to_gid);
+            content.show(Str(&encoded));
         }
     }
 
-    // -- Footer --
+    // ── Footer ──────────────────────────────────────────────────────
     let footer_text = format!("Page {} of {}", page_idx + 1, total_pages);
     let footer_width_pt = footer_text.chars().count() as f32 * char_width_pt;
     let footer_x = (layout.page_width_pt - footer_width_pt) / 2.0;
-    ops.push(Op::SetFillColor { col: gutter_color });
-    ops.push(move_to_pt(footer_x, y_footer_baseline));
-    ops.push(Op::ShowText {
-        items: vec![TextItem::Text(footer_text)],
-    });
+    content.set_fill_rgb(0.45, 0.45, 0.45);
+    content.set_text_matrix([1.0, 0.0, 0.0, 1.0, footer_x, y_footer_baseline]);
+    let encoded = encode_text(&footer_text, char_to_gid);
+    content.show(Str(&encoded));
 
-    ops.push(Op::EndTextSection);
-    ops.push(Op::RestoreGraphicsState);
-    ops
+    content.end_text();
+    content.restore_state();
+    content.finish().to_vec()
 }
 
 /// Truncates a display string to at most `max` characters, appending an
@@ -342,20 +478,14 @@ mod tests {
     }
 
     /// Regression test for the "PDF only contains the filename, no body"
-    /// bug. The first version of this module used `Op::SetTextCursor` to
-    /// position every line, which serializes to PDF's `Td` operator —
-    /// **relative** to the start of the current text line. The result was
-    /// that only the very first text emit (the title in the header) landed
-    /// at the right place; every subsequent emit compounded the offset and
-    /// was rendered off-page, so the printed PDF only ever showed the
-    /// filename. The fix is to use `Op::SetTextMatrix(Translate(..))`,
-    /// which serializes to `Tm` and gives true absolute positioning.
+    /// bug. The first version of the print module used relative `Td`
+    /// positioning, which compounded offsets and pushed everything off-page.
+    /// The fix is to use `Tm` (absolute text matrix) for every text emit.
     ///
-    /// This test calls `build_page_ops` directly and verifies that:
-    ///   * every text-positioning op is a `SetTextMatrix`, never a
-    ///     `SetTextCursor`;
-    ///   * the body emits at least one `ShowText` per laid-out row, so
-    ///     content actually reaches the page.
+    /// This test calls `build_page_content` directly and inspects the raw
+    /// content stream bytes to verify:
+    ///   * every text-positioning op is `Tm`, never `Td`;
+    ///   * the body emits at least one `Tj` per laid-out row.
     #[test]
     fn body_text_uses_absolute_positioning() {
         let layout = PageLayout::a4_default(true);
@@ -363,13 +493,8 @@ mod tests {
         let pages = super::super::layout::paginate(text, &layout);
         assert_eq!(pages.len(), 1, "small doc should fit on one page");
 
-        // We need a FontId to call build_page_ops. Build a throwaway doc
-        // and font exactly the way render_to_bytes does.
-        let mut font_warnings: Vec<PdfFontParseWarning> = Vec::new();
-        let parsed = ParsedFont::from_bytes(FONT_BYTES, 0, &mut font_warnings)
-            .expect("bundled font must parse");
-        let mut doc = PdfDocument::new("regression");
-        let font_id = doc.add_font(&parsed);
+        let font_info = parse_font().expect("bundled font must parse");
+        let gutter_width = gutter_width_chars(3, true);
 
         let input = PdfInput {
             title: "regression.txt".to_string(),
@@ -379,45 +504,37 @@ mod tests {
             layout: &layout,
             total_source_lines: 3,
         };
-        let ops = build_page_ops(
+        let content_bytes = build_page_content(
             &pages[0],
             0,
             1,
-            gutter_width_chars(3, true),
+            gutter_width,
             &input,
-            &font_id,
+            &font_info.char_to_gid,
         );
 
-        let cursor_count = ops
-            .iter()
-            .filter(|o| matches!(o, Op::SetTextCursor { .. }))
-            .count();
+        let stream = String::from_utf8_lossy(&content_bytes);
+
+        // Td (relative positioning) must not appear.
+        let td_count = stream.lines().filter(|l| l.ends_with(" Td")).count();
         assert_eq!(
-            cursor_count, 0,
-            "Op::SetTextCursor must not be used (it serializes to relative `Td`)"
+            td_count, 0,
+            "`Td` operator must not be used (it serializes relative positioning)"
         );
 
-        let matrix_count = ops
-            .iter()
-            .filter(|o| matches!(o, Op::SetTextMatrix { .. }))
-            .count();
-        // Header title + subtitle + timestamp + footer = 4 fixed positions,
-        // plus per-row gutter and body text positions. With 3 body rows and
-        // line numbers enabled, that's 3 gutter + 3 body = 6 row positions.
-        // Total expected: 4 + 6 = 10 absolute moves.
+        // Tm (absolute positioning) — header title + subtitle + timestamp
+        // + footer = 4 fixed, plus per-row gutter + body text.
+        let tm_count = stream.lines().filter(|l| l.ends_with(" Tm")).count();
         assert!(
-            matrix_count >= 8,
-            "expected several SetTextMatrix ops for header/body/footer, got {matrix_count}"
+            tm_count >= 8,
+            "expected several Tm ops for header/body/footer, got {tm_count}"
         );
 
-        let show_text_count = ops
-            .iter()
-            .filter(|o| matches!(o, Op::ShowText { .. }))
-            .count();
-        // Title + subtitle + timestamp + footer + 3 gutters + 3 body lines = 10.
+        // Tj (show text) — at least one per emit.
+        let tj_count = stream.lines().filter(|l| l.ends_with(" Tj")).count();
         assert!(
-            show_text_count >= 8,
-            "expected at least one ShowText per body line, got {show_text_count}"
+            tj_count >= 8,
+            "expected at least one Tj per body line, got {tj_count}"
         );
     }
 
