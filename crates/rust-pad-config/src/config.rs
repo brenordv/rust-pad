@@ -56,6 +56,13 @@ pub struct AppConfig {
     /// Whether the "Print..." / "Export as PDF..." pipeline renders a
     /// line-number gutter in the generated PDF.
     pub print_show_line_numbers: bool,
+    /// Whether synchronized scrolling between split panes is enabled.
+    /// Only takes effect when split view is active. Persisted across runs
+    /// but treated as off until the user actually splits.
+    pub sync_scroll_enabled: bool,
+    /// Whether synchronized scrolling mirrors horizontal deltas in addition
+    /// to vertical. Has no effect when `sync_scroll_enabled` is false.
+    pub sync_scroll_horizontal: bool,
     pub themes: Vec<ThemeDefinition>,
 }
 
@@ -84,6 +91,8 @@ impl Default for AppConfig {
             max_file_size_mb: 512,
             session_content_max_kb: 10_240,
             print_show_line_numbers: true,
+            sync_scroll_enabled: false,
+            sync_scroll_horizontal: true,
             themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
         }
     }
@@ -249,8 +258,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_clamps_zoom() {
-        let mut config = AppConfig::default();
-        config.current_zoom_level = 10.0;
+        let mut config = AppConfig {
+            current_zoom_level: 10.0,
+            ..Default::default()
+        };
         config.sanitize();
         assert!((config.current_zoom_level - 10.0).abs() < f32::EPSILON);
 
@@ -261,8 +272,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_clamps_font_size() {
-        let mut config = AppConfig::default();
-        config.font_size = 2.0;
+        let mut config = AppConfig {
+            font_size: 2.0,
+            ..Default::default()
+        };
         config.sanitize();
         assert!((config.font_size - 6.0).abs() < f32::EPSILON);
 
@@ -273,16 +286,20 @@ mod tests {
 
     #[test]
     fn test_sanitize_resets_unknown_theme_mode() {
-        let mut config = AppConfig::default();
-        config.current_theme = "NonExistent".to_string();
+        let mut config = AppConfig {
+            current_theme: "NonExistent".to_string(),
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.current_theme, "System");
     }
 
     #[test]
     fn test_sanitize_allows_custom_theme_name() {
-        let mut config = AppConfig::default();
-        config.current_theme = "Wacky".to_string();
+        let mut config = AppConfig {
+            current_theme: "Wacky".to_string(),
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.current_theme, "Wacky");
     }
@@ -305,8 +322,10 @@ mod tests {
 
     #[test]
     fn test_with_builtins_merged_adds_missing() {
-        let mut config = AppConfig::default();
-        config.themes = vec![sample_wacky()];
+        let mut config = AppConfig {
+            themes: vec![sample_wacky()],
+            ..Default::default()
+        };
         config.with_builtins_merged();
         assert!(config.find_theme("Dark").is_some());
         assert!(config.find_theme("Light").is_some());
@@ -318,8 +337,10 @@ mod tests {
         let mut custom_dark = builtin_dark();
         custom_dark.editor.bg_color = crate::HexColor::rgb(255, 0, 0);
 
-        let mut config = AppConfig::default();
-        config.themes = vec![custom_dark.clone()];
+        let mut config = AppConfig {
+            themes: vec![custom_dark.clone()],
+            ..Default::default()
+        };
         config.with_builtins_merged();
 
         let dark = config.find_theme("Dark").unwrap();
@@ -347,41 +368,51 @@ mod tests {
 
     #[test]
     fn test_sanitize_clamps_auto_save_interval_minimum() {
-        let mut config = AppConfig::default();
-        config.auto_save_interval_secs = 1;
+        let mut config = AppConfig {
+            auto_save_interval_secs: 1,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.auto_save_interval_secs, 5);
     }
 
     #[test]
     fn test_sanitize_preserves_valid_auto_save_interval() {
-        let mut config = AppConfig::default();
-        config.auto_save_interval_secs = 60;
+        let mut config = AppConfig {
+            auto_save_interval_secs: 60,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.auto_save_interval_secs, 60);
     }
 
     #[test]
     fn test_sanitize_clamps_auto_save_interval_zero() {
-        let mut config = AppConfig::default();
-        config.auto_save_interval_secs = 0;
+        let mut config = AppConfig {
+            auto_save_interval_secs: 0,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.auto_save_interval_secs, 5);
     }
 
     #[test]
     fn test_sanitize_auto_save_interval_boundary() {
-        let mut config = AppConfig::default();
-        config.auto_save_interval_secs = 5;
+        let mut config = AppConfig {
+            auto_save_interval_secs: 5,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.auto_save_interval_secs, 5);
     }
 
     #[test]
     fn test_auto_save_serde_round_trip() {
-        let mut config = AppConfig::default();
-        config.auto_save_enabled = true;
-        config.auto_save_interval_secs = 45;
+        let config = AppConfig {
+            auto_save_enabled: true,
+            auto_save_interval_secs: 45,
+            ..Default::default()
+        };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert!(parsed.auto_save_enabled);
@@ -410,11 +441,13 @@ mod tests {
 
     #[test]
     fn test_recent_files_serde_round_trip() {
-        let mut config = AppConfig::default();
-        config.recent_files_enabled = false;
-        config.recent_files_max_count = 25;
-        config.recent_files_cleanup = RecentFilesCleanup::Both;
-        config.recent_files = vec!["/tmp/a.txt".to_string(), "/tmp/b.rs".to_string()];
+        let config = AppConfig {
+            recent_files_enabled: false,
+            recent_files_max_count: 25,
+            recent_files_cleanup: RecentFilesCleanup::Both,
+            recent_files: vec!["/tmp/a.txt".to_string(), "/tmp/b.rs".to_string()],
+            ..Default::default()
+        };
 
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
@@ -427,8 +460,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_clamps_recent_files_max_count() {
-        let mut config = AppConfig::default();
-        config.recent_files_max_count = 0;
+        let mut config = AppConfig {
+            recent_files_max_count: 0,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.recent_files_max_count, 1);
 
@@ -439,15 +474,17 @@ mod tests {
 
     #[test]
     fn test_sanitize_truncates_recent_files() {
-        let mut config = AppConfig::default();
-        config.recent_files_max_count = 3;
-        config.recent_files = vec![
-            "a.txt".to_string(),
-            "b.txt".to_string(),
-            "c.txt".to_string(),
-            "d.txt".to_string(),
-            "e.txt".to_string(),
-        ];
+        let mut config = AppConfig {
+            recent_files_max_count: 3,
+            recent_files: vec![
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "c.txt".to_string(),
+                "d.txt".to_string(),
+                "e.txt".to_string(),
+            ],
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.recent_files.len(), 3);
     }
@@ -472,8 +509,10 @@ mod tests {
 
     #[test]
     fn test_session_content_max_kb_serde_round_trip() {
-        let mut config = AppConfig::default();
-        config.session_content_max_kb = 5_000;
+        let config = AppConfig {
+            session_content_max_kb: 5_000,
+            ..Default::default()
+        };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.session_content_max_kb, 5_000);
@@ -488,24 +527,30 @@ mod tests {
 
     #[test]
     fn test_sanitize_session_content_max_kb_zero_is_unlimited() {
-        let mut config = AppConfig::default();
-        config.session_content_max_kb = 0;
+        let mut config = AppConfig {
+            session_content_max_kb: 0,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.session_content_max_kb, 0);
     }
 
     #[test]
     fn test_sanitize_clamps_session_content_max_kb_upper() {
-        let mut config = AppConfig::default();
-        config.session_content_max_kb = 200_000;
+        let mut config = AppConfig {
+            session_content_max_kb: 200_000,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.session_content_max_kb, 102_400);
     }
 
     #[test]
     fn test_sanitize_preserves_valid_session_content_max_kb() {
-        let mut config = AppConfig::default();
-        config.session_content_max_kb = 2_048;
+        let mut config = AppConfig {
+            session_content_max_kb: 2_048,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.session_content_max_kb, 2_048);
     }
@@ -526,31 +571,39 @@ mod tests {
 
     #[test]
     fn test_max_file_size_bytes_zero_means_no_limit() {
-        let mut config = AppConfig::default();
-        config.max_file_size_mb = 0;
+        let config = AppConfig {
+            max_file_size_mb: 0,
+            ..Default::default()
+        };
         assert_eq!(config.max_file_size_bytes(), None);
     }
 
     #[test]
     fn test_sanitize_max_file_size_mb_zero_is_no_limit() {
-        let mut config = AppConfig::default();
-        config.max_file_size_mb = 0;
+        let mut config = AppConfig {
+            max_file_size_mb: 0,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.max_file_size_mb, 0);
     }
 
     #[test]
     fn test_sanitize_clamps_max_file_size_mb_upper() {
-        let mut config = AppConfig::default();
-        config.max_file_size_mb = 20_000;
+        let mut config = AppConfig {
+            max_file_size_mb: 20_000,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.max_file_size_mb, 10_240);
     }
 
     #[test]
     fn test_sanitize_preserves_valid_max_file_size_mb() {
-        let mut config = AppConfig::default();
-        config.max_file_size_mb = 100;
+        let mut config = AppConfig {
+            max_file_size_mb: 100,
+            ..Default::default()
+        };
         config.sanitize();
         assert_eq!(config.max_file_size_mb, 100);
     }
@@ -564,8 +617,10 @@ mod tests {
 
     #[test]
     fn test_max_file_size_serde_round_trip() {
-        let mut config = AppConfig::default();
-        config.max_file_size_mb = 256;
+        let config = AppConfig {
+            max_file_size_mb: 256,
+            ..Default::default()
+        };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.max_file_size_mb, 256);

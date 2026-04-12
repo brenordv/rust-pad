@@ -60,11 +60,45 @@ pub enum SessionTabEntry {
     },
 }
 
-/// The full session state: ordered list of tabs + which one was active.
+/// Persisted split-view state. `None` (top-level) means the previous
+/// session was in single-pane mode.
+///
+/// Tab indices are positions inside [`SessionData::tabs`], not document
+/// indices in the running app. They are translated back to live document
+/// indices on restore by [`crate::session`] consumers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSplit {
+    /// `"vertical"` or `"horizontal"`. Stored as a string so future
+    /// orientation additions don't shift bincode tags.
+    pub orientation: String,
+    /// Fraction of the central panel allocated to the Left/top pane.
+    pub divider_ratio: f32,
+    /// Indices into `SessionData::tabs` belonging to the Left pane.
+    pub left_tab_indices: Vec<usize>,
+    /// Indices into `SessionData::tabs` belonging to the Right pane.
+    pub right_tab_indices: Vec<usize>,
+    /// Index into `left_tab_indices` for the Left pane's active tab.
+    pub left_active: usize,
+    /// Index into `right_tab_indices` for the Right pane's active tab.
+    pub right_active: usize,
+    /// `"left"` or `"right"`.
+    pub focused: String,
+}
+
+/// The full session state: ordered list of tabs + which one was active +
+/// optional split view layout.
+///
+/// **Versioning note:** see [`SessionTabEntry`] — adding fields is a
+/// breaking change for the bincode format. Old session files that
+/// predate this struct's `split` field will fail to deserialize and be
+/// discarded by [`SessionStore::load_session`]'s corruption handler;
+/// the user will see a fresh empty workspace once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub tabs: Vec<SessionTabEntry>,
     pub active_tab_index: usize,
+    /// Split-view layout, or `None` for single-pane sessions.
+    pub split: Option<SessionSplit>,
 }
 
 /// Persistence layer for session state, backed by redb.
@@ -301,6 +335,7 @@ mod tests {
                 },
             ],
             active_tab_index: 1,
+            split: None,
         };
 
         store.save_session(&data).expect("save");
@@ -456,6 +491,7 @@ mod tests {
                 tab_color: None,
             }],
             active_tab_index: 0,
+            split: None,
         };
         store.save_session(&data).expect("save");
         assert!(store.load_session().expect("load").is_some());

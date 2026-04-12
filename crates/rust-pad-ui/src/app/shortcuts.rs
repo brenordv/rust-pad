@@ -71,6 +71,13 @@ impl App {
         let dialog_open = self.is_dialog_open();
 
         for key in &keys {
+            // View / split shortcuts (Ctrl+Alt+...) run FIRST. Otherwise
+            // Ctrl+Alt+V/H/S are stolen by the file/search/edit handlers
+            // below, which only check `ctrl` and would interpret them as
+            // Save / Find / Paste.
+            if self.handle_view_shortcut(*key, ctrl, alt) {
+                continue;
+            }
             // Always-active shortcuts first, then editor-only shortcuts.
             if self.handle_file_shortcut(*key, ctrl, shift) {
                 continue;
@@ -151,6 +158,27 @@ impl App {
             egui::Key::Plus => self.theme_ctrl.zoom_in(),
             egui::Key::Minus => self.theme_ctrl.zoom_out(),
             egui::Key::Num0 => self.theme_ctrl.zoom_reset(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// View / split shortcuts (Ctrl+Alt+V, Ctrl+Alt+H, Ctrl+Alt+S).
+    /// Returns `true` if the key was consumed.
+    fn handle_view_shortcut(&mut self, key: egui::Key, ctrl: bool, alt: bool) -> bool {
+        if !ctrl || !alt {
+            return false;
+        }
+        match key {
+            egui::Key::V => self.toggle_split_vertical(),
+            egui::Key::H => self.toggle_split_horizontal(),
+            // Sync scroll only takes effect while split view is active,
+            // matching the menu entry's enabled state.
+            egui::Key::S => {
+                if self.is_split() {
+                    self.toggle_sync_scroll();
+                }
+            }
             _ => return false,
         }
         true

@@ -4,10 +4,15 @@
 //! context menus, middle-click close, new tab creation, and horizontal
 //! scrolling when tabs overflow the available width.
 
+use std::sync::Arc;
+
 use eframe::egui;
-use egui::{Color32, Rect, RichText, ScrollArea, Sense, Stroke, Vec2, Visuals};
+use egui::{Color32, Galley, Rect, RichText, ScrollArea, Sense, Stroke, Vec2, Visuals};
 
 use super::App;
+use crate::tabs::PaneId;
+use rust_pad_core::document::Document;
+use rust_pad_core::tab_color::TabColor;
 
 /// Transient state tracked while the user is dragging a tab to reorder it.
 ///
@@ -166,6 +171,185 @@ fn compute_drag_indicator_x(
         .unwrap_or_default()
 }
 
+/// Formats a tab title with optional pin glyph and modified marker.
+///
+/// The pushpin emoji (U+1F4CC) renders via the `NotoEmoji-Regular.ttf`
+/// that egui ships in its default font set, so no font setup is required.
+fn format_tab_title(pinned: bool, modified: bool, title: &str) -> String {
+    match (pinned, modified) {
+        (true, true) => format!("\u{1F4CC} {title} *"),
+        (true, false) => format!("\u{1F4CC} {title}"),
+        (false, true) => format!("{title} *"),
+        (false, false) => title.to_string(),
+    }
+}
+
+/// Picks the title text color for a tab based on its active state.
+///
+/// Active tabs use a high-contrast color tuned for the current theme;
+/// inactive tabs fall back to the noninteractive widget foreground.
+fn title_color_for(is_active: bool, visuals: &Visuals) -> Color32 {
+    if !is_active {
+        return visuals.widgets.noninteractive.fg_stroke.color;
+    }
+    if visuals.dark_mode {
+        Color32::from_rgb(220, 220, 220)
+    } else {
+        Color32::from_rgb(30, 30, 30)
+    }
+}
+
+/// Resolves the accent stroke color shown above a tab.
+///
+/// Priority: an explicit per-tab color always wins; otherwise the active
+/// tab gets the theme accent and inactive tabs have no accent line.
+fn resolve_accent_color(
+    tab_color: Option<TabColor>,
+    is_active: bool,
+    active_accent: Color32,
+) -> Option<Color32> {
+    match tab_color {
+        Some(c) => {
+            let [r, g, b] = c.to_rgb();
+            Some(Color32::from_rgb(r, g, b))
+        }
+        None if is_active => Some(active_accent),
+        None => None,
+    }
+}
+
+/// Computes the full tab width given the laid-out title width.
+fn compute_tab_width(title_width: f32) -> f32 {
+    TAB_PADDING + title_width + TITLE_CLOSE_GAP + CLOSE_AREA_SIZE + TAB_PADDING
+}
+
+/// Inputs to [`paint_tab_chrome`].
+///
+/// Grouped into a struct because the helper would otherwise take ten
+/// positional arguments and trip clippy's `too_many_arguments` lint.
+struct TabChrome {
+    tab_rect: Rect,
+    title_galley: Arc<Galley>,
+    title_color: Color32,
+    is_active: bool,
+    is_hovered: bool,
+    is_drag_source: bool,
+    accent: Option<Color32>,
+}
+
+/// Renders the visual chrome for a single tab button: background, accent
+/// line, title text, and the close-button glyph (when active or hovered).
+///
+/// Returns the close-button rect and whether the pointer is currently
+/// over it, so the caller can wire up its own click handling. The same
+/// helper drives both the single-pane tab bar (`render_tab_button`) and
+/// the per-pane tab bar (`render_pane_tab_button`).
+fn paint_tab_chrome(ui: &egui::Ui, visuals: &Visuals, chrome: &TabChrome) -> (Rect, bool) {
+    let painter = ui.painter().clone();
+    let TabChrome {
+        tab_rect,
+        title_galley,
+        title_color,
+        is_active,
+        is_hovered,
+        is_drag_source,
+        accent,
+    } = chrome;
+    let tab_rect = *tab_rect;
+    let is_active = *is_active;
+    let is_hovered = *is_hovered;
+
+    // -- Background --
+    let mut fill = if is_active {
+        visuals.widgets.active.bg_fill
+    } else if is_hovered {
+        visuals.widgets.hovered.weak_bg_fill
+    } else {
+        visuals.faint_bg_color
+    };
+    if *is_drag_source {
+        // Dim the dragged tab so the user sees where it came from while
+        // the drop position is indicated separately by the insertion line.
+        fill = fill.gamma_multiply(0.45);
+    }
+    painter.rect_filled(
+        tab_rect,
+        egui::CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 0,
+            se: 0,
+        },
+        fill,
+    );
+
+    // -- Accent line --
+    if let Some(color) = accent {
+        painter.line_segment(
+            [
+                egui::Pos2::new(tab_rect.min.x, tab_rect.min.y),
+                egui::Pos2::new(tab_rect.max.x, tab_rect.min.y),
+            ],
+            Stroke::new(2.0, *color),
+        );
+    }
+
+    // -- Title text (vertically centered, after left padding) --
+    let title_pos = egui::Pos2::new(
+        tab_rect.min.x + TAB_PADDING,
+        tab_rect.center().y - title_galley.size().y / 2.0,
+    );
+    painter.galley(title_pos, title_galley.clone(), *title_color);
+
+    // -- Close button area (always at the same position) --
+    let close_rect = Rect::from_min_size(
+        egui::Pos2::new(
+            tab_rect.max.x - TAB_PADDING - CLOSE_AREA_SIZE,
+            tab_rect.center().y - CLOSE_AREA_SIZE / 2.0,
+        ),
+        Vec2::splat(CLOSE_AREA_SIZE),
+    );
+    let pointer_in_close = ui
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|pos| close_rect.contains(pos));
+
+    if is_active || is_hovered {
+        if pointer_in_close {
+            painter.rect_filled(close_rect, 2.0, visuals.widgets.hovered.bg_fill);
+        }
+        let close_font = egui::FontId::proportional(14.0);
+        let close_color = visuals.widgets.noninteractive.fg_stroke.color;
+        let close_galley = painter.layout_no_wrap("\u{00D7}".to_owned(), close_font, close_color);
+        let close_text_pos = egui::Pos2::new(
+            close_rect.center().x - close_galley.size().x / 2.0,
+            close_rect.center().y - close_galley.size().y / 2.0,
+        );
+        painter.galley(close_text_pos, close_galley, close_color);
+    }
+
+    (close_rect, pointer_in_close)
+}
+
+/// Lays out the tab title galley and computes its display color and
+/// the full tab size.
+///
+/// Both the single-pane and per-pane tab bars share this exact prelude;
+/// extracting it keeps tab rendering pixel-identical between the two.
+fn layout_tab_title(
+    ui: &egui::Ui,
+    visuals: &Visuals,
+    doc: &Document,
+    is_active: bool,
+) -> (Arc<Galley>, Color32, Vec2) {
+    let title = format_tab_title(doc.pinned, doc.modified, &doc.title);
+    let title_color = title_color_for(is_active, visuals);
+    let title_font = egui::FontId::proportional(14.0);
+    let title_galley = ui.painter().layout_no_wrap(title, title_font, title_color);
+    let tab_width = compute_tab_width(title_galley.size().x);
+    let tab_size = Vec2::new(tab_width, TAB_HEIGHT);
+    (title_galley, title_color, tab_size)
+}
+
 impl App {
     /// Renders the tab bar with active tab highlighting, close buttons,
     /// and horizontal scrolling when tabs overflow.
@@ -316,132 +500,29 @@ impl App {
     ) -> Rect {
         let doc = &self.tabs.documents[idx];
         let is_active = idx == self.tabs.active;
-        let tab_color = doc.tab_color;
         let is_drag_source = self.tab_drag.is_some_and(|d| d.source_idx == idx);
 
-        // Title composition: optional pin glyph + title + optional modified marker.
-        // The pushpin emoji (U+1F4CC) renders via NotoEmoji-Regular.ttf which egui
-        // ships in its default font set, so no font setup is required.
-        let title = match (doc.pinned, doc.modified) {
-            (true, true) => format!("\u{1F4CC} {} *", doc.title),
-            (true, false) => format!("\u{1F4CC} {}", doc.title),
-            (false, true) => format!("{} *", doc.title),
-            (false, false) => doc.title.clone(),
-        };
-
-        // -- Measure title text --
-        let title_color = if is_active {
-            if visuals.dark_mode {
-                Color32::from_rgb(220, 220, 220)
-            } else {
-                Color32::from_rgb(30, 30, 30)
-            }
-        } else {
-            visuals.widgets.noninteractive.fg_stroke.color
-        };
-
-        let title_font = egui::FontId::proportional(14.0);
-        let title_galley = ui
-            .painter()
-            .layout_no_wrap(title.clone(), title_font, title_color);
-        let title_width = title_galley.size().x;
-
-        // -- Calculate tab dimensions --
-        let tab_width = TAB_PADDING + title_width + TITLE_CLOSE_GAP + CLOSE_AREA_SIZE + TAB_PADDING;
-        let tab_size = Vec2::new(tab_width, TAB_HEIGHT);
+        let (title_galley, title_color, tab_size) = layout_tab_title(ui, visuals, doc, is_active);
+        let title_for_widget_info = title_galley.text().to_owned();
+        let accent = resolve_accent_color(doc.tab_color, is_active, self.theme_ctrl.accent_color);
 
         // -- Allocate the single rect for the entire tab --
         let (tab_rect, response) = ui.allocate_exact_size(tab_size, Sense::click_and_drag());
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &title));
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &title_for_widget_info)
+        });
         let is_hovered = response.hovered();
-        let painter = ui.painter();
 
-        // -- Paint background --
-        let fill = if is_active {
-            visuals.widgets.active.bg_fill
-        } else if is_hovered {
-            visuals.widgets.hovered.weak_bg_fill
-        } else {
-            visuals.faint_bg_color
-        };
-        // Dim the dragged tab so the user sees where it came from while the
-        // drop position is indicated separately by the insertion line.
-        let fill = if is_drag_source {
-            fill.gamma_multiply(0.45)
-        } else {
-            fill
-        };
-
-        painter.rect_filled(
+        let chrome = TabChrome {
             tab_rect,
-            egui::CornerRadius {
-                nw: 4,
-                ne: 4,
-                sw: 0,
-                se: 0,
-            },
-            fill,
-        );
-
-        // -- Paint accent line --
-        // Priority: user-assigned tab color > active theme accent.
-        // A tab with a custom color always shows its accent, even when
-        // inactive. An active tab without a custom color falls back to
-        // the theme accent (existing behavior).
-        let accent_stroke_color = match tab_color {
-            Some(c) => {
-                let [r, g, b] = c.to_rgb();
-                Some(Color32::from_rgb(r, g, b))
-            }
-            None if is_active => Some(self.theme_ctrl.accent_color),
-            None => None,
+            title_galley,
+            title_color,
+            is_active,
+            is_hovered,
+            is_drag_source,
+            accent,
         };
-        if let Some(color) = accent_stroke_color {
-            painter.line_segment(
-                [
-                    egui::Pos2::new(tab_rect.min.x, tab_rect.min.y),
-                    egui::Pos2::new(tab_rect.max.x, tab_rect.min.y),
-                ],
-                Stroke::new(2.0, color),
-            );
-        }
-
-        // -- Paint title text (vertically centered, after left padding) --
-        let title_pos = egui::Pos2::new(
-            tab_rect.min.x + TAB_PADDING,
-            tab_rect.center().y - title_galley.size().y / 2.0,
-        );
-        painter.galley(title_pos, title_galley, title_color);
-
-        // -- Close button area (always at the same position) --
-        let close_rect = Rect::from_min_size(
-            egui::Pos2::new(
-                tab_rect.max.x - TAB_PADDING - CLOSE_AREA_SIZE,
-                tab_rect.center().y - CLOSE_AREA_SIZE / 2.0,
-            ),
-            Vec2::splat(CLOSE_AREA_SIZE),
-        );
-
-        let pointer_in_close = ui
-            .input(|i| i.pointer.hover_pos())
-            .is_some_and(|pos| close_rect.contains(pos));
-
-        // Draw the close glyph when tab is active or hovered
-        if is_active || is_hovered {
-            if pointer_in_close {
-                painter.rect_filled(close_rect, 2.0, visuals.widgets.hovered.bg_fill);
-            }
-
-            let close_font = egui::FontId::proportional(14.0);
-            let close_color = visuals.widgets.noninteractive.fg_stroke.color;
-            let close_galley =
-                painter.layout_no_wrap("\u{00D7}".to_owned(), close_font, close_color);
-            let close_text_pos = egui::Pos2::new(
-                close_rect.center().x - close_galley.size().x / 2.0,
-                close_rect.center().y - close_galley.size().y / 2.0,
-            );
-            painter.galley(close_text_pos, close_galley, close_color);
-        }
+        let (close_rect, pointer_in_close) = paint_tab_chrome(ui, visuals, &chrome);
 
         // -- Interaction handling --
         // `clicked()` does NOT fire if the widget was dragged, so the click
@@ -481,7 +562,7 @@ impl App {
 
         // -- 1px separator between tabs --
         if idx < self.tabs.tab_count() - 1 {
-            painter.line_segment(
+            ui.painter().line_segment(
                 [
                     egui::Pos2::new(tab_rect.max.x, tab_rect.min.y + 4.0),
                     egui::Pos2::new(tab_rect.max.x, tab_rect.max.y - 4.0),
@@ -754,6 +835,212 @@ impl App {
             }
         }
     }
+
+    /// Renders a pane-aware tab strip showing only the documents owned by
+    /// `pane`. Used by [`App::render_split_panes`] when split view is active.
+    ///
+    /// Compared to [`App::show_tab_bar`], this version is intentionally
+    /// minimal: no horizontal overflow scrolling, no auto-scroll, no
+    /// cross-pane drag-and-drop reordering. The right-click context menu
+    /// adds "Move to Other Pane" so users can reassign tabs without DnD.
+    pub(crate) fn show_pane_tab_bar(&mut self, ui: &mut egui::Ui, pane: PaneId) {
+        let visuals = ui.visuals().clone();
+        let order = self.tabs.pane_tab_order(pane);
+        let active_doc = self.tabs.pane_active_doc(pane);
+        let mut actions = PaneTabActions::default();
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for &doc_idx in &order {
+                self.render_pane_tab_button(ui, doc_idx, active_doc, &visuals, &mut actions);
+            }
+            render_pane_new_tab_button(ui, &visuals, &mut actions);
+        });
+
+        self.apply_pane_tab_actions(pane, actions);
+    }
+
+    /// Renders a single tab button for the per-pane tab bar.
+    ///
+    /// Updates `actions` rather than mutating tab state directly so the
+    /// caller can defer all mutations until after the rendering loop has
+    /// stopped iterating over `pane_tab_order`.
+    fn render_pane_tab_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc_idx: usize,
+        active_doc: usize,
+        visuals: &Visuals,
+        actions: &mut PaneTabActions,
+    ) {
+        let doc = &self.tabs.documents[doc_idx];
+        let is_active = doc_idx == active_doc;
+        let (title_galley, title_color, tab_size) = layout_tab_title(ui, visuals, doc, is_active);
+        let accent = resolve_accent_color(doc.tab_color, is_active, self.theme_ctrl.accent_color);
+
+        let (tab_rect, response) = ui.allocate_exact_size(tab_size, Sense::click());
+        let is_hovered = response.hovered();
+
+        let chrome = TabChrome {
+            tab_rect,
+            title_galley,
+            title_color,
+            is_active,
+            is_hovered,
+            is_drag_source: false,
+            accent,
+        };
+        let (_close_rect, pointer_in_close) = paint_tab_chrome(ui, visuals, &chrome);
+
+        if response.clicked() {
+            if pointer_in_close && (is_active || is_hovered) {
+                actions.tab_to_close = Some(doc_idx);
+            } else {
+                actions.switch_to = Some(doc_idx);
+            }
+        }
+        if response.middle_clicked() {
+            actions.tab_to_close = Some(doc_idx);
+        }
+
+        // Context menu mirrors the single-pane tab bar's per-tab actions
+        // plus "Move to Other Pane". Bulk-close actions are deliberately
+        // omitted since they don't have an obvious pane scope in v1.
+        let is_pinned = self.tabs.documents[doc_idx].pinned;
+        render_pane_tab_context_menu(doc_idx, is_pinned, &response, actions);
+    }
+
+    /// Applies the deferred actions collected during the per-pane tab bar
+    /// render pass.
+    ///
+    /// Kept separate so that the rendering loop never mutates the document
+    /// list while iterating, and so the orchestrator function stays under
+    /// SonarCloud's cognitive complexity threshold.
+    fn apply_pane_tab_actions(&mut self, pane: PaneId, actions: PaneTabActions) {
+        let PaneTabActions {
+            switch_to,
+            tab_to_close,
+            move_to_other,
+            pin_action,
+            color_action,
+            new_tab_in_pane,
+        } = actions;
+
+        if let Some(idx) = switch_to {
+            self.tabs.switch_pane_to(pane, idx);
+            self.tabs.focus_pane(pane);
+        }
+        if let Some(idx) = tab_to_close {
+            self.tabs.focus_pane(pane);
+            self.request_close_tab(idx);
+        }
+        if let Some(idx) = move_to_other {
+            self.tabs.move_tab_to_pane(idx, pane.other());
+        }
+        if let Some((idx, pin)) = pin_action {
+            self.apply_pin_action(idx, pin);
+        }
+        if let Some((idx, color)) = color_action {
+            if idx < self.tabs.documents.len() {
+                self.tabs.documents[idx].tab_color = color;
+            }
+        }
+        if new_tab_in_pane {
+            self.tabs.focus_pane(pane);
+            self.new_tab();
+        }
+    }
+
+    /// Pins or unpins the document at `idx` based on `pin`.
+    fn apply_pin_action(&mut self, idx: usize, pin: bool) {
+        if pin {
+            self.tabs.pin_tab(idx);
+        } else {
+            self.tabs.unpin_tab(idx);
+        }
+    }
+}
+
+/// Deferred actions collected while rendering a per-pane tab bar.
+///
+/// Mutating tab state during the render loop would invalidate the
+/// `pane_tab_order` indices, so the loop only writes into this struct and
+/// the caller drains it once rendering finishes.
+#[derive(Default)]
+struct PaneTabActions {
+    switch_to: Option<usize>,
+    tab_to_close: Option<usize>,
+    move_to_other: Option<usize>,
+    pin_action: Option<(usize, bool)>,
+    color_action: Option<(usize, Option<TabColor>)>,
+    new_tab_in_pane: bool,
+}
+
+/// Renders the right-click context menu for the per-pane tab bar.
+fn render_pane_tab_context_menu(
+    doc_idx: usize,
+    is_pinned: bool,
+    response: &egui::Response,
+    actions: &mut PaneTabActions,
+) {
+    response.context_menu(|ui| {
+        if ui.button("Close").clicked() {
+            actions.tab_to_close = Some(doc_idx);
+            ui.close();
+        }
+        if ui.button("Move to Other Pane").clicked() {
+            actions.move_to_other = Some(doc_idx);
+            ui.close();
+        }
+        ui.separator();
+        let pin_label = if is_pinned { "Unpin Tab" } else { "Pin Tab" };
+        if ui.button(pin_label).clicked() {
+            actions.pin_action = Some((doc_idx, !is_pinned));
+            ui.close();
+        }
+        ui.menu_button("Set Tab Color", |ui| {
+            for variant in TabColor::ALL {
+                let [r, g, b] = variant.to_rgb();
+                let label = RichText::new(variant.label()).color(Color32::from_rgb(r, g, b));
+                if ui.button(label).clicked() {
+                    actions.color_action = Some((doc_idx, Some(variant)));
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui.button("Clear Color").clicked() {
+                actions.color_action = Some((doc_idx, None));
+                ui.close();
+            }
+        });
+    });
+}
+
+/// Renders the trailing "+" button (and double-click drop-zone) for the
+/// per-pane tab bar.
+fn render_pane_new_tab_button(ui: &mut egui::Ui, visuals: &Visuals, actions: &mut PaneTabActions) {
+    ui.spacing_mut().item_spacing.x = 4.0;
+    let new_btn = egui::Button::new(
+        RichText::new("+")
+            .color(visuals.widgets.noninteractive.fg_stroke.color)
+            .size(16.0),
+    )
+    .fill(Color32::TRANSPARENT)
+    .stroke(Stroke::NONE);
+    if ui.add(new_btn).clicked() {
+        actions.new_tab_in_pane = true;
+    }
+
+    // Double-click on the empty area to the right of the "+" button also
+    // opens a new tab — matches the single-pane bar's behavior in
+    // `render_empty_tab_bar_area`.
+    let remaining = ui.available_size();
+    if remaining.x > 0.0 {
+        let empty = ui.allocate_response(remaining, Sense::click());
+        if empty.double_clicked() {
+            actions.new_tab_in_pane = true;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -959,5 +1246,130 @@ mod tests {
         let c = s; // Copy
         assert_eq!(c.source_idx, 3);
         assert_eq!(c.insert_idx, 7);
+    }
+
+    // ── format_tab_title ────────────────────────────────────────────
+
+    #[test]
+    fn format_tab_title_plain() {
+        assert_eq!(format_tab_title(false, false, "main.rs"), "main.rs");
+    }
+
+    #[test]
+    fn format_tab_title_modified_only() {
+        assert_eq!(format_tab_title(false, true, "main.rs"), "main.rs *");
+    }
+
+    #[test]
+    fn format_tab_title_pinned_only() {
+        assert_eq!(
+            format_tab_title(true, false, "main.rs"),
+            "\u{1F4CC} main.rs"
+        );
+    }
+
+    #[test]
+    fn format_tab_title_pinned_and_modified() {
+        assert_eq!(
+            format_tab_title(true, true, "main.rs"),
+            "\u{1F4CC} main.rs *"
+        );
+    }
+
+    #[test]
+    fn format_tab_title_handles_empty_title() {
+        // Edge case: an unsaved scratch buffer may carry an empty title.
+        assert_eq!(format_tab_title(false, false, ""), "");
+        assert_eq!(format_tab_title(false, true, ""), " *");
+        assert_eq!(format_tab_title(true, false, ""), "\u{1F4CC} ");
+    }
+
+    // ── compute_tab_width ───────────────────────────────────────────
+
+    #[test]
+    fn compute_tab_width_includes_padding_and_close_area() {
+        // 100 (title) + 8+8 padding + 4 gap + 14 close area = 134.
+        assert_eq!(compute_tab_width(100.0), 134.0);
+    }
+
+    #[test]
+    fn compute_tab_width_minimum_with_zero_title() {
+        // With no title, width is just padding + gap + close area.
+        assert_eq!(compute_tab_width(0.0), 34.0);
+    }
+
+    // ── resolve_accent_color ────────────────────────────────────────
+
+    #[test]
+    fn resolve_accent_color_uses_explicit_tab_color_for_inactive() {
+        let active_accent = Color32::from_rgb(10, 20, 30);
+        let resolved = resolve_accent_color(Some(TabColor::Red), false, active_accent);
+        let [r, g, b] = TabColor::Red.to_rgb();
+        assert_eq!(resolved, Some(Color32::from_rgb(r, g, b)));
+    }
+
+    #[test]
+    fn resolve_accent_color_explicit_overrides_active_theme() {
+        let active_accent = Color32::from_rgb(10, 20, 30);
+        let resolved = resolve_accent_color(Some(TabColor::Blue), true, active_accent);
+        let [r, g, b] = TabColor::Blue.to_rgb();
+        assert_eq!(resolved, Some(Color32::from_rgb(r, g, b)));
+    }
+
+    #[test]
+    fn resolve_accent_color_falls_back_to_theme_when_active() {
+        let active_accent = Color32::from_rgb(10, 20, 30);
+        assert_eq!(
+            resolve_accent_color(None, true, active_accent),
+            Some(active_accent)
+        );
+    }
+
+    #[test]
+    fn resolve_accent_color_none_when_inactive_without_color() {
+        let active_accent = Color32::from_rgb(10, 20, 30);
+        assert_eq!(resolve_accent_color(None, false, active_accent), None);
+    }
+
+    // ── title_color_for ─────────────────────────────────────────────
+
+    #[test]
+    fn title_color_for_active_dark_mode() {
+        let visuals = Visuals::dark();
+        assert_eq!(
+            title_color_for(true, &visuals),
+            Color32::from_rgb(220, 220, 220)
+        );
+    }
+
+    #[test]
+    fn title_color_for_active_light_mode() {
+        let visuals = Visuals::light();
+        assert_eq!(
+            title_color_for(true, &visuals),
+            Color32::from_rgb(30, 30, 30)
+        );
+    }
+
+    #[test]
+    fn title_color_for_inactive_uses_noninteractive_fg() {
+        let visuals = Visuals::dark();
+        assert_eq!(
+            title_color_for(false, &visuals),
+            visuals.widgets.noninteractive.fg_stroke.color
+        );
+    }
+
+    // ── PaneTabActions ──────────────────────────────────────────────
+
+    #[test]
+    fn pane_tab_actions_default_is_empty() {
+        let a = PaneTabActions::default();
+        assert!(a.switch_to.is_none());
+        assert!(a.tab_to_close.is_none());
+        assert!(a.move_to_other.is_none());
+        assert!(a.pin_action.is_none());
+        assert!(a.color_action.is_none());
+        assert!(!a.new_tab_in_pane);
     }
 }

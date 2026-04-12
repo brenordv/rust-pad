@@ -159,8 +159,10 @@ mod tests {
 
     #[test]
     fn from_config_uses_config_colors() {
-        let mut config = EditorColors::default();
-        config.bg_color = HexColor::rgb(100, 100, 100);
+        let config = EditorColors {
+            bg_color: HexColor::rgb(100, 100, 100),
+            ..Default::default()
+        };
         let theme = EditorTheme::from_config(&config, 14.0);
         assert_eq!(theme.bg_color, Color32::from_rgb(100, 100, 100));
     }

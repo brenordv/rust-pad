@@ -120,6 +120,7 @@ impl Document {
             scroll_x: 0.0,
             cursor_activity_time: 0.0,
             scrollbar_drag: ScrollbarDrag::None,
+            scroll_origin: crate::document::ScrollOrigin::None,
             session_id: None,
             scroll_to_cursor: false,
             last_saved_at: None,
@@ -441,24 +442,15 @@ mod tests {
         let version = doc.content_version;
 
         // Verify some lines are marked as Modified
-        let has_modified = doc
-            .line_changes
-            .iter()
-            .any(|c| *c == LineChangeState::Modified);
+        let has_modified = doc.line_changes.contains(&LineChangeState::Modified);
         assert!(has_modified);
 
         doc.mark_saved(std::path::Path::new("f.txt"), version);
 
         // After save, Modified -> Saved
-        let has_modified = doc
-            .line_changes
-            .iter()
-            .any(|c| *c == LineChangeState::Modified);
+        let has_modified = doc.line_changes.contains(&LineChangeState::Modified);
         assert!(!has_modified);
-        let has_saved = doc
-            .line_changes
-            .iter()
-            .any(|c| *c == LineChangeState::Saved);
+        let has_saved = doc.line_changes.contains(&LineChangeState::Saved);
         assert!(has_saved);
     }
 

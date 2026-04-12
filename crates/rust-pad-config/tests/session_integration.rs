@@ -21,6 +21,7 @@ fn test_session_store_save_load_round_trip() {
             },
         ],
         active_tab_index: 1,
+        split: None,
     };
 
     store.save_session(&data).unwrap();
@@ -73,6 +74,7 @@ fn test_session_store_overwrite_session() {
             tab_color: None,
         }],
         active_tab_index: 0,
+        split: None,
     };
     store.save_session(&data1).unwrap();
 
@@ -91,6 +93,7 @@ fn test_session_store_overwrite_session() {
             },
         ],
         active_tab_index: 1,
+        split: None,
     };
     store.save_session(&data2).unwrap();
 
@@ -170,6 +173,7 @@ fn test_session_store_clear_all_content() {
             tab_color: None,
         }],
         active_tab_index: 0,
+        split: None,
     };
     store.save_session(&data).unwrap();
     store.clear_all_content().unwrap();
@@ -201,6 +205,7 @@ fn test_session_store_full_workflow() {
                 },
             ],
             active_tab_index: 0,
+            split: None,
         };
         store.save_session(&data).unwrap();
         store.save_content(&sid, "unsaved content here").unwrap();
