@@ -35,6 +35,7 @@ pub struct EditorTheme {
     pub occurrence_highlight_color: Color32,
     pub matching_bracket_color: Color32,
     pub special_char_color: Color32,
+    pub bookmark_marker_color: Color32,
 }
 
 impl Default for EditorTheme {
@@ -73,6 +74,7 @@ impl EditorTheme {
             occurrence_highlight_color: hex_to_color32(editor.occurrence_highlight_color),
             matching_bracket_color: hex_to_color32(editor.matching_bracket_color),
             special_char_color: hex_to_color32(editor.special_char_color),
+            bookmark_marker_color: Color32::from_rgb(66, 133, 244),
         }
     }
 
@@ -157,8 +159,10 @@ mod tests {
 
     #[test]
     fn from_config_uses_config_colors() {
-        let mut config = EditorColors::default();
-        config.bg_color = HexColor::rgb(100, 100, 100);
+        let config = EditorColors {
+            bg_color: HexColor::rgb(100, 100, 100),
+            ..Default::default()
+        };
         let theme = EditorTheme::from_config(&config, 14.0);
         assert_eq!(theme.bg_color, Color32::from_rgb(100, 100, 100));
     }

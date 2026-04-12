@@ -13,9 +13,17 @@ use std::sync::mpsc;
 #[derive(Debug)]
 pub enum IoRequest {
     /// Show an open-file dialog, then read the selected file.
-    OpenDialog { start_dir: Option<PathBuf> },
+    OpenDialog {
+        start_dir: Option<PathBuf>,
+        /// Maximum file size in bytes. `None` = no limit.
+        max_file_size_bytes: Option<u64>,
+    },
     /// Read a file from a known path (e.g., recent files, session restore).
-    ReadFile { path: PathBuf },
+    ReadFile {
+        path: PathBuf,
+        /// Maximum file size in bytes. `None` = no limit.
+        max_file_size_bytes: Option<u64>,
+    },
     /// Show a save-as dialog, then write content to the chosen path.
     SaveAsDialog {
         content: Vec<u8>,
@@ -46,6 +54,12 @@ pub enum IoResponse {
         /// Human-readable error description.
         message: String,
     },
+    /// A file exceeded the configured size limit.
+    FileTooLarge {
+        path: PathBuf,
+        /// Human-readable description (e.g. "File is too large (2.0 MB)…").
+        message: String,
+    },
 }
 
 /// Context for a pending save-as operation, stored on the UI side.
@@ -57,6 +71,8 @@ pub struct SaveAsContext {
     pub session_id: Option<String>,
     /// Original file path of the tab (for file-backed tabs doing "Save As").
     pub original_path: Option<PathBuf>,
+    /// When true, this is a "Save a Copy" — the document state is not updated.
+    pub is_copy: bool,
 }
 
 /// A pending save-to-known-path operation, stored on the UI side.
@@ -160,32 +176,61 @@ impl IoWorker {
     }
 }
 
+/// Validates file size if a limit is set, returning an error response on failure.
+fn check_file_size(path: &std::path::Path, max_file_size_bytes: Option<u64>) -> Option<IoResponse> {
+    if let Some(max_bytes) = max_file_size_bytes {
+        if let Err(e) = rust_pad_core::document::validate_file_size(path, max_bytes) {
+            return Some(IoResponse::FileTooLarge {
+                message: format!("{e:#}"),
+                path: path.to_path_buf(),
+            });
+        }
+    }
+    None
+}
+
 /// Processes a single I/O request on the calling thread.
 fn process(request: IoRequest) -> IoResponse {
     match request {
-        IoRequest::OpenDialog { start_dir } => {
+        IoRequest::OpenDialog {
+            start_dir,
+            max_file_size_bytes,
+        } => {
             let mut dialog = rfd::FileDialog::new().set_title("Open File");
             if let Some(dir) = start_dir {
                 dialog = dialog.set_directory(dir);
             }
             match dialog.pick_file() {
-                Some(path) => match std::fs::read(&path) {
-                    Ok(bytes) => IoResponse::DialogFileOpened { path, bytes },
-                    Err(e) => IoResponse::Error {
-                        message: format!("Failed to read '{}': {e}", path.display()),
-                        path: Some(path),
-                    },
-                },
+                Some(path) => {
+                    if let Some(err) = check_file_size(&path, max_file_size_bytes) {
+                        return err;
+                    }
+                    match std::fs::read(&path) {
+                        Ok(bytes) => IoResponse::DialogFileOpened { path, bytes },
+                        Err(e) => IoResponse::Error {
+                            message: format!("Failed to read '{}': {e}", path.display()),
+                            path: Some(path),
+                        },
+                    }
+                }
                 None => IoResponse::DialogCancelled,
             }
         }
-        IoRequest::ReadFile { path } => match std::fs::read(&path) {
-            Ok(bytes) => IoResponse::FileRead { path, bytes },
-            Err(e) => IoResponse::Error {
-                message: format!("Failed to read '{}': {e}", path.display()),
-                path: Some(path),
-            },
-        },
+        IoRequest::ReadFile {
+            path,
+            max_file_size_bytes,
+        } => {
+            if let Some(err) = check_file_size(&path, max_file_size_bytes) {
+                return err;
+            }
+            match std::fs::read(&path) {
+                Ok(bytes) => IoResponse::FileRead { path, bytes },
+                Err(e) => IoResponse::Error {
+                    message: format!("Failed to read '{}': {e}", path.display()),
+                    path: Some(path),
+                },
+            }
+        }
         IoRequest::SaveAsDialog {
             content,
             suggested_name,
@@ -274,6 +319,7 @@ mod tests {
                 content_version: 1,
                 session_id: None,
                 original_path: None,
+                is_copy: false,
             }),
             ..Default::default()
         };
@@ -313,7 +359,10 @@ mod tests {
         std::fs::write(&path, "hello world").unwrap();
 
         let worker = IoWorker::new();
-        worker.send(IoRequest::ReadFile { path: path.clone() });
+        worker.send(IoRequest::ReadFile {
+            path: path.clone(),
+            max_file_size_bytes: None,
+        });
 
         match poll_blocking(&worker, TEST_TIMEOUT) {
             Some(IoResponse::FileRead { path: p, bytes: b }) => {
@@ -329,6 +378,7 @@ mod tests {
         let worker = IoWorker::new();
         worker.send(IoRequest::ReadFile {
             path: PathBuf::from("/nonexistent/file.txt"),
+            max_file_size_bytes: None,
         });
 
         match poll_blocking(&worker, TEST_TIMEOUT) {
@@ -392,9 +442,11 @@ mod tests {
         let worker = IoWorker::new();
         worker.send(IoRequest::ReadFile {
             path: path1.clone(),
+            max_file_size_bytes: None,
         });
         worker.send(IoRequest::ReadFile {
             path: path2.clone(),
+            max_file_size_bytes: None,
         });
 
         let mut responses = Vec::new();
@@ -433,6 +485,7 @@ mod tests {
         let worker = IoWorker::new();
         worker.send(IoRequest::ReadFile {
             path: read_path.clone(),
+            max_file_size_bytes: None,
         });
         worker.send(IoRequest::SaveFile {
             path: save_path.clone(),
@@ -457,5 +510,69 @@ mod tests {
         assert!(got_read, "Did not receive FileRead response");
         assert!(got_save, "Did not receive FileSaved response");
         assert_eq!(std::fs::read_to_string(&save_path).unwrap(), "save data");
+    }
+
+    // ── File size validation ──────────────────────────────────────────
+
+    #[test]
+    fn test_read_file_rejected_when_exceeds_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        std::fs::write(&path, "x".repeat(1024)).unwrap();
+
+        let worker = IoWorker::new();
+        worker.send(IoRequest::ReadFile {
+            path: path.clone(),
+            max_file_size_bytes: Some(100), // 100 bytes limit
+        });
+
+        match poll_blocking(&worker, TEST_TIMEOUT) {
+            Some(IoResponse::FileTooLarge { path: p, message }) => {
+                assert_eq!(p, path);
+                assert!(message.contains("too large"), "Got: {message}");
+            }
+            other => panic!("Expected FileTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_read_file_allowed_when_within_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let worker = IoWorker::new();
+        worker.send(IoRequest::ReadFile {
+            path: path.clone(),
+            max_file_size_bytes: Some(1024),
+        });
+
+        match poll_blocking(&worker, TEST_TIMEOUT) {
+            Some(IoResponse::FileRead { path: p, bytes }) => {
+                assert_eq!(p, path);
+                assert_eq!(bytes, b"hello");
+            }
+            other => panic!("Expected FileRead, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_read_file_no_limit_allows_any_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("any.txt");
+        std::fs::write(&path, "x".repeat(10_000)).unwrap();
+
+        let worker = IoWorker::new();
+        worker.send(IoRequest::ReadFile {
+            path: path.clone(),
+            max_file_size_bytes: None,
+        });
+
+        match poll_blocking(&worker, TEST_TIMEOUT) {
+            Some(IoResponse::FileRead { path: p, .. }) => {
+                assert_eq!(p, path);
+            }
+            other => panic!("Expected FileRead, got {other:?}"),
+        }
     }
 }

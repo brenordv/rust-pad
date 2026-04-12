@@ -20,6 +20,9 @@ dark-light.workspace = true
 dirs.workspace = true
 chrono.workspace = true
 image.workspace = true
+printpdf.workspace = true
+opener.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true

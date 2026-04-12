@@ -42,13 +42,10 @@ impl Default for HistoryConfig {
 ///
 /// Resolution order:
 /// 1. `RUST_PAD_DATA_DIR` environment variable
-/// 2. `.data/` directory next to the executable
+/// 2. Platform-standard data directory (`dirs::data_dir() / rust-pad/`)
+/// 3. Executable directory (fallback)
 pub fn resolve_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("RUST_PAD_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-    exe.parent().unwrap_or(Path::new(".")).join(".data")
+    rust_pad_config::paths::history_data_dir()
 }
 
 /// Generates a document ID for a file on disk.

@@ -8,6 +8,8 @@
 mod io;
 mod multi_cursor;
 
+pub use io::validate_file_size;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -60,6 +62,26 @@ pub enum ScrollbarDrag {
     Horizontal,
 }
 
+/// Origin of the most recent scroll position write this frame.
+///
+/// Used by the synchronized-scrolling feature in the UI layer to decide
+/// whether a scroll change should be mirrored to the other pane: only
+/// continuous, user-initiated scrolls (`UserInput`) propagate. Programmatic
+/// jumps from Goto / Find / Bookmark do not. The widget resets this back
+/// to `None` at the start of every frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollOrigin {
+    /// No scroll write this frame.
+    #[default]
+    None,
+    /// Wheel, scrollbar drag, or keyboard navigation that scrolled the
+    /// viewport. Eligible for sync-scroll mirroring.
+    UserInput,
+    /// Programmatic jump from Go to Line, Find/Replace, bookmark, etc.
+    /// Never mirrored.
+    Programmatic,
+}
+
 /// A single document with its buffer, cursor, history, and metadata.
 pub struct Document {
     /// The text buffer.
@@ -93,6 +115,11 @@ pub struct Document {
     pub cursor_activity_time: f64,
     /// Which scrollbar is currently being dragged, if any.
     pub scrollbar_drag: ScrollbarDrag,
+    /// Origin of the most recent scroll-position write this frame.
+    /// Reset to [`ScrollOrigin::None`] at the start of every frame by the
+    /// editor widget; consulted by the UI layer's synchronized-scrolling
+    /// step to decide whether to propagate the change to the other pane.
+    pub scroll_origin: ScrollOrigin,
     /// Links unsaved tabs to session store content for restore-on-startup.
     pub session_id: Option<String>,
     /// Flag requesting the UI to scroll the viewport so the cursor is visible.
@@ -121,6 +148,11 @@ pub struct Document {
     /// Typed as `Box<dyn Any + Send>` so that the core crate doesn't depend on egui types.
     /// The UI layer downcasts this to its concrete `RenderCache` struct.
     pub render_cache: Option<Box<dyn std::any::Any + Send>>,
+    /// Whether this tab is pinned. Pinned tabs are excluded from bulk-close
+    /// operations and are always rendered to the left of unpinned tabs.
+    pub pinned: bool,
+    /// Optional user-assigned color used to highlight the tab in the tab bar.
+    pub tab_color: Option<crate::tab_color::TabColor>,
 }
 
 impl std::fmt::Debug for Document {
@@ -180,6 +212,7 @@ impl Document {
             scroll_x: 0.0,
             cursor_activity_time: 0.0,
             scrollbar_drag: ScrollbarDrag::None,
+            scroll_origin: ScrollOrigin::None,
             session_id: None,
             scroll_to_cursor: false,
             last_saved_at: None,
@@ -189,6 +222,8 @@ impl Document {
             cached_max_line_chars: None,
             cached_occurrences: None,
             render_cache: None,
+            pinned: false,
+            tab_color: None,
         }
     }
 
@@ -1535,7 +1570,7 @@ mod tests {
 
         // Modify file externally
         std::fs::write(&path, "updated content").unwrap();
-        doc.reload_from_disk().unwrap();
+        doc.reload_from_disk(None).unwrap();
         assert_eq!(doc.buffer.to_string(), "updated content");
         assert!(!doc.modified);
 
@@ -1557,7 +1592,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(&path, "changed").unwrap();
 
-        doc.reload_from_disk().unwrap();
+        doc.reload_from_disk(None).unwrap();
         assert!(doc.last_known_mtime.is_some());
         // mtime should be at least as recent as the open mtime
         assert!(doc.last_known_mtime >= mtime_after_open);
@@ -1568,7 +1603,7 @@ mod tests {
     #[test]
     fn test_reload_from_disk_without_path_errors() {
         let mut doc = Document::new();
-        let result = doc.reload_from_disk();
+        let result = doc.reload_from_disk(None);
         assert!(result.is_err());
     }
 
@@ -1581,7 +1616,7 @@ mod tests {
 
         let mut doc = Document::open(&path).unwrap();
         doc.live_monitoring = true;
-        doc.reload_from_disk().unwrap();
+        doc.reload_from_disk(None).unwrap();
         assert!(
             doc.live_monitoring,
             "reload should preserve live_monitoring flag"
@@ -1605,7 +1640,7 @@ mod tests {
         bom_content.extend_from_slice(b"world");
         std::fs::write(&path, &bom_content).unwrap();
 
-        doc.reload_from_disk().unwrap();
+        doc.reload_from_disk(None).unwrap();
         assert_eq!(doc.buffer.to_string(), "world");
 
         std::fs::remove_dir_all(&dir).ok();

@@ -7,8 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
+use bincode::Options;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+
+/// Maximum size in bytes for deserializing session metadata.
+/// 10 MB is generous for tab metadata; anything larger is likely corrupt.
+const MAX_SESSION_META_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Session metadata table: `"data"` → bincode(`SessionData`).
 const SESSION_META: TableDefinition<&str, &[u8]> = TableDefinition::new("session_meta");
@@ -26,19 +31,74 @@ pub fn generate_session_id() -> String {
 }
 
 /// Describes one tab in the session.
+///
+/// Serialization format note: this enum is persisted via **bincode**, which
+/// is a positional binary format with no per-field schema. Adding fields to
+/// existing variants is therefore a breaking change — old session files will
+/// fail to deserialize and the existing corruption handler in
+/// [`SessionStore::load_session`] will discard them, starting fresh. This
+/// trade-off is intentional; documented in `CHANGELOG.md` for v2.0.0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionTabEntry {
     /// A file-backed tab (just needs its path to reopen).
-    File { path: String },
+    File {
+        path: String,
+        /// Whether this tab is pinned.
+        pinned: bool,
+        /// Optional tab color, stored as a stable string identifier (see
+        /// `rust_pad_core::tab_color::TabColor::as_serde_str`). Stored as a
+        /// string rather than the enum so future palette additions don't
+        /// require an enum-tag bump.
+        tab_color: Option<String>,
+    },
     /// An unsaved/untitled tab whose content is stored in the session DB.
-    Unsaved { session_id: String, title: String },
+    Unsaved {
+        session_id: String,
+        title: String,
+        pinned: bool,
+        tab_color: Option<String>,
+    },
 }
 
-/// The full session state: ordered list of tabs + which one was active.
+/// Persisted split-view state. `None` (top-level) means the previous
+/// session was in single-pane mode.
+///
+/// Tab indices are positions inside [`SessionData::tabs`], not document
+/// indices in the running app. They are translated back to live document
+/// indices on restore by [`crate::session`] consumers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSplit {
+    /// `"vertical"` or `"horizontal"`. Stored as a string so future
+    /// orientation additions don't shift bincode tags.
+    pub orientation: String,
+    /// Fraction of the central panel allocated to the Left/top pane.
+    pub divider_ratio: f32,
+    /// Indices into `SessionData::tabs` belonging to the Left pane.
+    pub left_tab_indices: Vec<usize>,
+    /// Indices into `SessionData::tabs` belonging to the Right pane.
+    pub right_tab_indices: Vec<usize>,
+    /// Index into `left_tab_indices` for the Left pane's active tab.
+    pub left_active: usize,
+    /// Index into `right_tab_indices` for the Right pane's active tab.
+    pub right_active: usize,
+    /// `"left"` or `"right"`.
+    pub focused: String,
+}
+
+/// The full session state: ordered list of tabs + which one was active +
+/// optional split view layout.
+///
+/// **Versioning note:** see [`SessionTabEntry`] — adding fields is a
+/// breaking change for the bincode format. Old session files that
+/// predate this struct's `split` field will fail to deserialize and be
+/// discarded by [`SessionStore::load_session`]'s corruption handler;
+/// the user will see a fresh empty workspace once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub tabs: Vec<SessionTabEntry>,
     pub active_tab_index: usize,
+    /// Split-view layout, or `None` for single-pane sessions.
+    pub split: Option<SessionSplit>,
 }
 
 /// Persistence layer for session state, backed by redb.
@@ -53,18 +113,33 @@ impl std::fmt::Debug for SessionStore {
 }
 
 impl SessionStore {
-    /// Returns the default session database path (next to the executable).
+    /// Returns the default session database path in the platform-standard
+    /// data directory.
+    ///
+    /// Falls back to the executable directory if the platform data
+    /// directory cannot be determined.
     pub fn session_path() -> PathBuf {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("rust-pad-session.redb")))
-            .unwrap_or_else(|| PathBuf::from("rust-pad-session.redb"))
+        crate::paths::session_file_path()
     }
 
     /// Opens or creates the session database at `path`.
+    ///
+    /// Creates the parent directory if it does not exist.
     pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "Failed to create session database directory: {}",
+                        parent.display()
+                    )
+                })?;
+                crate::permissions::set_owner_only_dir_permissions(parent);
+            }
+        }
         let db = Database::create(path)
             .with_context(|| format!("Failed to open session database: {}", path.display()))?;
+        crate::permissions::set_owner_only_file_permissions(path);
 
         // Ensure tables exist
         let write_txn = db
@@ -119,9 +194,18 @@ impl SessionStore {
 
         match table.get("data").context("Failed to read session data")? {
             Some(guard) => {
-                let data: SessionData = bincode::deserialize(guard.value())
-                    .context("Failed to deserialize session data")?;
-                Ok(Some(data))
+                match bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .allow_trailing_bytes()
+                    .with_limit(MAX_SESSION_META_BYTES)
+                    .deserialize::<SessionData>(guard.value())
+                {
+                    Ok(data) => Ok(Some(data)),
+                    Err(e) => {
+                        tracing::warn!("Corrupted session data, starting fresh: {e}");
+                        Ok(None)
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -240,13 +324,18 @@ mod tests {
             tabs: vec![
                 SessionTabEntry::File {
                     path: "/tmp/foo.rs".to_string(),
+                    pinned: true,
+                    tab_color: Some("blue".to_string()),
                 },
                 SessionTabEntry::Unsaved {
                     session_id: "sess-0".to_string(),
                     title: "Untitled".to_string(),
+                    pinned: false,
+                    tab_color: None,
                 },
             ],
             active_tab_index: 1,
+            split: None,
         };
 
         store.save_session(&data).expect("save");
@@ -256,13 +345,28 @@ mod tests {
         assert_eq!(loaded.active_tab_index, 1);
 
         match &loaded.tabs[0] {
-            SessionTabEntry::File { path } => assert_eq!(path, "/tmp/foo.rs"),
+            SessionTabEntry::File {
+                path,
+                pinned,
+                tab_color,
+            } => {
+                assert_eq!(path, "/tmp/foo.rs");
+                assert!(*pinned);
+                assert_eq!(tab_color.as_deref(), Some("blue"));
+            }
             _ => panic!("expected File entry"),
         }
         match &loaded.tabs[1] {
-            SessionTabEntry::Unsaved { session_id, title } => {
+            SessionTabEntry::Unsaved {
+                session_id,
+                title,
+                pinned,
+                tab_color,
+            } => {
                 assert_eq!(session_id, "sess-0");
                 assert_eq!(title, "Untitled");
+                assert!(!*pinned);
+                assert!(tab_color.is_none());
             }
             _ => panic!("expected Unsaved entry"),
         }
@@ -309,26 +413,45 @@ mod tests {
     fn test_session_tab_entry_serde() {
         let file_entry = SessionTabEntry::File {
             path: "test.txt".to_string(),
+            pinned: true,
+            tab_color: Some("red".to_string()),
         };
         let unsaved_entry = SessionTabEntry::Unsaved {
             session_id: "sess-42".to_string(),
             title: "My Tab".to_string(),
+            pinned: false,
+            tab_color: None,
         };
 
         // bincode round-trip
         let bytes1 = bincode::serialize(&file_entry).expect("serialize");
         let decoded1: SessionTabEntry = bincode::deserialize(&bytes1).expect("deserialize");
         match decoded1 {
-            SessionTabEntry::File { path } => assert_eq!(path, "test.txt"),
+            SessionTabEntry::File {
+                path,
+                pinned,
+                tab_color,
+            } => {
+                assert_eq!(path, "test.txt");
+                assert!(pinned);
+                assert_eq!(tab_color.as_deref(), Some("red"));
+            }
             _ => panic!("expected File"),
         }
 
         let bytes2 = bincode::serialize(&unsaved_entry).expect("serialize");
         let decoded2: SessionTabEntry = bincode::deserialize(&bytes2).expect("deserialize");
         match decoded2 {
-            SessionTabEntry::Unsaved { session_id, title } => {
+            SessionTabEntry::Unsaved {
+                session_id,
+                title,
+                pinned,
+                tab_color,
+            } => {
                 assert_eq!(session_id, "sess-42");
                 assert_eq!(title, "My Tab");
+                assert!(!pinned);
+                assert!(tab_color.is_none());
             }
             _ => panic!("expected Unsaved"),
         }
@@ -352,5 +475,42 @@ mod tests {
         assert_ne!(id1, id2);
         assert!(id1.starts_with("sess-"));
         assert!(id2.starts_with("sess-"));
+    }
+
+    // ── Deserialization size limits ──────────────────────────────────
+
+    #[test]
+    fn test_load_session_returns_none_on_corrupt_data() {
+        let (store, _dir) = open_test_store();
+
+        // Write valid session data first
+        let data = SessionData {
+            tabs: vec![SessionTabEntry::File {
+                path: "/tmp/foo.rs".to_string(),
+                pinned: false,
+                tab_color: None,
+            }],
+            active_tab_index: 0,
+            split: None,
+        };
+        store.save_session(&data).expect("save");
+        assert!(store.load_session().expect("load").is_some());
+
+        // Corrupt the session metadata by writing garbage
+        let write_txn = store.db.begin_write().expect("txn");
+        {
+            let mut table = write_txn.open_table(SESSION_META).expect("table");
+            table
+                .insert("data", &[0xFF, 0xFF, 0xFF][..])
+                .expect("insert");
+        }
+        write_txn.commit().expect("commit");
+
+        // Should return None instead of erroring
+        let result = store.load_session().expect("should not error");
+        assert!(
+            result.is_none(),
+            "Should return None for corrupted session data"
+        );
     }
 }

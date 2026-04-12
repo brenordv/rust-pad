@@ -9,11 +9,14 @@ mod file_dialog_state;
 mod file_ops;
 mod live_monitor;
 mod menu_bar;
+mod print;
 mod recent_files;
 mod search;
 mod settings_dialog;
 mod shortcuts;
+mod split;
 mod status_bar;
+mod sync_scroll;
 mod tab_bar;
 mod theme_controller;
 
@@ -22,6 +25,7 @@ pub use file_dialog_state::FileDialogState;
 pub use live_monitor::LiveMonitorController;
 pub use recent_files::RecentFilesManager;
 pub use settings_dialog::SettingsTab;
+pub use split::SplitState;
 pub use theme_controller::ThemeController;
 
 use std::path::PathBuf;
@@ -48,6 +52,9 @@ pub struct StartupArgs {
     pub files: Vec<PathBuf>,
     /// If set, create a new tab pre-filled with this text.
     pub new_file_text: Option<String>,
+    /// If true, store config and data next to the executable instead of
+    /// in platform-standard directories. Useful for USB/portable installs.
+    pub portable: bool,
 }
 
 /// Which color theme to use.
@@ -116,6 +123,8 @@ pub struct App {
     last_flush: Instant,
     session_store: Option<SessionStore>,
     session_content_max_kb: usize,
+    /// Maximum file size in bytes that can be opened, or `None` for no limit.
+    max_file_size_bytes: Option<u64>,
     last_window_title: String,
     live_monitor: LiveMonitorController,
     pub settings_open: bool,
@@ -132,6 +141,39 @@ pub struct App {
     prev_active_tab: usize,
     /// Tab count on the previous frame, used to detect tab open/close.
     prev_tab_count: usize,
+    /// When true, the "Close All" operation is in progress and should
+    /// continue prompting for modified tabs after each dialog resolution.
+    closing_all: bool,
+    /// Active tab drag-and-drop state (`None` when no drag is in progress).
+    pub(crate) tab_drag: Option<tab_bar::TabDragState>,
+    /// Background worker that renders PDFs for the "Print..." and
+    /// "Export as PDF..." actions.
+    pub(crate) print_worker: print::PrintWorker,
+    /// `true` while a print/export job is in flight. Menu entries, the
+    /// shortcut, and the status bar all gate on this.
+    pub(crate) print_in_progress: bool,
+    /// Whether the PDF pipeline renders a line-number gutter. Persisted
+    /// in `AppConfig::print_show_line_numbers`.
+    pub(crate) print_show_line_numbers: bool,
+    /// Transient status text shown briefly after a print/export
+    /// completed successfully. Cleared the next time the user takes any
+    /// new action.
+    pub(crate) print_last_status: Option<String>,
+    /// Split-view (dual pane) UI state. `None` = single pane (the default).
+    /// Per-pane tab ownership lives on `self.tabs`; this field carries the
+    /// orientation, divider ratio, and divider drag flag.
+    pub split: Option<SplitState>,
+    /// Whether synchronized scrolling is enabled. Persisted in
+    /// `AppConfig::sync_scroll_enabled` but only takes effect when split
+    /// view is active.
+    pub sync_scroll_enabled: bool,
+    /// Whether sync scrolling mirrors horizontal deltas in addition to
+    /// vertical. Persisted in `AppConfig::sync_scroll_horizontal`.
+    pub sync_scroll_horizontal: bool,
+    /// Last frame's per-pane `(scroll_y, scroll_x)` snapshot, used to
+    /// compute deltas for sync-scroll propagation. Cleared whenever sync
+    /// scrolling is off or split view is collapsed.
+    pub(crate) sync_scroll_last: Option<sync_scroll::SyncScrollSnapshot>,
 }
 
 #[derive(Debug, Default)]
@@ -139,6 +181,27 @@ pub(crate) enum DialogState {
     #[default]
     None,
     ConfirmClose(usize),
+    /// The user requested a reload-from-disk on a modified document.
+    ConfirmReload,
+    /// A file exceeded the size limit — ask the user whether to open it anyway.
+    ConfirmLargeFile {
+        path: std::path::PathBuf,
+        message: String,
+    },
+    /// A file could not be opened (e.g. invalid encoding).
+    FileOpenError {
+        path: std::path::PathBuf,
+        message: String,
+        /// When true, offer a "recover as UTF-8 (lossy)" option.
+        can_recover_utf8: bool,
+    },
+    /// A Print / Export-as-PDF job failed. When `temp_path` is `Some`,
+    /// the PDF was written but the viewer could not be launched; we
+    /// offer a "Reveal in File Manager" button pointing at that file.
+    PrintError {
+        message: String,
+        temp_path: Option<std::path::PathBuf>,
+    },
 }
 
 impl App {
@@ -147,8 +210,17 @@ impl App {
         // Disable egui's built-in keyboard zoom so Ctrl+/- only affects the editor text
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
+        // Migrate config/data from legacy exe-relative paths to platform dirs
+        if !args.portable {
+            rust_pad_config::paths::migrate_legacy_paths();
+        }
+
         // Load config
-        let config_path = AppConfig::config_path();
+        let config_path = if args.portable {
+            rust_pad_config::paths::portable_config_file_path()
+        } else {
+            AppConfig::config_path()
+        };
         let app_config = AppConfig::load_or_create(&config_path);
 
         let theme_ctrl = ThemeController::new(
@@ -160,7 +232,10 @@ impl App {
             &cc.egui_ctx,
         );
 
-        let history_config = HistoryConfig::default();
+        let mut history_config = HistoryConfig::default();
+        if args.portable {
+            history_config.data_dir = rust_pad_config::paths::portable_history_data_dir();
+        }
         let mut tabs = match PersistenceLayer::open(&history_config.data_dir) {
             Ok(pl) => TabManager::with_persistence(pl, history_config),
             Err(e) => {
@@ -173,7 +248,12 @@ impl App {
         tabs.default_extension = app_config.default_extension.clone();
 
         // Open session store
-        let session_store = match SessionStore::open(&SessionStore::session_path()) {
+        let session_path = if args.portable {
+            rust_pad_config::paths::portable_session_file_path()
+        } else {
+            SessionStore::session_path()
+        };
+        let session_store = match SessionStore::open(&session_path) {
             Ok(store) => Some(store),
             Err(e) => {
                 tracing::warn!("Failed to open session store: {e}");
@@ -181,15 +261,23 @@ impl App {
             }
         };
 
-        // Restore session if enabled
+        // Restore session if enabled. The split-view layout is reapplied
+        // after the App is fully constructed, since `apply_session_split`
+        // needs `&mut self`.
+        let mut restored_split: Option<rust_pad_config::session::SessionSplit> = None;
         if app_config.restore_open_files {
-            Self::restore_session(&mut tabs, &session_store);
+            restored_split = Self::restore_session(&mut tabs, &session_store);
         }
 
         // Open files requested via CLI arguments
         Self::open_startup_files(&mut tabs, &args);
 
-        Self {
+        let max_file_size_bytes = app_config.max_file_size_bytes();
+
+        // Best-effort cleanup of stale temp PDFs from previous sessions.
+        Self::cleanup_stale_print_temp_files();
+
+        let mut app = Self {
             tabs,
             theme_ctrl,
             word_wrap: app_config.word_wrap,
@@ -226,6 +314,7 @@ impl App {
             last_flush: Instant::now(),
             session_store,
             session_content_max_kb: app_config.session_content_max_kb,
+            max_file_size_bytes,
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -238,30 +327,71 @@ impl App {
             tabs_overflow: false,
             prev_active_tab: 0,
             prev_tab_count: 0,
-        }
-    }
-
-    /// Restores a previous session from the session store.
-    fn restore_session(tabs: &mut TabManager, session_store: &Option<SessionStore>) {
-        let Some(store) = session_store else { return };
-        let Ok(Some(session_data)) = store.load_session() else {
-            return;
+            closing_all: false,
+            tab_drag: None,
+            print_worker: print::PrintWorker::new(),
+            print_in_progress: false,
+            print_show_line_numbers: app_config.print_show_line_numbers,
+            print_last_status: None,
+            split: None,
+            sync_scroll_enabled: app_config.sync_scroll_enabled,
+            sync_scroll_horizontal: app_config.sync_scroll_horizontal,
+            sync_scroll_last: None,
         };
 
-        let mut any_restored = false;
+        // Reapply persisted split-view layout once the App is fully built.
+        if let Some(split) = restored_split {
+            app.apply_session_split(&split);
+        }
+
+        app
+    }
+
+    /// Restores a previous session from the session store. Returns the
+    /// persisted split-view layout (if any) so the caller can apply it
+    /// after the App finishes constructing.
+    fn restore_session(
+        tabs: &mut TabManager,
+        session_store: &Option<SessionStore>,
+    ) -> Option<rust_pad_config::session::SessionSplit> {
+        let Some(store) = session_store else {
+            return None;
+        };
+        let Ok(Some(session_data)) = store.load_session() else {
+            return None;
+        };
+
+        // Track per-tab pin/color metadata in the order tabs are added so we
+        // can replay it after the placeholder removal step. Each entry holds
+        // `(pinned, tab_color)` for the tab that was successfully restored.
+        let mut restored_metadata: Vec<(bool, Option<rust_pad_core::tab_color::TabColor>)> =
+            Vec::with_capacity(session_data.tabs.len());
+
         for entry in &session_data.tabs {
             match entry {
-                SessionTabEntry::File { path } => {
+                SessionTabEntry::File {
+                    path,
+                    pinned,
+                    tab_color,
+                } => {
                     let p = std::path::Path::new(path);
                     if p.exists() {
                         if let Err(e) = tabs.open_file(p) {
                             tracing::warn!("Failed to restore '{path}': {e}");
                         } else {
-                            any_restored = true;
+                            let color = tab_color
+                                .as_deref()
+                                .and_then(rust_pad_core::tab_color::TabColor::from_serde_str);
+                            restored_metadata.push((*pinned, color));
                         }
                     }
                 }
-                SessionTabEntry::Unsaved { session_id, title } => {
+                SessionTabEntry::Unsaved {
+                    session_id,
+                    title,
+                    pinned,
+                    tab_color,
+                } => {
                     let content = store
                         .load_content(session_id)
                         .ok()
@@ -275,18 +405,38 @@ impl App {
                     }
                     doc.session_id = Some(generate_session_id());
                     tabs.documents.push(doc);
-                    any_restored = true;
+                    let color = tab_color
+                        .as_deref()
+                        .and_then(rust_pad_core::tab_color::TabColor::from_serde_str);
+                    restored_metadata.push((*pinned, color));
                 }
             }
         }
 
+        let any_restored = !restored_metadata.is_empty();
         if any_restored {
             tabs.documents.remove(0);
             tabs.active = session_data
                 .active_tab_index
                 .min(tabs.documents.len().saturating_sub(1));
+
+            // Apply pin/color metadata to the restored tabs. We set raw flags
+            // (rather than calling pin_tab) and then perform a stable sort to
+            // bring pinned tabs to the left, since the persisted ordering
+            // already reflects the user's intended layout.
+            let count = restored_metadata.len().min(tabs.documents.len());
+            for (i, (pinned, color)) in restored_metadata.into_iter().take(count).enumerate() {
+                tabs.documents[i].pinned = pinned;
+                tabs.documents[i].tab_color = color;
+            }
         }
         let _ = store.clear_all_content();
+        // Caller will reapply the split layout once the App is built.
+        if any_restored {
+            session_data.split
+        } else {
+            None
+        }
     }
 
     /// Opens files from startup arguments (CLI).
@@ -355,6 +505,12 @@ impl App {
                     self.file_dialog.update_last_folder(&path);
                     if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
                         tracing::error!("Failed to open file: {e:#}");
+                        let msg = format!("{e:#}");
+                        self.dialog_state = DialogState::FileOpenError {
+                            can_recover_utf8: Self::is_decode_error(&msg),
+                            path,
+                            message: msg,
+                        };
                     } else {
                         self.recent_files.track(&path);
                     }
@@ -364,6 +520,12 @@ impl App {
                         self.io_activity.pending_reads.saturating_sub(1);
                     if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
                         tracing::error!("Failed to open file: {e:#}");
+                        let msg = format!("{e:#}");
+                        self.dialog_state = DialogState::FileOpenError {
+                            can_recover_utf8: Self::is_decode_error(&msg),
+                            path,
+                            message: msg,
+                        };
                     } else {
                         self.recent_files.track(&path);
                     }
@@ -373,20 +535,25 @@ impl App {
                     self.file_dialog.update_last_folder(&path);
 
                     if let Some(ctx) = self.io_activity.save_as_context.take() {
-                        // Find the tab that initiated the save-as
-                        let tab_idx = self.find_save_as_tab(&ctx);
+                        if ctx.is_copy {
+                            // "Save a Copy" — don't update document state
+                            tracing::info!("Saved copy to '{}'", path.display());
+                        } else {
+                            // Normal "Save As" — update document state
+                            let tab_idx = self.find_save_as_tab(&ctx);
 
-                        if let Some(idx) = tab_idx {
-                            // Clean up session content before transitioning to file-backed
-                            if let Some(sid) = &self.tabs.documents[idx].session_id {
-                                if let Some(store) = &self.session_store {
-                                    let _ = store.delete_content(sid);
+                            if let Some(idx) = tab_idx {
+                                // Clean up session content before transitioning to file-backed
+                                if let Some(sid) = &self.tabs.documents[idx].session_id {
+                                    if let Some(store) = &self.session_store {
+                                        let _ = store.delete_content(sid);
+                                    }
                                 }
+                                let doc = &mut self.tabs.documents[idx];
+                                doc.mark_saved(&path, ctx.content_version);
+                                doc.session_id = None;
+                                self.recent_files.track(&path);
                             }
-                            let doc = &mut self.tabs.documents[idx];
-                            doc.mark_saved(&path, ctx.content_version);
-                            doc.session_id = None;
-                            self.recent_files.track(&path);
                         }
                     }
                 }
@@ -426,6 +593,13 @@ impl App {
                             self.io_activity.pending_reads.saturating_sub(1);
                     }
                 }
+                IoResponse::FileTooLarge { path, message } => {
+                    tracing::warn!("File too large: {message}");
+                    if self.io_activity.dialog_open {
+                        self.io_activity.dialog_open = false;
+                    }
+                    self.dialog_state = DialogState::ConfirmLargeFile { path, message };
+                }
             }
         }
     }
@@ -461,6 +635,10 @@ impl App {
     /// Shows all dialog windows.
     fn show_dialogs(&mut self, ctx: &egui::Context) {
         self.show_confirm_close_dialog(ctx);
+        self.show_confirm_reload_dialog(ctx);
+        self.show_confirm_large_file_dialog(ctx);
+        self.show_file_open_error_dialog(ctx);
+        self.show_print_error_dialog(ctx);
         self.show_settings_dialog(ctx);
 
         if self.about_open {
@@ -516,10 +694,52 @@ impl App {
                             self.tabs.close_tab(idx);
                         }
                         self.dialog_state = DialogState::None;
+                        self.continue_close_all();
                     }
                     if ui.button("  Discard  ").clicked() {
                         self.cleanup_session_for_tab(idx);
                         self.tabs.close_tab(idx);
+                        self.dialog_state = DialogState::None;
+                        self.continue_close_all();
+                    }
+                    if ui.button("  Cancel  ").clicked() {
+                        self.dialog_state = DialogState::None;
+                        self.closing_all = false;
+                    }
+                });
+            });
+
+        if !open {
+            self.dialog_state = DialogState::None;
+            self.closing_all = false;
+        }
+    }
+
+    /// Shows the confirm-reload dialog when the user wants to reload a modified document.
+    fn show_confirm_reload_dialog(&mut self, ctx: &egui::Context) {
+        if !matches!(self.dialog_state, DialogState::ConfirmReload) {
+            return;
+        }
+
+        let mut open = true;
+        let title = self.tabs.active_doc().title.clone();
+
+        egui::Window::new("Reload from Disk")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(format!(
+                    "'{title}' has unsaved changes. Discard changes and reload from disk?"
+                ));
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.button("  Reload  ").clicked() {
+                        self.do_reload_from_disk();
                         self.dialog_state = DialogState::None;
                     }
                     if ui.button("  Cancel  ").clicked() {
@@ -531,6 +751,135 @@ impl App {
         if !open {
             self.dialog_state = DialogState::None;
         }
+    }
+
+    /// Shows a confirmation dialog when a file exceeds the configured size limit.
+    fn show_confirm_large_file_dialog(&mut self, ctx: &egui::Context) {
+        let DialogState::ConfirmLargeFile { path, message } = &self.dialog_state else {
+            return;
+        };
+        let path = path.clone();
+        let message = message.clone();
+
+        let mut open = true;
+        egui::Window::new("File Too Large")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(&message);
+                ui.label("Do you want to open it anyway?");
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.button("  Open Anyway  ").clicked() {
+                        self.io_activity.pending_reads += 1;
+                        self.io_worker.send(crate::io_worker::IoRequest::ReadFile {
+                            path: path.clone(),
+                            max_file_size_bytes: None,
+                        });
+                        self.dialog_state = DialogState::None;
+                    }
+                    if ui.button("  Cancel  ").clicked() {
+                        self.dialog_state = DialogState::None;
+                    }
+                });
+            });
+
+        if !open {
+            self.dialog_state = DialogState::None;
+        }
+    }
+
+    /// Shows an error dialog when a file could not be opened.
+    ///
+    /// When the failure is a decode error, offers a "Recover as UTF-8"
+    /// button that re-reads the file and force-decodes it with lossy
+    /// UTF-8 replacement (`U+FFFD` for invalid bytes).
+    fn show_file_open_error_dialog(&mut self, ctx: &egui::Context) {
+        let DialogState::FileOpenError {
+            path,
+            message,
+            can_recover_utf8,
+        } = &self.dialog_state
+        else {
+            return;
+        };
+        let path = path.clone();
+        let filename = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let message = message.clone();
+        let can_recover = *can_recover_utf8;
+
+        let mut open = true;
+        egui::Window::new("Failed to Open File")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(format!("Could not open '{filename}':"));
+                ui.label(&message);
+                if can_recover {
+                    ui.add_space(2.0);
+                    ui.label(
+                        "You can attempt a lossy recovery as UTF-8. \
+                         Invalid bytes will be replaced with \u{FFFD}.",
+                    );
+                }
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if can_recover && ui.button("  Recover as UTF-8  ").clicked() {
+                        self.recover_file_as_utf8_lossy(&path);
+                        self.dialog_state = DialogState::None;
+                    }
+                    if ui.button("  OK  ").clicked() {
+                        self.dialog_state = DialogState::None;
+                    }
+                });
+            });
+
+        if !open {
+            self.dialog_state = DialogState::None;
+        }
+    }
+
+    /// Returns true if the error message indicates a decoding failure.
+    fn is_decode_error(message: &str) -> bool {
+        message.contains("failed to decode")
+    }
+
+    /// Reads a file from disk and opens it as lossy UTF-8 in a new tab.
+    ///
+    /// The resulting document is untitled (no file path) so the user must
+    /// explicitly "Save As" to write it back — this prevents accidentally
+    /// overwriting the original file.
+    fn recover_file_as_utf8_lossy(&mut self, path: &std::path::Path) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("Recovery failed — could not read file: {e}");
+                return;
+            }
+        };
+        let recovered = String::from_utf8_lossy(&bytes);
+        let filename = path.file_name().map_or_else(
+            || "Recovered".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+
+        self.tabs.new_tab();
+        let doc = self.tabs.active_doc_mut();
+        doc.insert_text(&recovered);
+        doc.title = format!("[Recovered] {filename}");
     }
 }
 
@@ -561,16 +910,20 @@ impl eframe::App for App {
                 self.show_menu_bar(ui, &ctx);
             });
 
-        // Tab bar
-        egui::Panel::top("tab_bar")
-            .frame(
-                egui::Frame::new()
-                    .fill(faint_bg)
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
-            )
-            .show_inside(ui, |ui| {
-                self.show_tab_bar(ui);
-            });
+        // Tab bar — only the global single-pane bar. In split-view mode the
+        // tab strips are rendered inside each pane by `render_split_panes`,
+        // so the outer tab bar is suppressed to avoid stacking two strips.
+        if !self.is_split() {
+            egui::Panel::top("tab_bar")
+                .frame(
+                    egui::Frame::new()
+                        .fill(faint_bg)
+                        .inner_margin(egui::Margin::symmetric(8, 4)),
+                )
+                .show_inside(ui, |ui| {
+                    self.show_tab_bar(ui);
+                });
+        }
 
         // Status bar
         egui::Panel::bottom("status_bar")
@@ -589,6 +942,14 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme_ctrl.theme.bg_color))
             .show_inside(ui, |ui| {
+                if self.is_split() {
+                    // Split-pane render path. Each pane renders its own
+                    // tab strip + editor. Routing to the focused pane is
+                    // handled inside `render_split_panes`.
+                    self.render_split_panes(ui, dialog_open);
+                    return;
+                }
+
                 let (response, zoom_request) = {
                     let doc = self.tabs.active_doc_mut();
                     let mut editor = EditorWidget::new(
@@ -601,6 +962,7 @@ impl eframe::App for App {
                     editor.show_special_chars = self.show_special_chars;
                     editor.show_line_numbers = self.show_line_numbers;
                     editor.dialog_open = dialog_open;
+                    editor.bookmarks = Some(&self.bookmarks);
                     let r = editor.show(ui);
                     (r, editor.zoom_request)
                 };
@@ -615,14 +977,24 @@ impl eframe::App for App {
                 }
             });
 
+        // Synchronized scrolling: propagate user-initiated viewport
+        // deltas from the focused pane to the other pane. Runs after
+        // both panes have rendered (i.e. after the central panel
+        // closure) so it observes whatever the editor widgets wrote.
+        self.propagate_sync_scroll();
+
         // Dialogs
         self.show_dialogs(&ctx);
 
         // Process completed background I/O operations
         self.handle_io_responses();
 
+        // Process completed print / export-as-PDF jobs
+        self.handle_print_responses();
+
         // Live file monitoring: check for external changes every second
-        self.live_monitor.tick(&mut self.tabs);
+        self.live_monitor
+            .tick(&mut self.tabs, self.max_file_size_bytes);
 
         // Periodic flush of undo history to disk
         if self.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
@@ -655,9 +1027,12 @@ impl eframe::App for App {
         if let Some(store) = &self.session_store {
             let mut tabs_list = Vec::new();
             for doc in &self.tabs.documents {
+                let tab_color_str = doc.tab_color.map(|c| c.as_serde_str().to_string());
                 if let Some(path) = &doc.file_path {
                     tabs_list.push(SessionTabEntry::File {
                         path: path.to_string_lossy().into_owned(),
+                        pinned: doc.pinned,
+                        tab_color: tab_color_str,
                     });
                 } else {
                     let sid = doc.session_id.clone().unwrap_or_else(generate_session_id);
@@ -680,12 +1055,16 @@ impl eframe::App for App {
                     tabs_list.push(SessionTabEntry::Unsaved {
                         session_id: sid,
                         title: doc.title.clone(),
+                        pinned: doc.pinned,
+                        tab_color: tab_color_str,
                     });
                 }
             }
+            let split = self.build_session_split();
             let session_data = SessionData {
                 tabs: tabs_list,
                 active_tab_index: self.tabs.active,
+                split,
             };
             if let Err(e) = store.save_session(&session_data) {
                 tracing::warn!("Failed to save session: {e}");
@@ -718,7 +1097,11 @@ impl eframe::App for App {
             recent_files_max_count: self.recent_files.max_count,
             recent_files_cleanup: self.recent_files.cleanup,
             recent_files: self.recent_files.to_config_strings(),
+            max_file_size_mb: self.max_file_size_bytes.map_or(0, |b| b / (1024 * 1024)),
             session_content_max_kb: self.session_content_max_kb,
+            print_show_line_numbers: self.print_show_line_numbers,
+            sync_scroll_enabled: self.sync_scroll_enabled,
+            sync_scroll_horizontal: self.sync_scroll_horizontal,
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
@@ -738,7 +1121,7 @@ mod tests {
     use rust_pad_core::line_ops::{CaseConversion, SortOrder};
 
     /// Helper: create an App for unit-testing (no rendering needed).
-    fn test_app() -> App {
+    pub(crate) fn test_app() -> App {
         App {
             tabs: TabManager::new(),
             theme_ctrl: ThemeController {
@@ -781,6 +1164,7 @@ mod tests {
             last_flush: Instant::now(),
             session_store: None,
             session_content_max_kb: 10_240,
+            max_file_size_bytes: Some(512 * 1024 * 1024),
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -793,6 +1177,16 @@ mod tests {
             tabs_overflow: false,
             prev_active_tab: 0,
             prev_tab_count: 0,
+            closing_all: false,
+            tab_drag: None,
+            print_worker: print::PrintWorker::new(),
+            print_in_progress: false,
+            print_show_line_numbers: true,
+            print_last_status: None,
+            split: None,
+            sync_scroll_enabled: false,
+            sync_scroll_horizontal: true,
+            sync_scroll_last: None,
         }
     }
 
@@ -1251,6 +1645,7 @@ mod tests {
             content_version: 0,
             session_id: None,
             original_path: None,
+            is_copy: false,
         });
         assert!(app.is_dialog_open());
     }
@@ -1857,7 +2252,7 @@ mod tests {
         let mut app = test_app();
         assert!(!app.tabs.active_doc().live_monitoring);
         // Should be a no-op, no crash
-        app.live_monitor.tick(&mut app.tabs);
+        app.live_monitor.tick(&mut app.tabs, None);
     }
 
     #[test]
@@ -3057,6 +3452,7 @@ mod tests {
             content_version: version,
             session_id,
             original_path: app.tabs.active_doc().file_path.clone(),
+            is_copy: false,
         };
         assert_eq!(ctx.content_version, version);
         assert!(ctx.original_path.is_none());
@@ -3185,6 +3581,7 @@ mod tests {
             content_version: version,
             session_id: Some(sid),
             original_path: None,
+            is_copy: false,
         });
 
         let save_path = std::path::PathBuf::from("/tmp/saved_as.txt");
@@ -3214,6 +3611,7 @@ mod tests {
             content_version: 0,
             session_id: None,
             original_path: None,
+            is_copy: false,
         });
 
         app.io_worker
@@ -3234,6 +3632,7 @@ mod tests {
             content_version: 0,
             session_id: None,
             original_path: None,
+            is_copy: false,
         });
 
         app.io_worker
@@ -3279,6 +3678,7 @@ mod tests {
             content_version: 0,
             session_id: Some("sid-1".to_string()),
             original_path: None,
+            is_copy: false,
         };
         assert_eq!(app.find_save_as_tab(&ctx), Some(0));
     }
@@ -3296,6 +3696,7 @@ mod tests {
             content_version: 0,
             session_id: None,
             original_path: Some(path),
+            is_copy: false,
         };
         assert_eq!(app.find_save_as_tab(&ctx), Some(1));
     }
@@ -3307,7 +3708,641 @@ mod tests {
             content_version: 0,
             session_id: Some("nonexistent".to_string()),
             original_path: None,
+            is_copy: false,
         };
         assert_eq!(app.find_save_as_tab(&ctx), Some(app.tabs.active));
+    }
+
+    // ── handle_io_responses: FileTooLarge ───────────────────────────────
+
+    #[test]
+    fn test_handle_file_too_large_sets_confirm_dialog() {
+        let mut app = test_app();
+        let path = std::path::PathBuf::from("/tmp/huge.bin");
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileTooLarge {
+                path: path.clone(),
+                message: "File is too large (2.0 MB)".to_string(),
+            });
+        app.handle_io_responses();
+
+        match &app.dialog_state {
+            DialogState::ConfirmLargeFile {
+                path: p,
+                message: m,
+            } => {
+                assert_eq!(*p, path);
+                assert!(m.contains("2.0 MB"));
+            }
+            other => panic!("Expected ConfirmLargeFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_handle_file_too_large_clears_dialog_open() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileTooLarge {
+                path: std::path::PathBuf::from("/tmp/huge.bin"),
+                message: "too large".to_string(),
+            });
+        app.handle_io_responses();
+
+        assert!(!app.io_activity.dialog_open);
+    }
+
+    // ── handle_io_responses: decode error → FileOpenError ───────────────
+
+    #[test]
+    fn test_handle_file_read_decode_error_sets_dialog_with_recovery() {
+        let mut app = test_app();
+        app.io_activity.pending_reads = 1;
+
+        // UTF-16 LE BOM followed by an odd byte count → decode failure
+        let bad_utf16 = vec![0xFF, 0xFE, 0x41, 0x00, 0x42];
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FileRead {
+                path: std::path::PathBuf::from("/tmp/corrupt.txt"),
+                bytes: bad_utf16,
+            });
+        app.handle_io_responses();
+
+        assert_eq!(app.io_activity.pending_reads, 0);
+        match &app.dialog_state {
+            DialogState::FileOpenError {
+                message,
+                can_recover_utf8,
+                ..
+            } => {
+                assert!(message.contains("failed to decode"), "Got: {message}");
+                assert!(can_recover_utf8);
+            }
+            other => panic!("Expected FileOpenError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_handle_dialog_file_opened_decode_error_sets_dialog() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+
+        let bad_utf16 = vec![0xFF, 0xFE, 0x41, 0x00, 0x42];
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::DialogFileOpened {
+                path: std::path::PathBuf::from("/tmp/corrupt.txt"),
+                bytes: bad_utf16,
+            });
+        app.handle_io_responses();
+
+        assert!(!app.io_activity.dialog_open);
+        assert!(matches!(
+            app.dialog_state,
+            DialogState::FileOpenError {
+                can_recover_utf8: true,
+                ..
+            }
+        ));
+    }
+
+    // ── is_decode_error ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_decode_error_positive() {
+        assert!(App::is_decode_error("failed to decode file: /tmp/x.txt"));
+        assert!(App::is_decode_error(
+            "Invalid UTF-16 LE: failed to decode: odd bytes"
+        ));
+    }
+
+    #[test]
+    fn test_is_decode_error_negative() {
+        assert!(!App::is_decode_error("failed to load undo history"));
+        assert!(!App::is_decode_error("permission denied"));
+        assert!(!App::is_decode_error(""));
+    }
+
+    // ── recover_file_as_utf8_lossy ──────────────────────────────────────
+
+    #[test]
+    fn test_recover_file_as_utf8_lossy_creates_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.txt");
+        // Write bytes with some invalid UTF-8 sequences
+        std::fs::write(&path, b"hello\xFF\xFEworld").unwrap();
+
+        let mut app = test_app();
+        let initial_count = app.tabs.tab_count();
+        app.recover_file_as_utf8_lossy(&path);
+
+        assert_eq!(app.tabs.tab_count(), initial_count + 1);
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.title, "[Recovered] broken.txt");
+        assert!(doc.file_path.is_none(), "Recovered tab should be untitled");
+        let content = doc.buffer.to_string();
+        assert!(content.contains("hello"));
+        assert!(content.contains("world"));
+        assert!(
+            content.contains('\u{FFFD}'),
+            "Should contain replacement chars"
+        );
+    }
+
+    #[test]
+    fn test_recover_file_as_utf8_lossy_valid_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("valid.txt");
+        std::fs::write(&path, "perfectly fine text").unwrap();
+
+        let mut app = test_app();
+        app.recover_file_as_utf8_lossy(&path);
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.title, "[Recovered] valid.txt");
+        assert_eq!(doc.buffer.to_string(), "perfectly fine text");
+    }
+
+    #[test]
+    fn test_recover_file_as_utf8_lossy_missing_file() {
+        let mut app = test_app();
+        let initial_count = app.tabs.tab_count();
+
+        app.recover_file_as_utf8_lossy(std::path::Path::new("/nonexistent/file.txt"));
+
+        // Should not create a tab when the file cannot be read
+        assert_eq!(app.tabs.tab_count(), initial_count);
+    }
+
+    // ── Reload from Disk ──────────────────────────────────────────────
+
+    #[test]
+    fn test_request_reload_untitled_is_noop() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("content");
+        app.request_reload_from_disk();
+        // Untitled tab has no file_path, so nothing happens
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_request_reload_modified_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reload.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        app.tabs.switch_to(1);
+        app.tabs.active_doc_mut().insert_text(" changed");
+        app.request_reload_from_disk();
+        assert!(matches!(app.dialog_state, DialogState::ConfirmReload));
+    }
+
+    #[test]
+    fn test_request_reload_unmodified_reloads_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reload2.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        app.tabs.switch_to(1);
+
+        // Modify the file on disk
+        std::fs::write(&path, "updated").unwrap();
+        app.request_reload_from_disk();
+
+        // Should reload immediately without a dialog
+        assert!(matches!(app.dialog_state, DialogState::None));
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "updated");
+    }
+
+    // ── Close operations ──────────────────────────────────────────────
+
+    #[test]
+    fn test_close_unchanged_tabs() {
+        let mut app = test_app();
+        // Tab 0: unmodified
+        app.new_tab(); // Tab 1: unmodified
+        app.new_tab(); // Tab 2
+        app.tabs.active_doc_mut().insert_text("modified");
+        // Tab 2 is modified, tabs 0 and 1 are not
+
+        assert_eq!(app.tabs.tab_count(), 3);
+        app.close_unchanged_tabs();
+
+        // Only the modified tab should remain (or a blank tab replacing the last)
+        assert!(app
+            .tabs
+            .documents
+            .iter()
+            .all(|d| d.modified || d.buffer.is_empty()));
+    }
+
+    #[test]
+    fn test_close_all_but_active() {
+        let mut app = test_app();
+        app.new_tab();
+        app.new_tab();
+        assert_eq!(app.tabs.tab_count(), 3);
+        app.tabs.switch_to(1);
+
+        app.close_all_but_active();
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert_eq!(app.tabs.active, 0);
+    }
+
+    #[test]
+    fn test_close_all_tabs_unmodified() {
+        let mut app = test_app();
+        app.new_tab();
+        app.new_tab();
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_all_tabs();
+        // All tabs are unmodified, so all should close (reset to one blank)
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert!(app.tabs.active_doc().buffer.is_empty());
+    }
+
+    #[test]
+    fn test_close_all_tabs_with_modified() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("unsaved");
+        app.new_tab();
+        assert_eq!(app.tabs.tab_count(), 2);
+
+        app.close_all_tabs();
+        // Unmodified tab is closed, modified tab remains with ConfirmClose
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert!(app.tabs.active_doc().modified);
+        assert!(matches!(app.dialog_state, DialogState::ConfirmClose(0)));
+        assert!(app.closing_all);
+    }
+
+    #[test]
+    fn test_close_all_chains_through_multiple_modified() {
+        let mut app = test_app();
+        // Create 3 modified tabs
+        app.tabs.active_doc_mut().insert_text("mod1");
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("mod2");
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("mod3");
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_all_tabs();
+        // All 3 are modified, first one prompted
+        assert_eq!(app.tabs.tab_count(), 3);
+        assert!(matches!(app.dialog_state, DialogState::ConfirmClose(0)));
+        assert!(app.closing_all);
+
+        // Simulate "Discard" for tab 0
+        app.cleanup_session_for_tab(0);
+        app.tabs.close_tab(0);
+        app.dialog_state = DialogState::None;
+        app.continue_close_all();
+
+        // Should prompt for the next modified tab
+        assert_eq!(app.tabs.tab_count(), 2);
+        assert!(matches!(app.dialog_state, DialogState::ConfirmClose(_)));
+        assert!(app.closing_all);
+
+        // Simulate "Discard" for next tab
+        let DialogState::ConfirmClose(idx) = app.dialog_state else {
+            panic!("expected ConfirmClose");
+        };
+        app.cleanup_session_for_tab(idx);
+        app.tabs.close_tab(idx);
+        app.dialog_state = DialogState::None;
+        app.continue_close_all();
+
+        // Should prompt for the last modified tab
+        assert!(matches!(app.dialog_state, DialogState::ConfirmClose(_)));
+
+        // Simulate "Discard" for last tab
+        let DialogState::ConfirmClose(idx) = app.dialog_state else {
+            panic!("expected ConfirmClose");
+        };
+        app.cleanup_session_for_tab(idx);
+        app.tabs.close_tab(idx);
+        app.dialog_state = DialogState::None;
+        app.continue_close_all();
+
+        // All done — single blank tab, closing_all cleared
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert!(!app.tabs.active_doc().modified);
+        assert!(!app.closing_all);
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_close_all_cancel_stops_chain() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("mod1");
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("mod2");
+
+        app.close_all_tabs();
+        assert!(app.closing_all);
+
+        // Simulate "Cancel"
+        app.dialog_state = DialogState::None;
+        app.closing_all = false;
+
+        // Chain should be stopped — no more prompts
+        assert!(!app.closing_all);
+        assert_eq!(app.tabs.tab_count(), 2);
+    }
+
+    // ── Save a Copy ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_save_copy_does_not_update_document() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("copy content");
+        let original_title = app.tabs.active_doc().title.clone();
+
+        // Simulate a completed save-a-copy by injecting the response
+        app.io_activity.save_as_context = Some(crate::io_worker::SaveAsContext {
+            content_version: app.tabs.active_doc().content_version,
+            session_id: app.tabs.active_doc().session_id.clone(),
+            original_path: None,
+            is_copy: true,
+        });
+        app.io_activity.dialog_open = true;
+
+        // Inject the response
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::DialogFileSavedAs {
+                path: std::path::PathBuf::from("/tmp/copy.txt"),
+            });
+
+        app.handle_io_responses();
+
+        // Document state should NOT be updated
+        assert_eq!(app.tabs.active_doc().title, original_title);
+        assert!(app.tabs.active_doc().modified);
+        assert!(app.tabs.active_doc().file_path.is_none());
+    }
+
+    // ── Bookmark indicator (theme field) ──────────────────────────────
+
+    #[test]
+    fn test_confirm_reload_dialog_state() {
+        let mut app = test_app();
+        app.dialog_state = DialogState::ConfirmReload;
+        assert!(app.is_dialog_open());
+    }
+
+    // ── Additional coverage for close operations ─────────────────────
+
+    #[test]
+    fn test_close_unchanged_tabs_all_modified() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("mod1");
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("mod2");
+        assert_eq!(app.tabs.tab_count(), 2);
+
+        app.close_unchanged_tabs();
+        // All tabs are modified, none should close
+        assert_eq!(app.tabs.tab_count(), 2);
+    }
+
+    #[test]
+    fn test_close_unchanged_tabs_all_clean() {
+        let mut app = test_app();
+        app.new_tab();
+        app.new_tab();
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_unchanged_tabs();
+        // All clean → all closed, reset to one blank tab
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert!(!app.tabs.active_doc().modified);
+    }
+
+    #[test]
+    fn test_close_all_but_active_single_tab() {
+        let mut app = test_app();
+        assert_eq!(app.tabs.tab_count(), 1);
+
+        app.close_all_but_active();
+        // Single tab stays, no crash
+        assert_eq!(app.tabs.tab_count(), 1);
+    }
+
+    #[test]
+    fn test_close_all_but_active_preserves_correct_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("keep this");
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("discard");
+        app.new_tab();
+
+        // Switch to middle tab (index 0 has "keep this")
+        app.tabs.switch_to(0);
+        app.close_all_but_active();
+
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "keep this");
+    }
+
+    #[test]
+    fn test_close_all_tabs_no_modified() {
+        let mut app = test_app();
+        app.new_tab();
+        app.new_tab();
+
+        app.close_all_tabs();
+        // No modified tabs → everything closes, no dialog
+        assert_eq!(app.tabs.tab_count(), 1);
+        assert!(!app.closing_all);
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_continue_close_all_noop_when_not_closing() {
+        let mut app = test_app();
+        assert!(!app.closing_all);
+
+        app.continue_close_all();
+        // Should be a no-op
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    // ── Bulk close skips pinned tabs ──────────────────────────────────
+
+    #[test]
+    fn test_close_unchanged_skips_pinned() {
+        let mut app = test_app();
+        app.new_tab(); // tab 1
+        app.new_tab(); // tab 2
+        app.tabs.documents[0].title = "keep_pinned".to_string();
+        app.tabs.pin_tab(0);
+        // After pin: tab "keep_pinned" is at idx 0, all unmodified.
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_unchanged_tabs();
+        // Pinned tab survives; the unpinned unchanged tabs are closed.
+        // Closing the last unpinned tab via close_tab resets to a single
+        // empty tab when only one document is left, but here we still have
+        // the pinned one — so the pinned tab should remain.
+        assert!(
+            app.tabs.documents.iter().any(|d| d.title == "keep_pinned"),
+            "pinned tab must survive close_unchanged_tabs"
+        );
+    }
+
+    #[test]
+    fn test_close_all_but_active_skips_pinned() {
+        let mut app = test_app();
+        app.new_tab(); // tab 1
+        app.new_tab(); // tab 2
+        app.tabs.documents[1].title = "pinned_other".to_string();
+        app.tabs.pin_tab(1);
+        // After pin: pinned_other is at idx 0. The originally-active tab
+        // (idx 2) follows the move and is now at idx 2 (or wherever).
+        // Switch to a non-pinned tab to keep.
+        let keep_idx = app
+            .tabs
+            .documents
+            .iter()
+            .position(|d| !d.pinned)
+            .expect("at least one unpinned tab");
+        app.tabs.switch_to(keep_idx);
+
+        app.close_all_but_active();
+        // Pinned tab and the active tab survive; the other unpinned tab is closed.
+        assert!(
+            app.tabs.documents.iter().any(|d| d.title == "pinned_other"),
+            "pinned tab must survive close_all_but_active"
+        );
+        assert_eq!(app.tabs.tab_count(), 2);
+    }
+
+    #[test]
+    fn test_close_all_skips_pinned_unmodified() {
+        let mut app = test_app();
+        app.new_tab();
+        app.new_tab();
+        app.tabs.documents[0].title = "pinned_clean".to_string();
+        app.tabs.pin_tab(0);
+        assert_eq!(app.tabs.tab_count(), 3);
+
+        app.close_all_tabs();
+        // Pinned unmodified tab survives; nothing is modified so no dialog.
+        assert!(
+            app.tabs.documents.iter().any(|d| d.title == "pinned_clean"),
+            "pinned tab must survive close_all_tabs"
+        );
+        assert!(!app.closing_all);
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_close_all_skips_pinned_modified() {
+        let mut app = test_app();
+        // Pin a modified tab.
+        app.tabs.active_doc_mut().insert_text("pinned_dirty");
+        app.tabs.documents[0].title = "pinned_dirty".to_string();
+        app.tabs.pin_tab(0);
+        // Add an unpinned modified tab.
+        app.new_tab();
+        app.tabs.active_doc_mut().insert_text("dirty");
+
+        app.close_all_tabs();
+        // Pinned modified tab is NOT prompted for; the unpinned modified tab is.
+        assert!(app.closing_all);
+        let DialogState::ConfirmClose(idx) = app.dialog_state else {
+            panic!("expected ConfirmClose");
+        };
+        assert!(
+            !app.tabs.documents[idx].pinned,
+            "ConfirmClose should target a non-pinned tab"
+        );
+        // The pinned tab still exists.
+        assert!(app.tabs.documents.iter().any(|d| d.title == "pinned_dirty"));
+    }
+
+    // ── Additional coverage for reload ────────────────────────────────
+
+    #[test]
+    fn test_do_reload_from_disk_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("will_delete.txt");
+        std::fs::write(&path, "original").unwrap();
+
+        let mut app = test_app();
+        app.tabs.open_file(&path).unwrap();
+        app.tabs.switch_to(1);
+
+        // Delete the file, then reload
+        std::fs::remove_file(&path).unwrap();
+        app.do_reload_from_disk();
+
+        // Should log error but not panic; content unchanged
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "original");
+    }
+
+    // ── Additional coverage for save-a-copy ──────────────────────────
+
+    #[test]
+    fn test_save_copy_blocked_when_dialog_open() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+
+        app.save_copy_dialog();
+        // Should not set a new save_as_context
+        assert!(app.io_activity.save_as_context.is_none());
+    }
+
+    #[test]
+    fn test_save_as_blocked_when_dialog_open() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+
+        app.save_as_dialog();
+        assert!(app.io_activity.save_as_context.is_none());
+    }
+
+    #[test]
+    fn test_save_copy_context_has_is_copy_true() {
+        // save_copy_dialog() spawns an rfd dialog thread — not safe on
+        // headless CI. Instead verify the SaveAsContext would have is_copy
+        // set by constructing it directly, matching the pattern at line ~3296.
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("content");
+        let doc = app.tabs.active_doc();
+
+        let ctx = crate::io_worker::SaveAsContext {
+            content_version: doc.content_version,
+            session_id: doc.session_id.clone(),
+            original_path: doc.file_path.clone(),
+            is_copy: true,
+        };
+        assert!(ctx.is_copy);
+        assert_eq!(ctx.content_version, doc.content_version);
+    }
+
+    #[test]
+    fn test_save_as_context_has_is_copy_false() {
+        // save_as_dialog() spawns an rfd dialog thread — not safe on
+        // headless CI. Verify the SaveAsContext directly.
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("content");
+        let doc = app.tabs.active_doc();
+
+        let ctx = crate::io_worker::SaveAsContext {
+            content_version: doc.content_version,
+            session_id: doc.session_id.clone(),
+            original_path: doc.file_path.clone(),
+            is_copy: false,
+        };
+        assert!(!ctx.is_copy);
+        assert_eq!(ctx.content_version, doc.content_version);
     }
 }

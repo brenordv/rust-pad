@@ -1,0 +1,46 @@
+name: General Purpose OSS Best Practices
+description: |
+  Filter suite for rust-pad's vet workflow.
+
+  Active gates: vulnerabilities, malware, and risky licenses. These are the
+  signals that warrant blocking a PR.
+
+  Disabled gates (with rationale): popularity, maintenance, and dangerous-
+  workflow. PR #25's vet run flagged ~54 transitive crates against these three
+  filters, every single one of them coming from the `printpdf 0.9.1` and
+  `opener 0.8.4` subtrees. None had a RustSec advisory; all were heuristic
+  warnings (low GitHub-stars count, dormant upstream, or older Actions used in
+  the dependency's own CI). The full per-crate analysis lives in
+  `.test-files/dependency-audit-pr25.md`, and the keep-printpdf / keep-opener
+  decisions are documented at the end of the project README.
+
+  These three filters are intentionally omitted rather than exempted per
+  package, so that vulnerability, malware, and license checks remain active for
+  every package in the tree (including the ~54 we accept as "feature-complete
+  but dormant"). If a CVE ever lands on one of them, CI must still fail.
+
+  Re-enable a filter if/when the upstream `printpdf` azul-removal release
+  ships and the noise goes away on its own.
+tags:
+  - general
+  - safedep-managed
+filters:
+  - name: critical-or-high-vulns
+    check_type: CheckTypeVulnerability
+    summary: Critical or high risk vulnerabilities were found
+    value: |
+      vulns.critical.exists(p, true) || vulns.high.exists(p, true)
+  - name: risky-oss-licenses
+    check_type: CheckTypeLicense
+    summary: Risky OSS license was detected
+    value: |
+      licenses.exists(p, p == "GPL-2.0") ||
+      licenses.exists(p, p == "GPL-2.0-only") ||
+      licenses.exists(p, p == "GPL-3.0") ||
+      licenses.exists(p, p == "GPL-3.0-only") ||
+      licenses.exists(p, p == "BSD-3-Clause OR GPL-2.0")
+  - name: osv-malware
+    check_type: CheckTypeMalware
+    summary: Malicious (malware) component detected
+    value: |
+      vulns.all.exists(v, v.id.startsWith("MAL-"))

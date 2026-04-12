@@ -22,8 +22,9 @@ impl LiveMonitorController {
 
     /// Checks all live-monitored documents for external file changes and reloads them.
     ///
-    /// Only runs at most once per second.
-    pub fn tick(&mut self, tabs: &mut TabManager) {
+    /// Only runs at most once per second. When `max_file_size_bytes` is `Some`,
+    /// files exceeding the limit are skipped during reload.
+    pub fn tick(&mut self, tabs: &mut TabManager, max_file_size_bytes: Option<u64>) {
         if self.last_check.elapsed() < Duration::from_secs(1) {
             return;
         }
@@ -44,7 +45,7 @@ impl LiveMonitorController {
                 None => true,
             };
             if changed {
-                if let Err(e) = doc.reload_from_disk() {
+                if let Err(e) = doc.reload_from_disk(max_file_size_bytes) {
                     tracing::warn!("Live reload failed for '{}': {e:#}", doc.title);
                 } else {
                     // Scroll to the end of the file (tail behavior)
@@ -78,7 +79,7 @@ mod tests {
         let mut tabs = TabManager::new();
         assert!(!tabs.active_doc().live_monitoring);
         // Should be a no-op — no panic, no changes
-        ctrl.tick(&mut tabs);
+        ctrl.tick(&mut tabs, None);
     }
 
     #[test]
@@ -88,7 +89,7 @@ mod tests {
         let mut tabs = TabManager::new();
         tabs.active_doc_mut().live_monitoring = true;
         // No file_path — tick should skip
-        ctrl.tick(&mut tabs);
+        ctrl.tick(&mut tabs, None);
     }
 
     #[test]
@@ -97,7 +98,7 @@ mod tests {
         // last_check is just now — tick should not run
         let mut tabs = TabManager::new();
         tabs.active_doc_mut().live_monitoring = true;
-        ctrl.tick(&mut tabs);
+        ctrl.tick(&mut tabs, None);
         // No crash, and because of throttling, nothing actually ran
     }
 
@@ -120,7 +121,7 @@ mod tests {
 
         let mut ctrl = LiveMonitorController::new();
         ctrl.last_check = Instant::now() - Duration::from_secs(5);
-        ctrl.tick(&mut tabs);
+        ctrl.tick(&mut tabs, None);
 
         // The document should have been reloaded with new content
         let content = tabs.active_doc().buffer.to_string();

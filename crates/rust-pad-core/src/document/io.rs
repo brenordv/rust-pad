@@ -3,6 +3,7 @@
 //! Handles opening files from disk (with encoding/line-ending detection),
 //! saving documents back to disk, and managing persistent undo history.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -16,6 +17,29 @@ use crate::history::{doc_id_for_path, HistoryConfig, PersistenceLayer, UndoManag
 use crate::indent::detect_indent;
 
 use super::{Document, LineChangeState, ScrollbarDrag};
+
+/// Validates that a file's size is within the given limit.
+///
+/// Returns the file size in bytes on success.
+///
+/// # Errors
+///
+/// Returns an error if the file metadata cannot be read or the file
+/// exceeds `max_bytes`.
+pub fn validate_file_size(path: &Path, max_bytes: u64) -> Result<u64> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to read file metadata: {}", path.display()))?;
+    let size = metadata.len();
+    if size > max_bytes {
+        let size_mb = size as f64 / (1024.0 * 1024.0);
+        let limit_mb = max_bytes as f64 / (1024.0 * 1024.0);
+        anyhow::bail!(
+            "File is too large ({size_mb:.1} MB). Maximum allowed size is {limit_mb:.0} MB. \
+             Adjust 'max_file_size_mb' in the settings or config file to change this limit."
+        );
+    }
+    Ok(size)
+}
 
 impl Document {
     /// Opens a document from a file path with in-memory-only history.
@@ -96,6 +120,7 @@ impl Document {
             scroll_x: 0.0,
             cursor_activity_time: 0.0,
             scrollbar_drag: ScrollbarDrag::None,
+            scroll_origin: crate::document::ScrollOrigin::None,
             session_id: None,
             scroll_to_cursor: false,
             last_saved_at: None,
@@ -105,6 +130,8 @@ impl Document {
             cached_max_line_chars: None,
             cached_occurrences: None,
             render_cache: None,
+            pinned: false,
+            tab_color: None,
         })
     }
 
@@ -206,16 +233,23 @@ impl Document {
     /// Reloads the document from disk, preserving metadata like live_monitoring.
     ///
     /// Used by live file monitoring to pick up external changes.
+    /// When `max_file_size_bytes` is `Some`, the file size is validated
+    /// before reading to prevent out-of-memory conditions.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read or decoded.
-    pub fn reload_from_disk(&mut self) -> Result<()> {
+    /// Returns an error if the file cannot be read, decoded, or exceeds
+    /// the size limit.
+    pub fn reload_from_disk(&mut self, max_file_size_bytes: Option<u64>) -> Result<()> {
         let path = self
             .file_path
             .as_ref()
             .context("no file path set for reload")?
             .clone();
+
+        if let Some(max_bytes) = max_file_size_bytes {
+            validate_file_size(&path, max_bytes)?;
+        }
 
         let bytes =
             std::fs::read(&path).with_context(|| format!("failed to read: {}", path.display()))?;
@@ -408,24 +442,15 @@ mod tests {
         let version = doc.content_version;
 
         // Verify some lines are marked as Modified
-        let has_modified = doc
-            .line_changes
-            .iter()
-            .any(|c| *c == LineChangeState::Modified);
+        let has_modified = doc.line_changes.contains(&LineChangeState::Modified);
         assert!(has_modified);
 
         doc.mark_saved(std::path::Path::new("f.txt"), version);
 
         // After save, Modified -> Saved
-        let has_modified = doc
-            .line_changes
-            .iter()
-            .any(|c| *c == LineChangeState::Modified);
+        let has_modified = doc.line_changes.contains(&LineChangeState::Modified);
         assert!(!has_modified);
-        let has_saved = doc
-            .line_changes
-            .iter()
-            .any(|c| *c == LineChangeState::Saved);
+        let has_saved = doc.line_changes.contains(&LineChangeState::Saved);
         assert!(has_saved);
     }
 
@@ -458,5 +483,79 @@ mod tests {
 
         assert_eq!(restored.buffer.to_string(), "hello\nworld");
         assert_eq!(restored.line_ending, LineEnding::CrLf);
+    }
+
+    // ── validate_file_size ────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_file_size_within_limit() {
+        let dir = std::env::temp_dir().join("rust_pad_test_validate_size");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let size = validate_file_size(&path, 1024).unwrap();
+        assert_eq!(size, 5);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_validate_file_size_exceeds_limit() {
+        let dir = std::env::temp_dir().join("rust_pad_test_validate_size_big");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.txt");
+        std::fs::write(&path, "x".repeat(1024)).unwrap();
+
+        let result = validate_file_size(&path, 100);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("too large"), "Got: {msg}");
+        assert!(msg.contains("max_file_size_mb"), "Got: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_validate_file_size_exact_limit() {
+        let dir = std::env::temp_dir().join("rust_pad_test_validate_exact");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("exact.txt");
+        let content = "x".repeat(100);
+        std::fs::write(&path, &content).unwrap();
+
+        // Exactly at limit should be OK
+        let size = validate_file_size(&path, 100).unwrap();
+        assert_eq!(size, 100);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_validate_file_size_nonexistent() {
+        let result = validate_file_size(std::path::Path::new("/nonexistent/file"), 1024);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("metadata"));
+    }
+
+    #[test]
+    fn test_reload_from_disk_respects_size_limit() {
+        let dir = std::env::temp_dir().join("rust_pad_test_reload_size");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("size_test.txt");
+        std::fs::write(&path, "small").unwrap();
+
+        let mut doc = Document::open(&path).unwrap();
+
+        // Rewrite with larger content
+        std::fs::write(&path, "x".repeat(1000)).unwrap();
+
+        // Reload with a limit smaller than the new content
+        let result = doc.reload_from_disk(Some(100));
+        assert!(result.is_err());
+        // Original content should be preserved
+        assert_eq!(doc.buffer.to_string(), "small");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -61,12 +61,52 @@ impl App {
                 self.save_as_dialog();
                 ui.close();
             }
+            if ui.button("Save a Copy As...").clicked() {
+                self.save_copy_dialog();
+                ui.close();
+            }
+            ui.separator();
+            let has_file = self.tabs.active_doc().file_path.is_some();
+            if ui
+                .add_enabled(has_file, egui::Button::new("Reload from Disk"))
+                .clicked()
+            {
+                self.request_reload_from_disk();
+                ui.close();
+            }
+            ui.separator();
+            let can_print = self.can_print_active();
+            if ui
+                .add_enabled(
+                    can_print,
+                    egui::Button::new("Print...").shortcut_text("Ctrl+P"),
+                )
+                .clicked()
+            {
+                self.request_print();
+                ui.close();
+            }
+            if ui
+                .add_enabled(can_print, egui::Button::new("Export as PDF..."))
+                .clicked()
+            {
+                self.request_export_pdf();
+                ui.close();
+            }
             ui.separator();
             if ui
                 .add(egui::Button::new("Close Tab").shortcut_text("Ctrl+W"))
                 .clicked()
             {
                 self.request_close_tab(self.tabs.active);
+                ui.close();
+            }
+            if ui.button("Close Unchanged Tabs").clicked() {
+                self.close_unchanged_tabs();
+                ui.close();
+            }
+            if ui.button("Close All Tabs").clicked() {
+                self.close_all_tabs();
                 ui.close();
             }
             ui.separator();
@@ -400,6 +440,46 @@ impl App {
             );
             if monitoring_response.clicked() {
                 self.tabs.active_doc_mut().live_monitoring = live_monitoring;
+                ui.close();
+            }
+            ui.separator();
+            // ── Split view ────────────────────────────────────────────
+            if ui
+                .add(egui::Button::new("Split Vertically").shortcut_text("Ctrl+Alt+V"))
+                .clicked()
+            {
+                self.toggle_split_vertical();
+                ui.close();
+            }
+            if ui
+                .add(egui::Button::new("Split Horizontally").shortcut_text("Ctrl+Alt+H"))
+                .clicked()
+            {
+                self.toggle_split_horizontal();
+                ui.close();
+            }
+            let split_active = self.is_split();
+            if ui
+                .add_enabled(split_active, egui::Button::new("Remove Split"))
+                .clicked()
+            {
+                self.remove_split();
+                ui.close();
+            }
+            // Synchronized scrolling — only meaningful when split is active.
+            // The flag itself is persisted in AppConfig regardless, so
+            // disabling/re-enabling the split preserves the user's choice.
+            let sync_button = egui::Button::new(if self.sync_scroll_enabled {
+                "✓ Synchronized Scrolling"
+            } else {
+                "  Synchronized Scrolling"
+            })
+            .shortcut_text("Ctrl+Alt+S");
+            let sync_response = ui.add_enabled(split_active, sync_button);
+            if !split_active {
+                sync_response.on_hover_text("Enable Split View first");
+            } else if sync_response.clicked() {
+                self.toggle_sync_scroll();
                 ui.close();
             }
             ui.separator();

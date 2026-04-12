@@ -8,3 +8,4 @@ pub mod history;
 pub mod indent;
 pub mod line_ops;
 pub mod search;
+pub mod tab_color;
