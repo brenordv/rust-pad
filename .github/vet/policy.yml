@@ -6,21 +6,16 @@ description: |
   signals that warrant blocking a PR.
 
   Disabled gates (with rationale): popularity, maintenance, and dangerous-
-  workflow. PR #25's vet run flagged ~54 transitive crates against these three
-  filters, every single one of them coming from the `printpdf 0.9.1` and
-  `opener 0.8.4` subtrees. None had a RustSec advisory; all were heuristic
-  warnings (low GitHub-stars count, dormant upstream, or older Actions used in
-  the dependency's own CI). The full per-crate analysis lives in
-  `.test-files/dependency-audit-pr25.md`, and the keep-printpdf / keep-opener
-  decisions are documented at the end of the project README.
+  workflow. These were originally disabled because printpdf 0.9.1 pulled in
+  ~53 transitive crates that tripped heuristic warnings. In v2.1, printpdf
+  was replaced with pdf-writer (4 transitive deps), eliminating that noise.
+  The only remaining flagged crate is `normpath` from the `opener` subtree.
 
-  These three filters are intentionally omitted rather than exempted per
-  package, so that vulnerability, malware, and license checks remain active for
-  every package in the tree (including the ~54 we accept as "feature-complete
-  but dormant"). If a CVE ever lands on one of them, CI must still fail.
-
-  Re-enable a filter if/when the upstream `printpdf` azul-removal release
-  ships and the noise goes away on its own.
+  The three filters remain disabled because re-enabling them would require
+  per-package exemptions for `normpath` and any future false positives.
+  Vulnerability, malware, and license checks remain active for every package
+  in the tree. If the remaining flagged crate is resolved, consider
+  re-enabling the popularity and maintenance filters.
 tags:
   - general
   - safedep-managed
