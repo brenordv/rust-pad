@@ -13,3 +13,6 @@ egui.workspace = true
 rust-pad-ui.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[build-dependencies]
+winresource = "0.1"

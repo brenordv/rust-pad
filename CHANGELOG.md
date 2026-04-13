@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.1]
+
+### Added
+
+- Added packaging for Windows, macOS, and Linux (deb, AppImage, tar.gz) so the built app will have the proper icon.
+
 ## [2.1.0]
 
 ### Changed
