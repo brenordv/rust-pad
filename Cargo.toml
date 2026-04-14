@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/rust-pad", "crates/rust-pad-core", "crates/rust-pad-ui", "crates/rust-pad-mod-history", "crates/rust-pad-config"]
 
 [workspace.package]
-version = "2.1.1"
+version = "2.1.2"
 edition = "2021"
 license = "GPL-3.0-only"
 authors = ["Breno RdV"]

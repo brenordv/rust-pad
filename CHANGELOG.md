@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.2]
+
+### Fixed
+
+- Fixed garbled text rendering after switching themes. The galley render cache was not invalidated when the syntax highlighting theme changed, causing stale cached galleys with old theme colors to be displayed.
+
 ## [2.1.1]
 
 ### Added

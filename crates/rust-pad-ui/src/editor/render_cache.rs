@@ -24,6 +24,8 @@ pub(crate) struct RenderCache {
     last_version: u64,
     /// Font size used when galleys were cached (invalidate on zoom change).
     last_font_size: f32,
+    /// Hash of the syntax theme name (invalidate on theme change).
+    last_syntax_theme: u64,
 }
 
 impl RenderCache {
@@ -32,20 +34,27 @@ impl RenderCache {
             galleys: HashMap::new(),
             last_version: u64::MAX, // force miss on first use
             last_font_size: 0.0,
+            last_syntax_theme: 0,
         }
     }
 
-    /// Validates the cache against the current font size.
+    /// Validates the cache against the current font size and syntax theme.
     ///
-    /// Font size changes require a full clear because every galley is
-    /// font-dependent. Content version changes do **not** clear the cache —
-    /// per-line content hashes in [`get`] already handle correctness by
-    /// returning `None` when a line's content has changed.
-    pub fn validate(&mut self, version: u64, font_size: f32) {
+    /// Font size and syntax theme changes require a full clear because every
+    /// galley embeds font metrics and highlight colors respectively.
+    /// Content version changes do **not** clear the cache — per-line content
+    /// hashes in [`get`] already handle correctness by returning `None` when
+    /// a line's content has changed.
+    pub fn validate(&mut self, version: u64, font_size: f32, syntax_theme_hash: u64) {
         // Font size change: must clear everything (galleys are font-dependent).
         if (self.last_font_size - font_size).abs() > f32::EPSILON {
             self.galleys.clear();
             self.last_font_size = font_size;
+        }
+        // Syntax theme change: must clear everything (galleys embed highlight colors).
+        if self.last_syntax_theme != syntax_theme_hash {
+            self.galleys.clear();
+            self.last_syntax_theme = syntax_theme_hash;
         }
         // Version change: do NOT clear. Per-line content hashes handle correctness.
         self.last_version = version;
@@ -186,37 +195,54 @@ mod tests {
     #[test]
     fn cache_validate_version_change_preserves_entries() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         cache.insert(0, 42, test_galley());
         assert!(cache.get(0, 42).is_some());
 
         // Same version → preserved
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
         assert!(cache.get(0, 42).is_some());
 
         // Different version → still preserved (per-line hash guards correctness)
-        cache.validate(2, 14.0);
+        cache.validate(2, 14.0, 0);
         assert!(cache.get(0, 42).is_some());
     }
 
     #[test]
     fn cache_validate_font_size_change_clears() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         cache.insert(0, 42, test_galley());
         assert!(cache.get(0, 42).is_some());
 
         // Different font size → cleared
-        cache.validate(1, 16.0);
+        cache.validate(1, 16.0, 0);
+        assert!(cache.get(0, 42).is_none());
+    }
+
+    #[test]
+    fn cache_validate_syntax_theme_change_clears() {
+        let mut cache = RenderCache::new();
+        cache.validate(1, 14.0, 100);
+
+        cache.insert(0, 42, test_galley());
+        assert!(cache.get(0, 42).is_some());
+
+        // Same theme → preserved
+        cache.validate(1, 14.0, 100);
+        assert!(cache.get(0, 42).is_some());
+
+        // Different syntax theme → cleared
+        cache.validate(1, 14.0, 200);
         assert!(cache.get(0, 42).is_none());
     }
 
     #[test]
     fn cache_get_mismatched_hash() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         cache.insert(0, 42, test_galley());
 
@@ -231,7 +257,7 @@ mod tests {
     #[test]
     fn cache_insert_and_get() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         cache.insert(5, 100, test_galley());
 
@@ -242,7 +268,7 @@ mod tests {
     #[test]
     fn cache_insert_overwrites_same_line() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         cache.insert(0, 42, test_galley());
         cache.insert(0, 99, test_galley());
@@ -266,7 +292,7 @@ mod tests {
 
         {
             let cache = get_render_cache(&mut slot);
-            cache.validate(1, 14.0);
+            cache.validate(1, 14.0, 0);
             cache.insert(5, 100, test_galley());
         }
 
@@ -288,11 +314,11 @@ mod tests {
     #[test]
     fn version_change_with_same_hash_is_cache_hit() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
         cache.insert(10, 42, test_galley());
 
         // Bump version — line 10 content unchanged (same hash)
-        cache.validate(2, 14.0);
+        cache.validate(2, 14.0, 0);
         assert!(
             cache.get(10, 42).is_some(),
             "unchanged line should remain a cache hit after version bump"
@@ -302,11 +328,11 @@ mod tests {
     #[test]
     fn version_change_with_different_hash_is_cache_miss() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
         cache.insert(10, 42, test_galley());
 
         // Bump version — line 10 content changed (different hash)
-        cache.validate(2, 14.0);
+        cache.validate(2, 14.0, 0);
         assert!(
             cache.get(10, 99).is_none(),
             "changed line should be a cache miss"
@@ -316,7 +342,7 @@ mod tests {
     #[test]
     fn line_shift_causes_miss_for_shifted_lines() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         // Lines 0-3 cached with distinct hashes.
         for i in 0..4 {
@@ -326,7 +352,7 @@ mod tests {
         // Simulate inserting a line at index 1: old line 1 (hash 101) is now
         // at index 2. Querying index 2 with hash 101 should miss because the
         // cache still holds (index 2, hash 102).
-        cache.validate(2, 14.0);
+        cache.validate(2, 14.0, 0);
         assert!(
             cache.get(2, 101).is_none(),
             "shifted line should miss (wrong hash at old index)"
@@ -340,7 +366,7 @@ mod tests {
     #[test]
     fn prune_removes_entries_outside_range() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         for i in 0..200 {
             cache.insert(i, i as u64, test_galley());
@@ -359,7 +385,7 @@ mod tests {
     #[test]
     fn prune_handles_start_of_file() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         for i in 0..100 {
             cache.insert(i, i as u64, test_galley());
@@ -376,7 +402,7 @@ mod tests {
     #[test]
     fn prune_with_zero_margin() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
 
         for i in 0..10 {
             cache.insert(i, i as u64, test_galley());
@@ -393,7 +419,7 @@ mod tests {
     #[test]
     fn prune_on_empty_cache_is_noop() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0);
+        cache.validate(1, 14.0, 0);
         cache.prune(0, 10, 50); // should not panic
     }
 }

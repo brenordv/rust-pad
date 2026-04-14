@@ -567,8 +567,16 @@ impl<'a> EditorWidget<'a> {
         };
 
         {
+            let syntax_theme_hash = self
+                .highlighter
+                .map(|h| hash_str(h.current_theme()))
+                .unwrap_or(0);
             let cache = get_render_cache(&mut self.doc.render_cache);
-            cache.validate(self.doc.content_version, layout.effective_font_size);
+            cache.validate(
+                self.doc.content_version,
+                layout.effective_font_size,
+                syntax_theme_hash,
+            );
         }
 
         // Track the visible logical line range for cache pruning.
