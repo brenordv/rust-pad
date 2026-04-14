@@ -1,8 +1,9 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,9 +16,9 @@ jobs:
   gate:
     name: Check tag prefix
     runs-on: ubuntu-latest
-    if: startsWith(github.event.release.tag_name, 'v')
+    if: startsWith(github.ref_name, 'v')
     steps:
-      - run: echo "Tag ${{ github.event.release.tag_name }} starts with v — proceeding."
+      - run: echo "Tag ${{ github.ref_name }} starts with v — proceeding."
 
   build:
     needs: gate
