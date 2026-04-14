@@ -97,38 +97,9 @@ jobs:
           sips -z 1024 1024 assets/logo.png --out rust-pad.iconset/icon_512x512@2x.png
           iconutil -c icns rust-pad.iconset -o "${APP_DIR}/Resources/rust-pad.icns"
 
-          # Create Info.plist
+          # Create Info.plist from template
           TAG="${GITHUB_REF#refs/tags/v}"
-          cat > "${APP_DIR}/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key>
-  <string>Rust Pad</string>
-  <key>CFBundleDisplayName</key>
-  <string>Rust Pad</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.brenordv.rust-pad</string>
-  <key>CFBundleVersion</key>
-  <string>0.0.0</string>
-  <key>CFBundleShortVersionString</key>
-  <string>0.0.0</string>
-  <key>CFBundleExecutable</key>
-  <string>rust-pad</string>
-  <key>CFBundleIconFile</key>
-  <string>rust-pad</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-  <key>LSApplicationCategoryType</key>
-  <string>public.app-category.developer-tools</string>
-</dict>
-</plist>
-PLIST
-          # Patch in the actual version
-          sed -i '' "s/0.0.0/${TAG}/g" "${APP_DIR}/Info.plist"
+          sed "s/__VERSION__/${TAG}/g" packaging/macos/Info.plist.template > "${APP_DIR}/Info.plist"
 
           zip -r "${{ matrix.archive_name }}" "Rust Pad.app"
 
