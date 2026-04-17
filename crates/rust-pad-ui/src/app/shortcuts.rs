@@ -201,14 +201,53 @@ impl App {
         true
     }
 
-    /// Escape key: closes dialogs and clears multi-cursor.
+    /// Escape key: closes the topmost dialog, or clears multi-cursor if none are open.
+    /// Dialogs are dismissed one per keypress in priority order (most-modal first).
     /// Returns `true` if the key was consumed.
-    fn handle_escape_shortcut(&mut self, key: egui::Key) -> bool {
+    pub(crate) fn handle_escape_shortcut(&mut self, key: egui::Key) -> bool {
         if key != egui::Key::Escape {
             return false;
         }
-        self.find_replace.close();
-        self.go_to_line.visible = false;
+
+        // 1. DialogState-based modals (highest priority)
+        match self.dialog_state {
+            DialogState::None => {}
+            DialogState::ConfirmClose(_) => {
+                self.dialog_state = DialogState::None;
+                self.closing_all = false;
+                return true;
+            }
+            _ => {
+                self.dialog_state = DialogState::None;
+                return true;
+            }
+        }
+
+        // 2. Settings dialog
+        if self.settings_open {
+            self.settings_open = false;
+            return true;
+        }
+
+        // 3. About dialog
+        if self.about_open {
+            self.about_open = false;
+            return true;
+        }
+
+        // 4. Find/Replace
+        if self.find_replace.visible {
+            self.find_replace.close();
+            return true;
+        }
+
+        // 5. Go to Line
+        if self.go_to_line.visible {
+            self.go_to_line.visible = false;
+            return true;
+        }
+
+        // 6. No dialog open — clear secondary cursors
         self.tabs.active_doc_mut().clear_secondary_cursors();
         true
     }
