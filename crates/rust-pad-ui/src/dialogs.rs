@@ -335,7 +335,7 @@ impl GoToLineDialog {
                             &mut self.visible,
                         );
                     }
-                    if ui.button("  Cancel  ").clicked() {
+                    if ui.button("  I'm not going anywhere  ").clicked() {
                         self.visible = false;
                     }
                 });

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/rust-pad", "crates/rust-pad-core", "crates/rust-pad-ui", "crates/rust-pad-mod-history", "crates/rust-pad-config"]
 
 [workspace.package]
-version = "2.1.2"
+version = "2.2.0"
 edition = "2021"
 license = "GPL-3.0-only"
 authors = ["Breno RdV"]
@@ -33,7 +33,7 @@ rust-pad-config = { path = "crates/rust-pad-config" }
 rust-pad-core = { path = "crates/rust-pad-core" }
 rust-pad-ui = { path = "crates/rust-pad-ui" }
 rust-pad-mod-history = { path = "crates/rust-pad-mod-history" }
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 egui_kittest = { version = "0.34.1", features = ["eframe"] }
 bincode = "=1.3.3" # Never update.
 redb = "4.0.0"
@@ -44,4 +44,4 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 pdf-writer = "0.14.0"
 ttf-parser = "0.25.1"
 opener = { version = "0.8.4", features = ["reveal"] }
-uuid = { version = "1.23.0", features = ["v4"] }
+uuid = { version = "1.23.1", features = ["v4"] }

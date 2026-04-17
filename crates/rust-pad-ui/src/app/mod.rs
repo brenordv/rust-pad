@@ -4,6 +4,7 @@ mod about_dialog;
 mod auto_save;
 mod clipboard;
 mod context_menu;
+mod drag_drop;
 mod editing;
 mod file_dialog_state;
 mod file_ops;
@@ -891,6 +892,7 @@ impl eframe::App for App {
         ctx.set_zoom_factor(1.0);
 
         self.handle_global_shortcuts(&ctx);
+        self.handle_dropped_files(&ctx);
 
         // Update the OS window title to reflect the active document
         self.update_window_title(&ctx);
@@ -985,6 +987,9 @@ impl eframe::App for App {
 
         // Dialogs
         self.show_dialogs(&ctx);
+
+        // Drag-and-drop hover overlay (painted on top of everything)
+        self.paint_drop_overlay(&ctx);
 
         // Process completed background I/O operations
         self.handle_io_responses();
@@ -4344,5 +4349,165 @@ mod tests {
         };
         assert!(!ctx.is_copy);
         assert_eq!(ctx.content_version, doc.content_version);
+    }
+
+    // -- Escape key priority chain --
+
+    #[test]
+    fn test_escape_non_escape_key_returns_false() {
+        let mut app = test_app();
+        assert!(!app.handle_escape_shortcut(egui::Key::Enter));
+    }
+
+    #[test]
+    fn test_escape_closes_confirm_close_first() {
+        let mut app = test_app();
+        app.dialog_state = DialogState::ConfirmClose(0);
+        app.closing_all = true;
+        app.settings_open = true;
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(matches!(app.dialog_state, DialogState::None));
+        assert!(!app.closing_all);
+        // Settings should still be open — only one dialog per press
+        assert!(app.settings_open);
+    }
+
+    #[test]
+    fn test_escape_closes_confirm_reload() {
+        let mut app = test_app();
+        app.dialog_state = DialogState::ConfirmReload;
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_escape_closes_confirm_large_file() {
+        let mut app = test_app();
+        app.dialog_state = DialogState::ConfirmLargeFile {
+            path: std::path::PathBuf::from("big.txt"),
+            message: "Too large".into(),
+        };
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_escape_closes_file_open_error() {
+        let mut app = test_app();
+        app.dialog_state = DialogState::FileOpenError {
+            path: std::path::PathBuf::from("bad.bin"),
+            message: "Invalid encoding".into(),
+            can_recover_utf8: true,
+        };
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_escape_closes_print_error() {
+        let mut app = test_app();
+        app.dialog_state = DialogState::PrintError {
+            message: "Print failed".into(),
+            temp_path: None,
+        };
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(matches!(app.dialog_state, DialogState::None));
+    }
+
+    #[test]
+    fn test_escape_closes_settings_before_about() {
+        let mut app = test_app();
+        app.settings_open = true;
+        app.about_open = true;
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(!app.settings_open);
+        // About should still be open
+        assert!(app.about_open);
+    }
+
+    #[test]
+    fn test_escape_closes_about_when_settings_closed() {
+        let mut app = test_app();
+        app.about_open = true;
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(!app.about_open);
+    }
+
+    #[test]
+    fn test_escape_closes_find_replace_before_go_to_line() {
+        let mut app = test_app();
+        app.find_replace.open();
+        app.go_to_line.open();
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(!app.find_replace.visible);
+        // Go to line should still be open
+        assert!(app.go_to_line.visible);
+    }
+
+    #[test]
+    fn test_escape_closes_go_to_line_when_find_replace_closed() {
+        let mut app = test_app();
+        app.go_to_line.open();
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(!app.go_to_line.visible);
+    }
+
+    #[test]
+    fn test_escape_clears_secondary_cursors_when_no_dialogs() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello world");
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.position = Position::new(0, 5);
+        app.tabs.active_doc_mut().secondary_cursors.push(sc);
+        assert!(app.tabs.active_doc().is_multi_cursor());
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(!app.tabs.active_doc().is_multi_cursor());
+    }
+
+    #[test]
+    fn test_escape_full_priority_chain() {
+        let mut app = test_app();
+        // Set up everything at once
+        app.dialog_state = DialogState::ConfirmClose(0);
+        app.closing_all = true;
+        app.settings_open = true;
+        app.about_open = true;
+        app.find_replace.open();
+        app.go_to_line.open();
+
+        // 1st Escape: ConfirmClose
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(matches!(app.dialog_state, DialogState::None));
+        assert!(!app.closing_all);
+        assert!(app.settings_open);
+
+        // 2nd Escape: Settings
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.settings_open);
+        assert!(app.about_open);
+
+        // 3rd Escape: About
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.about_open);
+        assert!(app.find_replace.visible);
+
+        // 4th Escape: Find/Replace
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.find_replace.visible);
+        assert!(app.go_to_line.visible);
+
+        // 5th Escape: Go to Line
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.go_to_line.visible);
     }
 }

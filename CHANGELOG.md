@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.2.0]
+
+### Added
+
+- **Drag and Drop**: Files can now be dragged and dropped onto the editor window to open them. A translucent overlay with a "Drop file(s) to open" hint is shown while hovering. Multiple files can be dropped at once; duplicates are detected and switched to automatically.
+- **Escape closes all dialogues**: All dialogs (Settings, About, Unsaved Changes, Reload from Disk, File Too Large, File Open Error, Print Error) can now be dismissed with the Escape key. Dialogs close one per keypress in priority order, from most-modal to least-modal.
+
+### Changed
+
+- Renamed the "Cancel" button in the Go to Line dialog to "I'm not going anywhere".
+
 ## [2.1.2]
 
 ### Fixed

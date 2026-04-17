@@ -119,7 +119,7 @@ fn test_go_to_line_buttons_exist() {
     harness.run();
 
     harness.get_by_label("    Go    ");
-    harness.get_by_label("  Cancel  ");
+    harness.get_by_label("  I'm not going anywhere  ");
 }
 
 #[test]
