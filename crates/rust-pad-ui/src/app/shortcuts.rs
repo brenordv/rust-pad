@@ -141,7 +141,14 @@ impl App {
             return false;
         }
         match key {
-            egui::Key::F | egui::Key::H => self.find_replace.open(),
+            egui::Key::F | egui::Key::H => {
+                let selected = self
+                    .tabs
+                    .active_doc()
+                    .selected_text()
+                    .filter(|s| !s.contains('\n'));
+                self.find_replace.open_with_text(selected);
+            }
             egui::Key::G => self.go_to_line.open(),
             _ => return false,
         }

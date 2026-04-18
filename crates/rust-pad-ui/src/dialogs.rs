@@ -16,6 +16,10 @@ pub struct FindReplaceDialog {
     pub status: String,
     /// Snapshot of options from the previous frame, used to detect checkbox changes.
     prev_options_key: String,
+    /// When true, the find text field requests focus on the next frame.
+    focus_requested: bool,
+    /// Session-only search history (most recent first, max 20 entries).
+    search_history: Vec<String>,
 }
 
 impl Default for FindReplaceDialog {
@@ -35,15 +39,46 @@ impl FindReplaceDialog {
             scope: SearchScope::default(),
             status: String::new(),
             prev_options_key: String::new(),
+            focus_requested: false,
+            search_history: Vec::new(),
         }
     }
 
     pub fn open(&mut self) {
+        self.open_with_text(None);
+    }
+
+    /// Opens the dialog, optionally pre-populating the find field.
+    ///
+    /// If `text` is `Some` and non-empty, it replaces the current find text
+    /// and clears the status. If `None` or empty, the previous find text is
+    /// preserved.
+    pub fn open_with_text(&mut self, text: Option<String>) {
         self.visible = true;
+        self.focus_requested = true;
+        if let Some(t) = text {
+            if !t.is_empty() {
+                self.find_text = t;
+                self.status.clear();
+            }
+        }
     }
 
     pub fn close(&mut self) {
         self.visible = false;
+    }
+
+    /// Records the current find text into the search history.
+    ///
+    /// Deduplicates by moving an existing entry to the front. Caps at 20 entries.
+    pub fn record_search(&mut self) {
+        let query = self.find_text.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        self.search_history.retain(|h| h != &query);
+        self.search_history.insert(0, query);
+        self.search_history.truncate(20);
     }
 
     /// Builds a key string from the current search parameters for change detection.
@@ -74,7 +109,13 @@ impl FindReplaceDialog {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
-                Self::show_find_input(ui, &mut self.find_text, &mut action);
+                Self::show_find_input(
+                    ui,
+                    &mut self.find_text,
+                    &mut action,
+                    &mut self.focus_requested,
+                    &self.search_history,
+                );
                 Self::show_replace_input(ui, &mut self.replace_text);
                 ui.add_space(4.0);
                 Self::show_search_options(ui, &mut self.options, &mut self.scope);
@@ -95,21 +136,40 @@ impl FindReplaceDialog {
         action
     }
 
-    /// Renders the find text input field.
+    /// Renders the find text input field with optional search history dropdown.
     fn show_find_input(
         ui: &mut Ui,
         find_text: &mut String,
         action: &mut Option<FindReplaceAction>,
+        focus_requested: &mut bool,
+        history: &[String],
     ) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label("Find:      ");
             let find_response = ui.text_edit_singleline(find_text);
+            if *focus_requested {
+                *focus_requested = false;
+                find_response.request_focus();
+            }
             if find_response.changed() {
                 *action = Some(FindReplaceAction::Search);
             }
             if find_response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 *action = Some(FindReplaceAction::FindNext);
+            }
+            if !history.is_empty() {
+                egui::ComboBox::from_id_salt("search_history")
+                    .width(20.0)
+                    .selected_text("")
+                    .show_ui(ui, |ui| {
+                        for entry in history {
+                            if ui.selectable_label(false, entry).clicked() {
+                                *find_text = entry.clone();
+                                *action = Some(FindReplaceAction::Search);
+                            }
+                        }
+                    });
             }
         });
     }
@@ -466,5 +526,112 @@ mod tests {
         let dialog = GoToLineDialog::new();
         assert!(!dialog.visible);
         assert!(dialog.line_text.is_empty());
+    }
+
+    // ── FindReplaceDialog: focus ─────────────────────────────────────
+
+    #[test]
+    fn test_find_dialog_new_no_focus() {
+        let dialog = FindReplaceDialog::new();
+        assert!(!dialog.focus_requested);
+    }
+
+    #[test]
+    fn test_find_dialog_open_sets_focus_requested() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.open();
+        assert!(dialog.visible);
+        assert!(dialog.focus_requested);
+    }
+
+    // ── FindReplaceDialog: open_with_text ────────────────────────────
+
+    #[test]
+    fn test_open_with_text_populates_find_field() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.open_with_text(Some("hello".to_string()));
+        assert!(dialog.visible);
+        assert_eq!(dialog.find_text, "hello");
+    }
+
+    #[test]
+    fn test_open_with_text_none_preserves_previous() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.find_text = "previous".to_string();
+        dialog.open_with_text(None);
+        assert_eq!(dialog.find_text, "previous");
+    }
+
+    #[test]
+    fn test_open_with_text_empty_preserves_previous() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.find_text = "previous".to_string();
+        dialog.open_with_text(Some(String::new()));
+        assert_eq!(dialog.find_text, "previous");
+    }
+
+    #[test]
+    fn test_open_with_text_sets_focus() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.open_with_text(Some("test".to_string()));
+        assert!(dialog.focus_requested);
+    }
+
+    // ── FindReplaceDialog: search history ────────────────────────────
+
+    #[test]
+    fn test_record_search_adds_to_history() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.find_text = "hello".to_string();
+        dialog.record_search();
+        assert_eq!(dialog.search_history, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_record_search_deduplicates() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.find_text = "hello".to_string();
+        dialog.record_search();
+        dialog.record_search();
+        assert_eq!(dialog.search_history, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_record_search_moves_to_front() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.find_text = "alpha".to_string();
+        dialog.record_search();
+        dialog.find_text = "beta".to_string();
+        dialog.record_search();
+        dialog.find_text = "alpha".to_string();
+        dialog.record_search();
+        assert_eq!(dialog.search_history, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn test_record_search_caps_at_20() {
+        let mut dialog = FindReplaceDialog::new();
+        for i in 0..25 {
+            dialog.find_text = format!("query_{i}");
+            dialog.record_search();
+        }
+        assert_eq!(dialog.search_history.len(), 20);
+        assert_eq!(dialog.search_history[0], "query_24");
+    }
+
+    #[test]
+    fn test_record_search_ignores_empty() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.find_text = "   ".to_string();
+        dialog.record_search();
+        assert!(dialog.search_history.is_empty());
+    }
+
+    #[test]
+    fn test_record_search_trims_whitespace() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.find_text = "  foo  ".to_string();
+        dialog.record_search();
+        assert_eq!(dialog.search_history, vec!["foo"]);
     }
 }

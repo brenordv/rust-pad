@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.3.0]
+
+### Added
+
+- **Auto-focus find input**: The Find/Replace dialog now automatically focuses the find text field when opened, so the user can start typing immediately without clicking.
+- **Copy selection into find field**: Pressing Ctrl+F or Ctrl+H with text selected automatically populates the find field with the selected text (single-line selections only).
+- **Scroll to match on Find Next/Prev**: The viewport now scrolls to keep the current match visible when cycling through results with Find Next or Find Prev.
+- **Search history dropdown**: A small dropdown button next to the find field lets the user recall recent search queries (session-only, up to 20 entries, deduplicated). History is recorded on Find Next, Find Prev, Replace, and Replace All actions.
+
 ## [2.2.0]
 
 ### Added
