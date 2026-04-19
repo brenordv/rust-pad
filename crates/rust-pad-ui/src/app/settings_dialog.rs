@@ -5,6 +5,8 @@
 use eframe::egui;
 use rust_pad_config::RecentFilesCleanup;
 
+use crate::tabs::DefaultLineEnding;
+
 use super::App;
 
 /// Which section of the settings dialog is currently visible.
@@ -193,6 +195,35 @@ impl App {
         });
         ui.label(
             egui::RichText::new("Leave empty for no extension. Examples: txt, md, rs")
+                .small()
+                .color(egui::Color32::GRAY),
+        );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.heading("Default Line Ending");
+        ui.add_space(4.0);
+
+        let current = self.tabs.default_line_ending;
+        egui::ComboBox::from_label("Line ending for new documents")
+            .selected_text(match current {
+                DefaultLineEnding::System => "System default",
+                DefaultLineEnding::Unix => "Unix (LF)",
+                DefaultLineEnding::Windows => "Windows (CRLF)",
+            })
+            .show_ui(ui, |ui| {
+                for (value, label) in [
+                    (DefaultLineEnding::System, "System default"),
+                    (DefaultLineEnding::Unix, "Unix (LF)"),
+                    (DefaultLineEnding::Windows, "Windows (CRLF)"),
+                ] {
+                    ui.selectable_value(&mut self.tabs.default_line_ending, value, label);
+                }
+            });
+        ui.label(
+            egui::RichText::new("Files opened from disk keep their detected line ending.")
                 .small()
                 .color(egui::Color32::GRAY),
         );

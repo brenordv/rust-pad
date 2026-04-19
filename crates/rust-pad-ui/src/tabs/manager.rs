@@ -2,9 +2,50 @@
 use std::sync::Arc;
 
 use rust_pad_core::document::Document;
+use rust_pad_core::encoding::LineEnding;
 use rust_pad_core::history::{HistoryConfig, PersistenceLayer};
 
 use super::split::{PaneId, PaneTabSplit};
+
+/// Default line ending policy for new documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultLineEnding {
+    /// Use the OS default (`CRLF` on Windows, `LF` elsewhere).
+    System,
+    /// Always use `LF` (Unix/macOS).
+    Unix,
+    /// Always use `CRLF` (Windows).
+    Windows,
+}
+
+impl DefaultLineEnding {
+    /// Resolves this policy to a concrete `LineEnding`.
+    pub fn resolve(self) -> LineEnding {
+        match self {
+            Self::System => LineEnding::default(),
+            Self::Unix => LineEnding::Lf,
+            Self::Windows => LineEnding::CrLf,
+        }
+    }
+
+    /// Parses from a config string. Unrecognised values fall back to `System`.
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "lf" => Self::Unix,
+            "crlf" => Self::Windows,
+            _ => Self::System,
+        }
+    }
+
+    /// Returns the config string representation.
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Unix => "lf",
+            Self::Windows => "crlf",
+        }
+    }
+}
 
 /// Manages open document tabs.
 #[derive(Debug)]
@@ -26,6 +67,8 @@ pub struct TabManager {
     config: HistoryConfig,
     /// Default file extension for new untitled tabs (e.g. "txt", "md"). Empty = none.
     pub default_extension: String,
+    /// Default line ending for new documents.
+    pub default_line_ending: DefaultLineEnding,
 }
 
 impl Default for TabManager {
@@ -44,6 +87,7 @@ impl TabManager {
             persistence: None,
             config: HistoryConfig::default(),
             default_extension: String::new(),
+            default_line_ending: DefaultLineEnding::System,
         }
     }
 
@@ -57,6 +101,7 @@ impl TabManager {
             persistence: Some(persistence),
             config,
             default_extension: String::new(),
+            default_line_ending: DefaultLineEnding::System,
         }
     }
 
@@ -387,10 +432,12 @@ impl TabManager {
 
     /// Creates a new empty document with the appropriate persistence setting.
     fn create_document(&self) -> Document {
-        match &self.persistence {
+        let mut doc = match &self.persistence {
             Some(pl) => Document::with_persistence(Arc::clone(pl), &self.config),
             None => Document::new(),
-        }
+        };
+        doc.line_ending = self.default_line_ending.resolve();
+        doc
     }
 
     /// Deletes persisted history for a tab that is being closed.
@@ -954,6 +1001,57 @@ mod tests {
     fn test_default_extension_empty_by_default() {
         let tm = TabManager::new();
         assert!(tm.default_extension.is_empty());
+    }
+
+    // ── DefaultLineEnding ───────────────────────────────────────────
+
+    #[test]
+    fn test_default_line_ending_system_by_default() {
+        let tm = TabManager::new();
+        assert_eq!(tm.default_line_ending, DefaultLineEnding::System);
+    }
+
+    #[test]
+    fn test_default_line_ending_from_config() {
+        assert_eq!(
+            DefaultLineEnding::from_config("lf"),
+            DefaultLineEnding::Unix
+        );
+        assert_eq!(
+            DefaultLineEnding::from_config("crlf"),
+            DefaultLineEnding::Windows
+        );
+        assert_eq!(
+            DefaultLineEnding::from_config("system"),
+            DefaultLineEnding::System
+        );
+        assert_eq!(
+            DefaultLineEnding::from_config("unknown"),
+            DefaultLineEnding::System
+        );
+    }
+
+    #[test]
+    fn test_default_line_ending_as_config_str() {
+        assert_eq!(DefaultLineEnding::System.as_config_str(), "system");
+        assert_eq!(DefaultLineEnding::Unix.as_config_str(), "lf");
+        assert_eq!(DefaultLineEnding::Windows.as_config_str(), "crlf");
+    }
+
+    #[test]
+    fn test_default_line_ending_resolve() {
+        assert_eq!(DefaultLineEnding::Unix.resolve(), LineEnding::Lf);
+        assert_eq!(DefaultLineEnding::Windows.resolve(), LineEnding::CrLf);
+        // System resolves to platform default
+        assert_eq!(DefaultLineEnding::System.resolve(), LineEnding::default());
+    }
+
+    #[test]
+    fn test_new_tab_uses_default_line_ending() {
+        let mut tm = TabManager::new();
+        tm.default_line_ending = DefaultLineEnding::Unix;
+        tm.new_tab();
+        assert_eq!(tm.documents.last().unwrap().line_ending, LineEnding::Lf);
     }
 
     // ── open_from_bytes ─────────────────────────────────────────────

@@ -247,6 +247,10 @@ impl App {
             }
         };
         tabs.default_extension = app_config.default_extension.clone();
+        tabs.default_line_ending =
+            crate::tabs::DefaultLineEnding::from_config(&app_config.default_line_ending);
+        // Apply to the initial document created before config was loaded.
+        tabs.documents[0].line_ending = tabs.default_line_ending.resolve();
 
         // Open session store
         let session_path = if args.portable {
@@ -1090,6 +1094,7 @@ impl eframe::App for App {
             show_full_path_in_title: self.show_full_path_in_title,
             font_size: self.theme_ctrl.theme.font_size,
             default_extension: self.file_dialog.default_extension.clone(),
+            default_line_ending: self.tabs.default_line_ending.as_config_str().to_string(),
             remember_last_folder: self.file_dialog.remember_last_folder,
             default_work_folder: self.file_dialog.default_work_folder.clone(),
             last_used_folder: self
