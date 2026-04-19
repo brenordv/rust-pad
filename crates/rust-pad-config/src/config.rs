@@ -29,6 +29,10 @@ pub struct AppConfig {
     pub font_size: f32,
     /// Default file extension for new untitled tabs (e.g. "txt", "md"). Empty = none.
     pub default_extension: String,
+    /// Default line ending for new documents. One of "system" (OS default),
+    /// "lf" (Unix), or "crlf" (Windows). Loaded files keep their detected
+    /// line ending regardless of this setting.
+    pub default_line_ending: String,
     /// Whether to remember the last folder used in open/save dialogs.
     pub remember_last_folder: bool,
     /// Default working folder for file dialogs. Empty = user's home directory.
@@ -79,6 +83,7 @@ impl Default for AppConfig {
             show_full_path_in_title: true,
             font_size: 16.0,
             default_extension: String::new(),
+            default_line_ending: "system".to_string(),
             remember_last_folder: true,
             default_work_folder: String::new(),
             last_used_folder: String::new(),

@@ -247,6 +247,10 @@ impl App {
             }
         };
         tabs.default_extension = app_config.default_extension.clone();
+        tabs.default_line_ending =
+            crate::tabs::DefaultLineEnding::from_config(&app_config.default_line_ending);
+        // Apply to the initial document created before config was loaded.
+        tabs.documents[0].line_ending = tabs.default_line_ending.resolve();
 
         // Open session store
         let session_path = if args.portable {
@@ -941,6 +945,7 @@ impl eframe::App for App {
 
         // Editor area
         let dialog_open = self.is_dialog_open();
+        let modal_dialog_open = self.is_modal_dialog_open();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme_ctrl.theme.bg_color))
             .show_inside(ui, |ui| {
@@ -948,7 +953,7 @@ impl eframe::App for App {
                     // Split-pane render path. Each pane renders its own
                     // tab strip + editor. Routing to the focused pane is
                     // handled inside `render_split_panes`.
-                    self.render_split_panes(ui, dialog_open);
+                    self.render_split_panes(ui, dialog_open, modal_dialog_open);
                     return;
                 }
 
@@ -964,6 +969,7 @@ impl eframe::App for App {
                     editor.show_special_chars = self.show_special_chars;
                     editor.show_line_numbers = self.show_line_numbers;
                     editor.dialog_open = dialog_open;
+                    editor.modal_dialog_open = modal_dialog_open;
                     editor.bookmarks = Some(&self.bookmarks);
                     let r = editor.show(ui);
                     (r, editor.zoom_request)
@@ -1088,6 +1094,7 @@ impl eframe::App for App {
             show_full_path_in_title: self.show_full_path_in_title,
             font_size: self.theme_ctrl.theme.font_size,
             default_extension: self.file_dialog.default_extension.clone(),
+            default_line_ending: self.tabs.default_line_ending.as_config_str().to_string(),
             remember_last_folder: self.file_dialog.remember_last_folder,
             default_work_folder: self.file_dialog.default_work_folder.clone(),
             last_used_folder: self
@@ -1653,6 +1660,44 @@ mod tests {
             is_copy: false,
         });
         assert!(app.is_dialog_open());
+    }
+
+    // ── is_modal_dialog_open ────────────────────────────────────────
+
+    #[test]
+    fn test_is_modal_dialog_open_excludes_find_replace() {
+        let mut app = test_app();
+        app.find_replace.open();
+        assert!(app.is_dialog_open());
+        assert!(!app.is_modal_dialog_open());
+    }
+
+    #[test]
+    fn test_is_modal_dialog_open_includes_go_to_line() {
+        let mut app = test_app();
+        app.go_to_line.open();
+        assert!(app.is_modal_dialog_open());
+    }
+
+    #[test]
+    fn test_is_modal_dialog_open_includes_settings() {
+        let mut app = test_app();
+        app.settings_open = true;
+        assert!(app.is_modal_dialog_open());
+    }
+
+    #[test]
+    fn test_is_modal_dialog_open_includes_confirm_close() {
+        let mut app = test_app();
+        app.dialog_state = DialogState::ConfirmClose(0);
+        assert!(app.is_modal_dialog_open());
+    }
+
+    #[test]
+    fn test_is_modal_dialog_open_includes_io_dialog() {
+        let mut app = test_app();
+        app.io_activity.dialog_open = true;
+        assert!(app.is_modal_dialog_open());
     }
 
     #[test]

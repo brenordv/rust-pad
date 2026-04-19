@@ -19,11 +19,22 @@ fn navigate_to_match(doc: &mut Document, mat: &SearchMatch) {
     doc.cursor.start_selection();
     let end_pos = char_to_pos(&doc.buffer, mat.end);
     doc.cursor.move_to(end_pos, &doc.buffer);
+    doc.scroll_to_cursor = true;
 }
 
 impl App {
     /// Dispatches a search action to the appropriate handler based on scope.
     pub(crate) fn handle_search_action(&mut self, action: FindReplaceAction) {
+        // Record search history for actionable operations (not on every keystroke).
+        match action {
+            FindReplaceAction::FindNext
+            | FindReplaceAction::FindPrev
+            | FindReplaceAction::Replace
+            | FindReplaceAction::ReplaceAll => {
+                self.find_replace.record_search();
+            }
+            FindReplaceAction::Search => {}
+        }
         match self.find_replace.scope {
             SearchScope::CurrentTab => self.handle_search_current_tab(action),
             SearchScope::AllTabs => self.handle_search_all_tabs(action),
@@ -340,5 +351,26 @@ impl App {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_pad_core::document::Document;
+    use rust_pad_core::search::SearchMatch;
+
+    #[test]
+    fn test_navigate_to_match_sets_scroll_to_cursor() {
+        let mut doc = Document::new();
+        doc.insert_text("hello world");
+        doc.scroll_to_cursor = false; // reset after insert
+        let mat = SearchMatch {
+            start: 6,
+            end: 11,
+            line: 0,
+        };
+        navigate_to_match(&mut doc, &mat);
+        assert!(doc.scroll_to_cursor);
     }
 }

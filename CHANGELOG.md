@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.3.0]
+
+### Added
+
+- **Auto-focus find input**: The Find/Replace dialog now automatically focuses the find text field when opened, so the user can start typing immediately without clicking.
+- **Copy selection into find field**: Pressing Ctrl+F or Ctrl+H with text selected automatically populates the find field with the selected text (single-line selections only).
+- **Scroll to match on Find Next/Prev**: The viewport now scrolls to keep the current match visible when cycling through results with Find Next or Find Prev.
+- **Search history dropdown**: A small dropdown button next to the find field lets the user recall recent search queries (session-only, up to 20 entries, deduplicated). History is recorded on Find Next, Find Prev, Replace, and Replace All actions.
+- **Non-modal Find/Replace**: The Find/Replace dialog no longer blocks editing. Users can click into the editor to type, use shortcuts, and make changes while the dialog stays open. The dialog becomes semi-transparent when it loses focus, providing a clear visual cue of which surface is active.
+- **Default line ending setting**: New "Default Line Ending" option in Settings → Editor. Choose between System (OS default), Unix (LF), or Windows (CRLF) for new documents. Files opened from disk keep their detected line ending.
+
 ## [2.2.0]
 
 ### Added

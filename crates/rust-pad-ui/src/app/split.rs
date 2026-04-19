@@ -215,7 +215,12 @@ impl App {
     /// Renders the central panel content as two side-by-side (or stacked)
     /// panes separated by a draggable divider. Called from the central panel
     /// closure when [`App::is_split`] is true.
-    pub(crate) fn render_split_panes(&mut self, ui: &mut egui::Ui, dialog_open: bool) {
+    pub(crate) fn render_split_panes(
+        &mut self,
+        ui: &mut egui::Ui,
+        dialog_open: bool,
+        modal_dialog_open: bool,
+    ) {
         let Some(state) = self.split.as_ref() else {
             return;
         };
@@ -285,8 +290,15 @@ impl App {
         }
 
         // ── Render each pane in its own child UI. ──────────────────────
-        let zoom_left = self.render_one_pane(ui, PaneId::Left, left_rect, dialog_open);
-        let zoom_right = self.render_one_pane(ui, PaneId::Right, right_rect, dialog_open);
+        let zoom_left =
+            self.render_one_pane(ui, PaneId::Left, left_rect, dialog_open, modal_dialog_open);
+        let zoom_right = self.render_one_pane(
+            ui,
+            PaneId::Right,
+            right_rect,
+            dialog_open,
+            modal_dialog_open,
+        );
         let zoom_request = if zoom_left != 1.0 {
             zoom_left
         } else {
@@ -308,6 +320,7 @@ impl App {
         pane: PaneId,
         pane_rect: Rect,
         dialog_open: bool,
+        modal_dialog_open: bool,
     ) -> f32 {
         let mut zoom_request = 1.0_f32;
         let focused = self.tabs.focused_pane() == pane;
@@ -336,6 +349,7 @@ impl App {
                     editor.show_special_chars = self.show_special_chars;
                     editor.show_line_numbers = self.show_line_numbers;
                     editor.dialog_open = dialog_open;
+                    editor.modal_dialog_open = modal_dialog_open;
                     editor.bookmarks = Some(&self.bookmarks);
                     let r = editor.show(ui);
                     zoom_request = editor.zoom_request;
