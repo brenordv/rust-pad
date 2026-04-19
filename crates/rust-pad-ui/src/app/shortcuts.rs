@@ -8,14 +8,21 @@ use eframe::egui;
 use super::{App, DialogState};
 
 impl App {
-    /// Returns true if any dialog is currently open and capturing input.
-    pub(crate) fn is_dialog_open(&self) -> bool {
-        self.find_replace.visible
-            || self.go_to_line.visible
+    /// Returns true if a modal (blocking) dialog is open.
+    ///
+    /// Find/Replace is excluded — it is non-modal and allows editing
+    /// in the editor when it doesn't have focus.
+    pub(crate) fn is_modal_dialog_open(&self) -> bool {
+        self.go_to_line.visible
             || self.settings_open
             || self.about_open
             || !matches!(self.dialog_state, DialogState::None)
             || self.io_activity.dialog_open
+    }
+
+    /// Returns true if any dialog is currently open (modal or non-modal).
+    pub(crate) fn is_dialog_open(&self) -> bool {
+        self.find_replace.visible || self.is_modal_dialog_open()
     }
 
     /// Handles global keyboard shortcuts.
@@ -55,8 +62,11 @@ impl App {
             (ctrl, shift, alt, keys, has_copy, has_cut, has_paste)
         });
 
-        // Handle semantic clipboard events (from focused widget)
-        if !self.is_dialog_open() {
+        // Handle semantic clipboard events (from focused widget).
+        // Suppressed when a modal dialog is open or when the Find/Replace
+        // dialog has focus (so Ctrl+C/V/X operate on the dialog's text fields).
+        let suppress_editor_input = self.is_modal_dialog_open() || self.find_replace.has_focus;
+        if !suppress_editor_input {
             if has_copy {
                 self.copy();
             }
@@ -67,8 +77,6 @@ impl App {
                 self.paste();
             }
         }
-
-        let dialog_open = self.is_dialog_open();
 
         for key in &keys {
             // View / split shortcuts (Ctrl+Alt+...) run FIRST. Otherwise
@@ -95,8 +103,10 @@ impl App {
                 continue;
             }
 
-            // Editor-only shortcuts are suppressed when a dialog is open.
-            if dialog_open {
+            // Editor-only shortcuts are suppressed when a modal dialog is
+            // open, or when the Find/Replace dialog has focus (so that
+            // e.g. Ctrl+Z undoes in the dialog's text field, not the editor).
+            if suppress_editor_input {
                 continue;
             }
             if self.handle_edit_shortcut(*key, ctrl) {

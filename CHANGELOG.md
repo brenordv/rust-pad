@@ -8,6 +8,7 @@
 - **Copy selection into find field**: Pressing Ctrl+F or Ctrl+H with text selected automatically populates the find field with the selected text (single-line selections only).
 - **Scroll to match on Find Next/Prev**: The viewport now scrolls to keep the current match visible when cycling through results with Find Next or Find Prev.
 - **Search history dropdown**: A small dropdown button next to the find field lets the user recall recent search queries (session-only, up to 20 entries, deduplicated). History is recorded on Find Next, Find Prev, Replace, and Replace All actions.
+- **Non-modal Find/Replace**: The Find/Replace dialog no longer blocks editing. Users can click into the editor to type, use shortcuts, and make changes while the dialog stays open. The dialog becomes semi-transparent when it loses focus, providing a clear visual cue of which surface is active.
 
 ## [2.2.0]
 

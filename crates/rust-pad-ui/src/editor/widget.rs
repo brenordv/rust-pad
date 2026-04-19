@@ -87,9 +87,14 @@ pub struct EditorWidget<'a> {
     pub word_wrap: bool,
     pub show_special_chars: bool,
     pub show_line_numbers: bool,
-    /// When true, the editor won't steal focus or process keyboard input.
-    /// Set this when a dialog (Go to Line, Find/Replace, etc.) is open.
+    /// When true, the editor won't auto-grab focus. Set when any dialog
+    /// (modal or non-modal) is open, so the dialog's widgets can keep focus.
     pub dialog_open: bool,
+    /// When true, the editor suppresses keyboard input entirely. Set only
+    /// for modal dialogs (Settings, About, Confirm-Close, file dialogs).
+    /// Non-modal dialogs like Find/Replace leave this `false` so the editor
+    /// can be edited when the user clicks into it.
+    pub modal_dialog_open: bool,
     /// Zoom factor from Ctrl+scroll (1.0 = no change). Read by the app after `show()`.
     pub zoom_request: f32,
     /// Optional bookmark manager for rendering bookmark indicators in the gutter.
@@ -112,6 +117,7 @@ impl<'a> EditorWidget<'a> {
             show_special_chars: false,
             show_line_numbers: true,
             dialog_open: false,
+            modal_dialog_open: false,
             zoom_request: 1.0,
             bookmarks: None,
         }
@@ -498,10 +504,16 @@ impl<'a> EditorWidget<'a> {
     }
 
     fn handle_focus_and_keyboard(&mut self, ui: &mut Ui, response: &Response) {
+        // Don't auto-grab focus when any dialog is open; focus transfers
+        // to the editor via mouse click (handle_mouse_input calls
+        // response.request_focus()).
         if !self.dialog_open && !response.has_focus() && !response.lost_focus() {
             response.request_focus();
         }
-        if !self.dialog_open && response.has_focus() {
+        // Process keyboard input when the editor has focus, unless a
+        // modal dialog is blocking. Non-modal dialogs (Find/Replace)
+        // allow editing when the editor has focus.
+        if !self.modal_dialog_open && response.has_focus() {
             ui.memory_mut(|mem| {
                 mem.set_focus_lock_filter(
                     response.id,
@@ -2010,6 +2022,7 @@ mod tests {
         assert!(!widget.word_wrap);
         assert!(!widget.show_special_chars);
         assert!(!widget.dialog_open);
+        assert!(!widget.modal_dialog_open);
         assert!((widget.zoom_request - 1.0).abs() < f32::EPSILON);
     }
 
@@ -2022,10 +2035,12 @@ mod tests {
         widget.show_special_chars = true;
         widget.show_line_numbers = true;
         widget.dialog_open = true;
+        widget.modal_dialog_open = true;
         assert!(widget.word_wrap);
         assert!(widget.show_special_chars);
         assert!(widget.show_line_numbers);
         assert!(widget.dialog_open);
+        assert!(widget.modal_dialog_open);
     }
 
     // ── screen_to_position (non-wrapped) ───────────────────────────

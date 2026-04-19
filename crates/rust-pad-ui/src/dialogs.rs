@@ -20,6 +20,8 @@ pub struct FindReplaceDialog {
     focus_requested: bool,
     /// Session-only search history (most recent first, max 20 entries).
     search_history: Vec<String>,
+    /// True when any of the dialog's interactive widgets had focus this frame.
+    pub has_focus: bool,
 }
 
 impl Default for FindReplaceDialog {
@@ -41,6 +43,7 @@ impl FindReplaceDialog {
             prev_options_key: String::new(),
             focus_requested: false,
             search_history: Vec::new(),
+            has_focus: false,
         }
     }
 
@@ -95,6 +98,15 @@ impl FindReplaceDialog {
 
     /// Shows the Find/Replace dialog. Returns an action to perform, if any.
     pub fn show(&mut self, ctx: &Context) -> Option<FindReplaceAction> {
+        // Semi-transparent when the dialog doesn't have focus, so the user
+        // gets a visual cue that the editor is the active surface. Uses the
+        // previous frame's focus state (set below from TextEdit responses).
+        let alpha = if self.has_focus { 1.0 } else { 0.7 };
+
+        // Reset focus tracking unconditionally so that closing the dialog
+        // clears `has_focus` even though the rest of `show()` is skipped.
+        self.has_focus = false;
+
         if !self.visible {
             return None;
         }
@@ -102,10 +114,18 @@ impl FindReplaceDialog {
         let mut action = None;
         let mut open = true;
 
+        let frame = egui::Frame::window(ctx.global_style().as_ref()).fill(
+            ctx.global_style()
+                .visuals
+                .window_fill()
+                .gamma_multiply(alpha),
+        );
+
         Window::new("Find and Replace")
             .collapsible(false)
             .resizable(true)
             .default_width(420.0)
+            .frame(frame)
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
@@ -115,8 +135,9 @@ impl FindReplaceDialog {
                     &mut action,
                     &mut self.focus_requested,
                     &self.search_history,
+                    &mut self.has_focus,
                 );
-                Self::show_replace_input(ui, &mut self.replace_text);
+                Self::show_replace_input(ui, &mut self.replace_text, &mut self.has_focus);
                 ui.add_space(4.0);
                 Self::show_search_options(ui, &mut self.options, &mut self.scope);
                 ui.add_space(4.0);
@@ -143,11 +164,13 @@ impl FindReplaceDialog {
         action: &mut Option<FindReplaceAction>,
         focus_requested: &mut bool,
         history: &[String],
+        has_focus: &mut bool,
     ) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label("Find:      ");
             let find_response = ui.text_edit_singleline(find_text);
+            *has_focus |= find_response.has_focus();
             if *focus_requested {
                 *focus_requested = false;
                 find_response.request_focus();
@@ -175,11 +198,12 @@ impl FindReplaceDialog {
     }
 
     /// Renders the replace text input field.
-    fn show_replace_input(ui: &mut Ui, replace_text: &mut String) {
+    fn show_replace_input(ui: &mut Ui, replace_text: &mut String, has_focus: &mut bool) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label("Replace:");
-            ui.text_edit_singleline(replace_text);
+            let replace_response = ui.text_edit_singleline(replace_text);
+            *has_focus |= replace_response.has_focus();
         });
     }
 
@@ -633,5 +657,13 @@ mod tests {
         dialog.find_text = "  foo  ".to_string();
         dialog.record_search();
         assert_eq!(dialog.search_history, vec!["foo"]);
+    }
+
+    // ── FindReplaceDialog: has_focus ─────────────────────────────────
+
+    #[test]
+    fn test_find_replace_has_focus_default_false() {
+        let dialog = FindReplaceDialog::new();
+        assert!(!dialog.has_focus);
     }
 }
