@@ -4586,6 +4586,7 @@ mod tests {
         app.closing_all = true;
         app.settings_open = true;
         app.about_open = true;
+        app.problems_open = true;
         app.find_replace.open();
         app.go_to_line.open();
 
@@ -4603,15 +4604,70 @@ mod tests {
         // 3rd Escape: About
         app.handle_escape_shortcut(egui::Key::Escape);
         assert!(!app.about_open);
+        assert!(app.problems_open);
+
+        // 4th Escape: Problems
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.problems_open);
         assert!(app.find_replace.visible);
 
-        // 4th Escape: Find/Replace
+        // 5th Escape: Find/Replace
         app.handle_escape_shortcut(egui::Key::Escape);
         assert!(!app.find_replace.visible);
         assert!(app.go_to_line.visible);
 
-        // 5th Escape: Go to Line
+        // 6th Escape: Go to Line
         app.handle_escape_shortcut(egui::Key::Escape);
         assert!(!app.go_to_line.visible);
+    }
+
+    // -- Problems dialog --
+
+    #[test]
+    fn test_problems_open_is_modal() {
+        let mut app = test_app();
+        assert!(!app.is_modal_dialog_open());
+        app.problems_open = true;
+        assert!(app.is_modal_dialog_open());
+    }
+
+    #[test]
+    fn test_escape_closes_problems_dialog() {
+        let mut app = test_app();
+        app.problems_open = true;
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(!app.problems_open);
+    }
+
+    #[test]
+    fn test_escape_closes_about_before_problems() {
+        let mut app = test_app();
+        app.about_open = true;
+        app.problems_open = true;
+
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.about_open);
+        assert!(app.problems_open);
+
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.problems_open);
+    }
+
+    #[test]
+    fn test_refresh_problem_count_without_store() {
+        let mut app = test_app();
+        app.problems_unread = 99;
+        // Global store is not initialized in tests, so refresh should
+        // set count to 0 (the OnceLock is empty).
+        app.refresh_problem_count();
+        assert_eq!(app.problems_unread, 0);
+    }
+
+    #[test]
+    fn test_problems_defaults() {
+        let app = test_app();
+        assert!(!app.problems_open);
+        assert_eq!(app.problems_unread, 0);
     }
 }
