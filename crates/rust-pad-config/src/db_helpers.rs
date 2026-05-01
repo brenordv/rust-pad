@@ -1,7 +1,37 @@
-//! Helper macros for common redb transaction patterns.
+//! Helper macros and utilities for common redb transaction patterns.
 //!
 //! Both `problem_log` and `session` repeat the same begin→open_table→
 //! (operate)→commit boilerplate. These macros capture the pattern once.
+//! The [`open_or_create_db`] function centralizes the directory creation,
+//! database opening, and permission hardening shared by all store types.
+
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use redb::Database;
+
+/// Creates parent directories (if needed), opens (or creates) the redb
+/// database at `path`, and sets owner-only permissions on both the
+/// directory and the database file.
+///
+/// `label` is a human-readable store name used in error messages
+/// (e.g. `"problem-log"`, `"session"`).
+pub(crate) fn open_or_create_db(path: &Path, label: &str) -> Result<Database> {
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create {label} directory: {}", parent.display())
+            })?;
+            crate::permissions::set_owner_only_dir_permissions(parent);
+        }
+    }
+
+    let db = Database::create(path)
+        .with_context(|| format!("Failed to open {label} database: {}", path.display()))?;
+    crate::permissions::set_owner_only_file_permissions(path);
+
+    Ok(db)
+}
 
 /// Opens a read transaction and table, binding the table to `$table`.
 ///

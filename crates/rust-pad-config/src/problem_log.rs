@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
-use crate::db_helpers::{read_table, write_table};
+use crate::db_helpers::{open_or_create_db, read_table, write_table};
 
 /// Table layout: `u64` (entry ID) → `&[u8]` (4-field record, see below).
 ///
@@ -100,21 +100,7 @@ impl ProblemStore {
     /// ID counter from the maximum existing entry ID so that new entries never
     /// collide with old ones.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "Failed to create problem-log directory: {}",
-                        parent.display()
-                    )
-                })?;
-                crate::permissions::set_owner_only_dir_permissions(parent);
-            }
-        }
-
-        let db = Database::create(path)
-            .with_context(|| format!("Failed to open problem-log database: {}", path.display()))?;
-        crate::permissions::set_owner_only_file_permissions(path);
+        let db = open_or_create_db(path, "problem-log")?;
 
         // Ensure the table exists.
         let write_txn = db

@@ -275,19 +275,6 @@ impl App {
             }
         };
 
-        // TODO: Remove mock problem entries before release.
-        crate::problem_log::log_problem(
-            "Auto-save failed for 'Untitled-3': Permission denied (os error 5)",
-        );
-        crate::problem_log::log_problem("Failed to open 'C:\\Users\\raccoon\\big_dump.sql': failed to decode as UTF-8, UTF-16LE, UTF-16BE, or ASCII");
-        crate::problem_log::log_problem("I/O error: failed to write 'Z:\\projects\\notes.txt': The process cannot access the file because it is being used by another process");
-        crate::problem_log::log_problem(
-            "Live reload failed for 'server.log': file size (1.2 GB) exceeds limit",
-        );
-        crate::problem_log::log_problem(
-            "Print/export failed: PDF renderer ran out of memory for document with 850,000 lines",
-        );
-
         // Read initial unread count from the global problem store
         // (already initialized in main.rs).
         let problems_unread = crate::problem_log::unread_count();

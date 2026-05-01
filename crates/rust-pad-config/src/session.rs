@@ -11,7 +11,7 @@ use bincode::Options;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use crate::db_helpers::{read_table, write_table};
+use crate::db_helpers::{open_or_create_db, read_table, write_table};
 
 /// Maximum size in bytes for deserializing session metadata.
 /// 10 MB is generous for tab metadata; anything larger is likely corrupt.
@@ -128,20 +128,7 @@ impl SessionStore {
     ///
     /// Creates the parent directory if it does not exist.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "Failed to create session database directory: {}",
-                        parent.display()
-                    )
-                })?;
-                crate::permissions::set_owner_only_dir_permissions(parent);
-            }
-        }
-        let db = Database::create(path)
-            .with_context(|| format!("Failed to open session database: {}", path.display()))?;
-        crate::permissions::set_owner_only_file_permissions(path);
+        let db = open_or_create_db(path, "session")?;
 
         // Ensure tables exist
         let write_txn = db
