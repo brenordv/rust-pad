@@ -64,7 +64,9 @@ impl App {
             let content = match doc.encode_for_save() {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    tracing::error!("Failed to encode document: {e:#}");
+                    let msg = format!("Failed to encode document: {e:#}");
+                    tracing::error!("{msg}");
+                    crate::problem_log::log_problem(&msg);
                     return;
                 }
             };
@@ -133,7 +135,9 @@ impl App {
     pub(crate) fn do_reload_from_disk(&mut self) {
         let doc = self.tabs.active_doc_mut();
         if let Err(e) = doc.reload_from_disk(self.max_file_size_bytes) {
-            tracing::error!("Failed to reload from disk: {e:#}");
+            let msg = format!("Failed to reload from disk: {e:#}");
+            tracing::error!("{msg}");
+            crate::problem_log::log_problem(&msg);
         }
     }
 
@@ -156,7 +160,9 @@ impl App {
         let content = match doc.encode_for_save() {
             Ok(bytes) => bytes,
             Err(e) => {
-                tracing::error!("Failed to encode document: {e:#}");
+                let msg = format!("Failed to encode document: {e:#}");
+                tracing::error!("{msg}");
+                crate::problem_log::log_problem(&msg);
                 return;
             }
         };

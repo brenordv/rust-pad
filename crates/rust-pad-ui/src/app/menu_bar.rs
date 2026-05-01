@@ -585,7 +585,25 @@ impl App {
     }
 
     fn show_help_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("Help", |ui| {
+        let help_label = if self.problems_unread > 0 {
+            "Help \u{26A0}"
+        } else {
+            "Help"
+        };
+        ui.menu_button(help_label, |ui| {
+            let problems_label = if self.problems_unread > 0 {
+                format!("Problems ({})", self.problems_unread)
+            } else {
+                "Problems".to_string()
+            };
+            if ui.button(problems_label).clicked() {
+                self.problems_open = true;
+                self.refresh_problem_count();
+                ui.close();
+            }
+
+            ui.separator();
+
             if ui.button("About rust-pad").clicked() {
                 self.about_open = true;
                 ui.close();

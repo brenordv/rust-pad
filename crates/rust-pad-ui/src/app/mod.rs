@@ -11,6 +11,7 @@ mod file_ops;
 mod live_monitor;
 mod menu_bar;
 mod print;
+mod problems_dialog;
 mod recent_files;
 mod search;
 mod settings_dialog;
@@ -175,6 +176,11 @@ pub struct App {
     /// compute deltas for sync-scroll propagation. Cleared whenever sync
     /// scrolling is off or split view is collapsed.
     pub(crate) sync_scroll_last: Option<sync_scroll::SyncScrollSnapshot>,
+    /// Cached unread problem count, refreshed when the problems dialog
+    /// opens or a new entry is logged.
+    pub(crate) problems_unread: usize,
+    /// Whether the Problems dialog is currently visible.
+    pub(crate) problems_open: bool,
 }
 
 #[derive(Debug, Default)]
@@ -240,9 +246,10 @@ impl App {
         let mut tabs = match PersistenceLayer::open(&history_config.data_dir) {
             Ok(pl) => TabManager::with_persistence(pl, history_config),
             Err(e) => {
-                tracing::warn!(
-                    "Failed to open undo history database, falling back to in-memory: {e}"
-                );
+                let msg =
+                    format!("Failed to open undo history database, falling back to in-memory: {e}");
+                tracing::warn!("{msg}");
+                crate::problem_log::log_problem(&msg);
                 TabManager::new()
             }
         };
@@ -261,10 +268,16 @@ impl App {
         let session_store = match SessionStore::open(&session_path) {
             Ok(store) => Some(store),
             Err(e) => {
-                tracing::warn!("Failed to open session store: {e}");
+                let msg = format!("Failed to open session store: {e}");
+                tracing::warn!("{msg}");
+                crate::problem_log::log_problem(&msg);
                 None
             }
         };
+
+        // Read initial unread count from the global problem store
+        // (already initialized in main.rs).
+        let problems_unread = crate::problem_log::unread_count();
 
         // Restore session if enabled. The split-view layout is reapplied
         // after the App is fully constructed, since `apply_session_split`
@@ -342,6 +355,8 @@ impl App {
             sync_scroll_enabled: app_config.sync_scroll_enabled,
             sync_scroll_horizontal: app_config.sync_scroll_horizontal,
             sync_scroll_last: None,
+            problems_unread,
+            problems_open: false,
         };
 
         // Reapply persisted split-view layout once the App is fully built.
@@ -382,7 +397,9 @@ impl App {
                     let p = std::path::Path::new(path);
                     if p.exists() {
                         if let Err(e) = tabs.open_file(p) {
-                            tracing::warn!("Failed to restore '{path}': {e}");
+                            let msg = format!("Failed to restore '{path}': {e}");
+                            tracing::warn!("{msg}");
+                            crate::problem_log::log_problem(&msg);
                         } else {
                             let color = tab_color
                                 .as_deref()
@@ -455,7 +472,9 @@ impl App {
                 std::env::current_dir().unwrap_or_default().join(path)
             };
             if let Err(e) = tabs.open_file(&abs_path) {
-                tracing::warn!("Failed to open '{}': {e}", abs_path.display());
+                let msg = format!("Failed to open '{}': {e}", abs_path.display());
+                tracing::warn!("{msg}");
+                crate::problem_log::log_problem(&msg);
             }
         }
 
@@ -474,6 +493,11 @@ impl App {
                 tabs.close_tab(0);
             }
         }
+    }
+
+    /// Refreshes the cached unread problem count from the global store.
+    pub(crate) fn refresh_problem_count(&mut self) {
+        self.problems_unread = crate::problem_log::unread_count();
     }
 
     /// Updates the OS window title to show the active document name.
@@ -508,32 +532,12 @@ impl App {
                 IoResponse::DialogFileOpened { path, bytes } => {
                     self.io_activity.dialog_open = false;
                     self.file_dialog.update_last_folder(&path);
-                    if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
-                        tracing::error!("Failed to open file: {e:#}");
-                        let msg = format!("{e:#}");
-                        self.dialog_state = DialogState::FileOpenError {
-                            can_recover_utf8: Self::is_decode_error(&msg),
-                            path,
-                            message: msg,
-                        };
-                    } else {
-                        self.recent_files.track(&path);
-                    }
+                    self.try_open_file_from_bytes(path, bytes);
                 }
                 IoResponse::FileRead { path, bytes } => {
                     self.io_activity.pending_reads =
                         self.io_activity.pending_reads.saturating_sub(1);
-                    if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
-                        tracing::error!("Failed to open file: {e:#}");
-                        let msg = format!("{e:#}");
-                        self.dialog_state = DialogState::FileOpenError {
-                            can_recover_utf8: Self::is_decode_error(&msg),
-                            path,
-                            message: msg,
-                        };
-                    } else {
-                        self.recent_files.track(&path);
-                    }
+                    self.try_open_file_from_bytes(path, bytes);
                 }
                 IoResponse::DialogFileSavedAs { path } => {
                     self.io_activity.dialog_open = false;
@@ -586,6 +590,7 @@ impl App {
                 }
                 IoResponse::Error { path, message } => {
                     tracing::error!("I/O error: {message}");
+                    crate::problem_log::log_problem(&format!("I/O error: {message}"));
                     // Clean up dialog state if it was a dialog error
                     if self.io_activity.dialog_open {
                         self.io_activity.dialog_open = false;
@@ -650,6 +655,7 @@ impl App {
             self.load_about_logo(ctx);
         }
         self.show_about_dialog(ctx);
+        self.show_problems_dialog(ctx);
 
         if let Some(action) = self.find_replace.show(ctx) {
             self.handle_search_action(action);
@@ -857,6 +863,23 @@ impl App {
         }
     }
 
+    /// Attempts to open a file from raw bytes, tracking it as a recent file
+    /// on success or showing an error dialog on failure.
+    fn try_open_file_from_bytes(&mut self, path: std::path::PathBuf, bytes: Vec<u8>) {
+        if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
+            let msg = format!("{e:#}");
+            tracing::error!("Failed to open file: {msg}");
+            crate::problem_log::log_problem(&format!("Failed to open '{}': {msg}", path.display()));
+            self.dialog_state = DialogState::FileOpenError {
+                can_recover_utf8: Self::is_decode_error(&msg),
+                path,
+                message: msg,
+            };
+        } else {
+            self.recent_files.track(&path);
+        }
+    }
+
     /// Returns true if the error message indicates a decoding failure.
     fn is_decode_error(message: &str) -> bool {
         message.contains("failed to decode")
@@ -871,7 +894,9 @@ impl App {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
-                tracing::error!("Recovery failed — could not read file: {e}");
+                let msg = format!("Recovery failed — could not read '{}': {e}", path.display());
+                tracing::error!("{msg}");
+                crate::problem_log::log_problem(&msg);
                 return;
             }
         };
@@ -1016,6 +1041,9 @@ impl eframe::App for App {
         // Auto-save file-backed documents
         self.auto_save.tick(&mut self.tabs);
 
+        // Keep the cached problem count in sync with the global store.
+        self.problems_unread = crate::problem_log::unread_count();
+
         let has_live_monitoring = self.tabs.documents.iter().any(|d| d.live_monitoring);
         let has_pending_io = self.io_activity.is_busy();
         let next_repaint = if has_pending_io {
@@ -1053,14 +1081,16 @@ impl eframe::App for App {
 
                     if self.session_content_max_kb > 0 && content_bytes > limit_bytes {
                         let actual_kb = content_bytes / 1024;
-                        tracing::warn!(
+                        let msg = format!(
                             "Tab '{}' content ({} KB) exceeds session limit ({} KB), skipping content save",
-                            doc.title,
-                            actual_kb,
-                            self.session_content_max_kb,
+                            doc.title, actual_kb, self.session_content_max_kb,
                         );
+                        tracing::warn!("{msg}");
+                        crate::problem_log::log_problem(&msg);
                     } else if let Err(e) = store.save_content(&sid, &content) {
-                        tracing::warn!("Failed to save session content: {e}");
+                        let msg = format!("Failed to save session content: {e}");
+                        tracing::warn!("{msg}");
+                        crate::problem_log::log_problem(&msg);
                     }
 
                     tabs_list.push(SessionTabEntry::Unsaved {
@@ -1078,7 +1108,9 @@ impl eframe::App for App {
                 split,
             };
             if let Err(e) = store.save_session(&session_data) {
-                tracing::warn!("Failed to save session: {e}");
+                let msg = format!("Failed to save session: {e}");
+                tracing::warn!("{msg}");
+                crate::problem_log::log_problem(&msg);
             }
         }
 
@@ -1117,7 +1149,9 @@ impl eframe::App for App {
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
-            tracing::warn!("Failed to save config on exit: {e}");
+            let msg = format!("Failed to save config on exit: {e}");
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
         }
     }
 }
@@ -1199,6 +1233,8 @@ mod tests {
             sync_scroll_enabled: false,
             sync_scroll_horizontal: true,
             sync_scroll_last: None,
+            problems_unread: 0,
+            problems_open: false,
         }
     }
 
@@ -2281,8 +2317,7 @@ mod tests {
         let mut app = test_app();
         // auto_save is disabled by default in test_app
         assert!(!app.auto_save.enabled);
-        let saved = app.auto_save.tick(&mut app.tabs);
-        assert!(!saved);
+        assert!(!app.auto_save.tick(&mut app.tabs));
     }
 
     #[test]
@@ -2292,7 +2327,7 @@ mod tests {
         app.tabs.active_doc_mut().modified = true;
         app.auto_save.enabled = true;
         app.auto_save.interval_secs = 0; // trigger immediately
-        let _saved = app.auto_save.tick(&mut app.tabs);
+        app.auto_save.tick(&mut app.tabs);
         // No file_path, so auto_save should skip — doc still modified
         assert!(app.tabs.active_doc().modified);
     }
@@ -4527,6 +4562,7 @@ mod tests {
         app.closing_all = true;
         app.settings_open = true;
         app.about_open = true;
+        app.problems_open = true;
         app.find_replace.open();
         app.go_to_line.open();
 
@@ -4544,15 +4580,70 @@ mod tests {
         // 3rd Escape: About
         app.handle_escape_shortcut(egui::Key::Escape);
         assert!(!app.about_open);
+        assert!(app.problems_open);
+
+        // 4th Escape: Problems
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.problems_open);
         assert!(app.find_replace.visible);
 
-        // 4th Escape: Find/Replace
+        // 5th Escape: Find/Replace
         app.handle_escape_shortcut(egui::Key::Escape);
         assert!(!app.find_replace.visible);
         assert!(app.go_to_line.visible);
 
-        // 5th Escape: Go to Line
+        // 6th Escape: Go to Line
         app.handle_escape_shortcut(egui::Key::Escape);
         assert!(!app.go_to_line.visible);
+    }
+
+    // -- Problems dialog --
+
+    #[test]
+    fn test_problems_open_is_modal() {
+        let mut app = test_app();
+        assert!(!app.is_modal_dialog_open());
+        app.problems_open = true;
+        assert!(app.is_modal_dialog_open());
+    }
+
+    #[test]
+    fn test_escape_closes_problems_dialog() {
+        let mut app = test_app();
+        app.problems_open = true;
+
+        assert!(app.handle_escape_shortcut(egui::Key::Escape));
+        assert!(!app.problems_open);
+    }
+
+    #[test]
+    fn test_escape_closes_about_before_problems() {
+        let mut app = test_app();
+        app.about_open = true;
+        app.problems_open = true;
+
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.about_open);
+        assert!(app.problems_open);
+
+        app.handle_escape_shortcut(egui::Key::Escape);
+        assert!(!app.problems_open);
+    }
+
+    #[test]
+    fn test_refresh_problem_count_without_store() {
+        let mut app = test_app();
+        app.problems_unread = 99;
+        // Global store is not initialized in tests, so refresh should
+        // set count to 0 (the OnceLock is empty).
+        app.refresh_problem_count();
+        assert_eq!(app.problems_unread, 0);
+    }
+
+    #[test]
+    fn test_problems_defaults() {
+        let app = test_app();
+        assert!(!app.problems_open);
+        assert_eq!(app.problems_unread, 0);
     }
 }

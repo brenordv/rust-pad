@@ -46,7 +46,9 @@ impl LiveMonitorController {
             };
             if changed {
                 if let Err(e) = doc.reload_from_disk(max_file_size_bytes) {
-                    tracing::warn!("Live reload failed for '{}': {e:#}", doc.title);
+                    let msg = format!("Live reload failed for '{}': {e:#}", doc.title);
+                    tracing::warn!("{msg}");
+                    crate::problem_log::log_problem(&msg);
                 } else {
                     // Scroll to the end of the file (tail behavior)
                     let last_line = doc.buffer.len_lines().saturating_sub(1);

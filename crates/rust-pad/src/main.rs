@@ -35,6 +35,10 @@ fn main() -> Result<()> {
 
     tracing::info!("Starting rust-pad");
 
+    // Initialize the global problem-log store before anything else so that
+    // startup errors can be captured.
+    rust_pad_ui::problem_log::init(cli.portable);
+
     let startup_args = rust_pad_ui::StartupArgs {
         files: cli.files,
         new_file_text: cli.new_file,

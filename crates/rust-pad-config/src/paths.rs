@@ -13,6 +13,7 @@ const APP_DIR_NAME: &str = "rust-pad";
 const CONFIG_FILE_NAME: &str = "rust-pad.json";
 const SESSION_FILE_NAME: &str = "rust-pad-session.redb";
 const HISTORY_FILE_NAME: &str = "history.redb";
+const PROBLEM_LOG_FILE_NAME: &str = "rust-pad-problems.redb";
 
 /// Legacy sub-directory name for history data (next to the executable).
 const LEGACY_HISTORY_DIR: &str = ".data";
@@ -61,6 +62,11 @@ pub fn session_file_path() -> PathBuf {
     app_data_dir().join(SESSION_FILE_NAME)
 }
 
+/// Returns the full path for the problem-log database.
+pub fn problem_log_file_path() -> PathBuf {
+    app_data_dir().join(PROBLEM_LOG_FILE_NAME)
+}
+
 /// Returns the directory where the history database lives.
 ///
 /// Resolution:
@@ -103,6 +109,11 @@ pub fn migrate_legacy_paths() {
     let new_history = new_history_dir.join(HISTORY_FILE_NAME);
     let old_history = exe.join(LEGACY_HISTORY_DIR).join(HISTORY_FILE_NAME);
     migrate_file(&old_history, &new_history, "history database");
+
+    // Problem log: {exe}/rust-pad-problems.redb → {data_dir}/rust-pad/rust-pad-problems.redb
+    let new_problem_log = problem_log_file_path();
+    let old_problem_log = exe.join(PROBLEM_LOG_FILE_NAME);
+    migrate_file(&old_problem_log, &new_problem_log, "problem log database");
 }
 
 // ── Portable (exe-relative) path accessors ─────────────────────────
@@ -115,6 +126,11 @@ pub fn portable_config_file_path() -> PathBuf {
 /// Returns the session file path next to the executable (portable mode).
 pub fn portable_session_file_path() -> PathBuf {
     exe_dir().join(SESSION_FILE_NAME)
+}
+
+/// Returns the problem-log file path next to the executable (portable mode).
+pub fn portable_problem_log_file_path() -> PathBuf {
+    exe_dir().join(PROBLEM_LOG_FILE_NAME)
 }
 
 /// Returns the history data directory next to the executable (portable mode).

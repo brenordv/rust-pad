@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.4.0]
+
+### Added
+
+#### Problems Panel (Help → Problems)
+- New **Help → Problems** menu entry opens a dialog listing all application errors and warnings in reverse chronological order (newest first). Each entry shows a timestamp and a human-readable error message.
+- Users can **mark individual entries as read**, **mark all as read**, **copy** an error message to the clipboard, or **clear** the entire log.
+- The **Help** menu shows a warning indicator (`Help ⚠`) and an unread count badge (e.g. `Problems (3)`) whenever there are unread entries, providing at-a-glance visibility into background failures.
+- Problem entries are stored in a dedicated crash-safe database (`rust-pad-problems.redb`) so they survive unexpected termination. The database is created in the platform-standard data directory (or next to the executable in portable mode).
+- The following errors are now captured in the problem log:
+  - File open failures (encoding errors, I/O errors)
+  - Auto-save failures
+  - Live reload failures
+  - Print / Export-as-PDF failures
+  - Document encoding failures on save
+  - Reload-from-disk failures
+  - File recovery failures
+  - Undo history database open failures (startup)
+  - Session store open failures (startup)
+  - Session tab restore failures (startup)
+  - CLI file open failures (startup)
+  - History flush/delete failures
+  - Session and config save failures (shutdown)
+- The Problems dialog can be dismissed with the Escape key, consistent with all other dialogs.
+
 ## [2.3.0]
 
 ### Added

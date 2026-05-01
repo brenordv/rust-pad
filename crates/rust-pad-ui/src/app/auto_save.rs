@@ -39,7 +39,9 @@ impl AutoSaveController {
         for doc in &mut tabs.documents {
             if doc.modified && doc.file_path.is_some() {
                 if let Err(e) = doc.save() {
-                    tracing::warn!("Auto-save failed for '{}': {e:#}", doc.title);
+                    let msg = format!("Auto-save failed for '{}': {e:#}", doc.title);
+                    tracing::warn!("{msg}");
+                    crate::problem_log::log_problem(&msg);
                 }
             }
         }

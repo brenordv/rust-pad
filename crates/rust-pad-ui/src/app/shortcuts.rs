@@ -16,6 +16,7 @@ impl App {
         self.go_to_line.visible
             || self.settings_open
             || self.about_open
+            || self.problems_open
             || !matches!(self.dialog_state, DialogState::None)
             || self.io_activity.dialog_open
     }
@@ -249,6 +250,12 @@ impl App {
         // 3. About dialog
         if self.about_open {
             self.about_open = false;
+            return true;
+        }
+
+        // 3b. Problems dialog
+        if self.problems_open {
+            self.problems_open = false;
             return true;
         }
 

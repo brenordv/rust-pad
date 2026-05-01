@@ -12,6 +12,7 @@ redb.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 anyhow = "1"
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

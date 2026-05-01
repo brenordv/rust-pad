@@ -11,6 +11,8 @@ use bincode::Options;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+use crate::db_helpers::{open_or_create_db, read_table, write_table};
+
 /// Maximum size in bytes for deserializing session metadata.
 /// 10 MB is generous for tab metadata; anything larger is likely corrupt.
 const MAX_SESSION_META_BYTES: u64 = 10 * 1024 * 1024;
@@ -126,20 +128,7 @@ impl SessionStore {
     ///
     /// Creates the parent directory if it does not exist.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "Failed to create session database directory: {}",
-                        parent.display()
-                    )
-                })?;
-                crate::permissions::set_owner_only_dir_permissions(parent);
-            }
-        }
-        let db = Database::create(path)
-            .with_context(|| format!("Failed to open session database: {}", path.display()))?;
-        crate::permissions::set_owner_only_file_permissions(path);
+        let db = open_or_create_db(path, "session")?;
 
         // Ensure tables exist
         let write_txn = db
@@ -164,122 +153,71 @@ impl SessionStore {
     pub fn save_session(&self, data: &SessionData) -> Result<()> {
         let bytes = bincode::serialize(data).context("Failed to serialize session data")?;
 
-        let write_txn = self
-            .db
-            .begin_write()
-            .context("Failed to begin write transaction")?;
-        {
-            let mut table = write_txn
-                .open_table(SESSION_META)
-                .context("Failed to open session_meta table")?;
+        write_table!(self.db, SESSION_META, |table| {
             table
                 .insert("data", bytes.as_slice())
                 .context("Failed to insert session data")?;
-        }
-        write_txn
-            .commit()
-            .context("Failed to commit session data")?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Loads the session tab list, or `None` if no session was saved.
     pub fn load_session(&self) -> Result<Option<SessionData>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .context("Failed to begin read transaction")?;
-        let table = read_txn
-            .open_table(SESSION_META)
-            .context("Failed to open session_meta table")?;
-
-        match table.get("data").context("Failed to read session data")? {
-            Some(guard) => {
-                match bincode::DefaultOptions::new()
-                    .with_fixint_encoding()
-                    .allow_trailing_bytes()
-                    .with_limit(MAX_SESSION_META_BYTES)
-                    .deserialize::<SessionData>(guard.value())
-                {
-                    Ok(data) => Ok(Some(data)),
-                    Err(e) => {
-                        tracing::warn!("Corrupted session data, starting fresh: {e}");
-                        Ok(None)
+        read_table!(self.db, SESSION_META, |table| {
+            match table.get("data").context("Failed to read session data")? {
+                Some(guard) => {
+                    match bincode::DefaultOptions::new()
+                        .with_fixint_encoding()
+                        .allow_trailing_bytes()
+                        .with_limit(MAX_SESSION_META_BYTES)
+                        .deserialize::<SessionData>(guard.value())
+                    {
+                        Ok(data) => Ok(Some(data)),
+                        Err(e) => {
+                            tracing::warn!("Corrupted session data, starting fresh: {e}");
+                            Ok(None)
+                        }
                     }
                 }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
+        })
     }
 
     /// Saves the content of an unsaved tab.
     pub fn save_content(&self, session_id: &str, content: &str) -> Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .context("Failed to begin write transaction")?;
-        {
-            let mut table = write_txn
-                .open_table(SESSION_CONTENT)
-                .context("Failed to open session_content table")?;
+        write_table!(self.db, SESSION_CONTENT, |table| {
             table
                 .insert(session_id, content)
                 .context("Failed to insert session content")?;
-        }
-        write_txn
-            .commit()
-            .context("Failed to commit session content")?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Loads the content of an unsaved tab, or `None` if not found.
     pub fn load_content(&self, session_id: &str) -> Result<Option<String>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .context("Failed to begin read transaction")?;
-        let table = read_txn
-            .open_table(SESSION_CONTENT)
-            .context("Failed to open session_content table")?;
-
-        match table
-            .get(session_id)
-            .context("Failed to read session content")?
-        {
-            Some(guard) => Ok(Some(guard.value().to_string())),
-            None => Ok(None),
-        }
+        read_table!(self.db, SESSION_CONTENT, |table| {
+            match table
+                .get(session_id)
+                .context("Failed to read session content")?
+            {
+                Some(guard) => Ok(Some(guard.value().to_string())),
+                None => Ok(None),
+            }
+        })
     }
 
     /// Deletes the content for one unsaved tab (cleanup on tab close).
     pub fn delete_content(&self, session_id: &str) -> Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .context("Failed to begin write transaction")?;
-        {
-            let mut table = write_txn
-                .open_table(SESSION_CONTENT)
-                .context("Failed to open session_content table")?;
+        write_table!(self.db, SESSION_CONTENT, |table| {
             let _ = table.remove(session_id);
-        }
-        write_txn
-            .commit()
-            .context("Failed to commit content deletion")?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Wipes all stored content entries (used on startup after restoring).
     pub fn clear_all_content(&self) -> Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .context("Failed to begin write transaction")?;
-        {
-            let mut table = write_txn
-                .open_table(SESSION_CONTENT)
-                .context("Failed to open session_content table")?;
-
-            // Collect all keys then remove them
+        write_table!(self.db, SESSION_CONTENT, |table| {
             let keys: Vec<String> = table
                 .iter()
                 .context("Failed to iterate session_content")?
@@ -289,11 +227,8 @@ impl SessionStore {
             for key in &keys {
                 let _ = table.remove(key.as_str());
             }
-        }
-        write_txn
-            .commit()
-            .context("Failed to commit content clear")?;
-        Ok(())
+            Ok(())
+        })
     }
 }
 
