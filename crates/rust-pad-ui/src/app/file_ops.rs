@@ -66,7 +66,7 @@ impl App {
                 Err(e) => {
                     let msg = format!("Failed to encode document: {e:#}");
                     tracing::error!("{msg}");
-                    self.log_problem(&msg);
+                    crate::problem_log::log_problem(&msg);
                     return;
                 }
             };
@@ -137,7 +137,7 @@ impl App {
         if let Err(e) = doc.reload_from_disk(self.max_file_size_bytes) {
             let msg = format!("Failed to reload from disk: {e:#}");
             tracing::error!("{msg}");
-            self.log_problem(&msg);
+            crate::problem_log::log_problem(&msg);
         }
     }
 
@@ -162,7 +162,7 @@ impl App {
             Err(e) => {
                 let msg = format!("Failed to encode document: {e:#}");
                 tracing::error!("{msg}");
-                self.log_problem(&msg);
+                crate::problem_log::log_problem(&msg);
                 return;
             }
         };

@@ -23,12 +23,10 @@ impl LiveMonitorController {
     /// Checks all live-monitored documents for external file changes and reloads them.
     ///
     /// Only runs at most once per second. When `max_file_size_bytes` is `Some`,
-    /// files exceeding the limit are skipped during reload. Returns any reload
-    /// error messages so the caller can log them to the problem store.
-    pub fn tick(&mut self, tabs: &mut TabManager, max_file_size_bytes: Option<u64>) -> Vec<String> {
-        let mut errors = Vec::new();
+    /// files exceeding the limit are skipped during reload.
+    pub fn tick(&mut self, tabs: &mut TabManager, max_file_size_bytes: Option<u64>) {
         if self.last_check.elapsed() < Duration::from_secs(1) {
-            return errors;
+            return;
         }
         for doc in &mut tabs.documents {
             if !doc.live_monitoring {
@@ -50,7 +48,7 @@ impl LiveMonitorController {
                 if let Err(e) = doc.reload_from_disk(max_file_size_bytes) {
                     let msg = format!("Live reload failed for '{}': {e:#}", doc.title);
                     tracing::warn!("{msg}");
-                    errors.push(msg);
+                    crate::problem_log::log_problem(&msg);
                 } else {
                     // Scroll to the end of the file (tail behavior)
                     let last_line = doc.buffer.len_lines().saturating_sub(1);
@@ -61,7 +59,6 @@ impl LiveMonitorController {
             }
         }
         self.last_check = Instant::now();
-        errors
     }
 }
 

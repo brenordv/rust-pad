@@ -34,7 +34,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use rust_pad_config::problem_log::ProblemStore;
 use rust_pad_config::session::{generate_session_id, SessionData, SessionStore, SessionTabEntry};
 use rust_pad_config::AppConfig;
 use rust_pad_core::bookmarks::BookmarkManager;
@@ -177,8 +176,6 @@ pub struct App {
     /// compute deltas for sync-scroll propagation. Cleared whenever sync
     /// scrolling is off or split view is collapsed.
     pub(crate) sync_scroll_last: Option<sync_scroll::SyncScrollSnapshot>,
-    /// Crash-safe problem/error log, backed by a dedicated redb database.
-    pub(crate) problem_store: Option<ProblemStore>,
     /// Cached unread problem count, refreshed when the problems dialog
     /// opens or a new entry is logged.
     pub(crate) problems_unread: usize,
@@ -249,9 +246,10 @@ impl App {
         let mut tabs = match PersistenceLayer::open(&history_config.data_dir) {
             Ok(pl) => TabManager::with_persistence(pl, history_config),
             Err(e) => {
-                tracing::warn!(
-                    "Failed to open undo history database, falling back to in-memory: {e}"
-                );
+                let msg =
+                    format!("Failed to open undo history database, falling back to in-memory: {e}");
+                tracing::warn!("{msg}");
+                crate::problem_log::log_problem(&msg);
                 TabManager::new()
             }
         };
@@ -270,29 +268,29 @@ impl App {
         let session_store = match SessionStore::open(&session_path) {
             Ok(store) => Some(store),
             Err(e) => {
-                tracing::warn!("Failed to open session store: {e}");
+                let msg = format!("Failed to open session store: {e}");
+                tracing::warn!("{msg}");
+                crate::problem_log::log_problem(&msg);
                 None
             }
         };
 
-        // Open problem log store
-        let problem_log_path = if args.portable {
-            rust_pad_config::paths::portable_problem_log_file_path()
-        } else {
-            ProblemStore::default_path()
-        };
-        let problem_store = match ProblemStore::open(&problem_log_path) {
-            Ok(store) => Some(store),
-            Err(e) => {
-                tracing::warn!("Failed to open problem log store: {e}");
-                None
-            }
-        };
+        // TODO: Remove mock problem entries before release.
+        crate::problem_log::log_problem(
+            "Auto-save failed for 'Untitled-3': Permission denied (os error 5)",
+        );
+        crate::problem_log::log_problem("Failed to open 'C:\\Users\\raccoon\\big_dump.sql': failed to decode as UTF-8, UTF-16LE, UTF-16BE, or ASCII");
+        crate::problem_log::log_problem("I/O error: failed to write 'Z:\\projects\\notes.txt': The process cannot access the file because it is being used by another process");
+        crate::problem_log::log_problem(
+            "Live reload failed for 'server.log': file size (1.2 GB) exceeds limit",
+        );
+        crate::problem_log::log_problem(
+            "Print/export failed: PDF renderer ran out of memory for document with 850,000 lines",
+        );
 
-        let problems_unread = problem_store
-            .as_ref()
-            .and_then(|s| s.unread_count().ok())
-            .unwrap_or(0);
+        // Read initial unread count from the global problem store
+        // (already initialized in main.rs).
+        let problems_unread = crate::problem_log::unread_count();
 
         // Restore session if enabled. The split-view layout is reapplied
         // after the App is fully constructed, since `apply_session_split`
@@ -370,7 +368,6 @@ impl App {
             sync_scroll_enabled: app_config.sync_scroll_enabled,
             sync_scroll_horizontal: app_config.sync_scroll_horizontal,
             sync_scroll_last: None,
-            problem_store,
             problems_unread,
             problems_open: false,
         };
@@ -413,7 +410,9 @@ impl App {
                     let p = std::path::Path::new(path);
                     if p.exists() {
                         if let Err(e) = tabs.open_file(p) {
-                            tracing::warn!("Failed to restore '{path}': {e}");
+                            let msg = format!("Failed to restore '{path}': {e}");
+                            tracing::warn!("{msg}");
+                            crate::problem_log::log_problem(&msg);
                         } else {
                             let color = tab_color
                                 .as_deref()
@@ -486,7 +485,9 @@ impl App {
                 std::env::current_dir().unwrap_or_default().join(path)
             };
             if let Err(e) = tabs.open_file(&abs_path) {
-                tracing::warn!("Failed to open '{}': {e}", abs_path.display());
+                let msg = format!("Failed to open '{}': {e}", abs_path.display());
+                tracing::warn!("{msg}");
+                crate::problem_log::log_problem(&msg);
             }
         }
 
@@ -507,24 +508,9 @@ impl App {
         }
     }
 
-    /// Logs a problem entry to the crash-safe problem store and updates
-    /// the cached unread count. Falls back to tracing if the store is
-    /// unavailable.
-    pub(crate) fn log_problem(&mut self, message: &str) {
-        if let Some(store) = &self.problem_store {
-            if let Err(e) = store.add_entry(message) {
-                tracing::warn!("Failed to write problem log entry: {e}");
-            } else {
-                self.problems_unread = store.unread_count().unwrap_or(self.problems_unread + 1);
-            }
-        }
-    }
-
-    /// Refreshes the cached unread problem count from the store.
+    /// Refreshes the cached unread problem count from the global store.
     pub(crate) fn refresh_problem_count(&mut self) {
-        if let Some(store) = &self.problem_store {
-            self.problems_unread = store.unread_count().unwrap_or(0);
-        }
+        self.problems_unread = crate::problem_log::unread_count();
     }
 
     /// Updates the OS window title to show the active document name.
@@ -562,7 +548,10 @@ impl App {
                     if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
                         let msg = format!("{e:#}");
                         tracing::error!("Failed to open file: {msg}");
-                        self.log_problem(&format!("Failed to open '{}': {msg}", path.display()));
+                        crate::problem_log::log_problem(&format!(
+                            "Failed to open '{}': {msg}",
+                            path.display()
+                        ));
                         self.dialog_state = DialogState::FileOpenError {
                             can_recover_utf8: Self::is_decode_error(&msg),
                             path,
@@ -578,7 +567,10 @@ impl App {
                     if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
                         let msg = format!("{e:#}");
                         tracing::error!("Failed to open file: {msg}");
-                        self.log_problem(&format!("Failed to open '{}': {msg}", path.display()));
+                        crate::problem_log::log_problem(&format!(
+                            "Failed to open '{}': {msg}",
+                            path.display()
+                        ));
                         self.dialog_state = DialogState::FileOpenError {
                             can_recover_utf8: Self::is_decode_error(&msg),
                             path,
@@ -639,7 +631,7 @@ impl App {
                 }
                 IoResponse::Error { path, message } => {
                     tracing::error!("I/O error: {message}");
-                    self.log_problem(&format!("I/O error: {message}"));
+                    crate::problem_log::log_problem(&format!("I/O error: {message}"));
                     // Clean up dialog state if it was a dialog error
                     if self.io_activity.dialog_open {
                         self.io_activity.dialog_open = false;
@@ -928,7 +920,7 @@ impl App {
             Err(e) => {
                 let msg = format!("Recovery failed — could not read '{}': {e}", path.display());
                 tracing::error!("{msg}");
-                self.log_problem(&msg);
+                crate::problem_log::log_problem(&msg);
                 return;
             }
         };
@@ -1061,12 +1053,8 @@ impl eframe::App for App {
         self.handle_print_responses();
 
         // Live file monitoring: check for external changes every second
-        let live_errors = self
-            .live_monitor
+        self.live_monitor
             .tick(&mut self.tabs, self.max_file_size_bytes);
-        for msg in live_errors {
-            self.log_problem(&msg);
-        }
 
         // Periodic flush of undo history to disk
         if self.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
@@ -1075,11 +1063,10 @@ impl eframe::App for App {
         }
 
         // Auto-save file-backed documents
-        if let Some(errors) = self.auto_save.tick(&mut self.tabs) {
-            for msg in errors {
-                self.log_problem(&msg);
-            }
-        }
+        self.auto_save.tick(&mut self.tabs);
+
+        // Keep the cached problem count in sync with the global store.
+        self.problems_unread = crate::problem_log::unread_count();
 
         let has_live_monitoring = self.tabs.documents.iter().any(|d| d.live_monitoring);
         let has_pending_io = self.io_activity.is_busy();
@@ -1118,14 +1105,16 @@ impl eframe::App for App {
 
                     if self.session_content_max_kb > 0 && content_bytes > limit_bytes {
                         let actual_kb = content_bytes / 1024;
-                        tracing::warn!(
+                        let msg = format!(
                             "Tab '{}' content ({} KB) exceeds session limit ({} KB), skipping content save",
-                            doc.title,
-                            actual_kb,
-                            self.session_content_max_kb,
+                            doc.title, actual_kb, self.session_content_max_kb,
                         );
+                        tracing::warn!("{msg}");
+                        crate::problem_log::log_problem(&msg);
                     } else if let Err(e) = store.save_content(&sid, &content) {
-                        tracing::warn!("Failed to save session content: {e}");
+                        let msg = format!("Failed to save session content: {e}");
+                        tracing::warn!("{msg}");
+                        crate::problem_log::log_problem(&msg);
                     }
 
                     tabs_list.push(SessionTabEntry::Unsaved {
@@ -1143,7 +1132,9 @@ impl eframe::App for App {
                 split,
             };
             if let Err(e) = store.save_session(&session_data) {
-                tracing::warn!("Failed to save session: {e}");
+                let msg = format!("Failed to save session: {e}");
+                tracing::warn!("{msg}");
+                crate::problem_log::log_problem(&msg);
             }
         }
 
@@ -1182,7 +1173,9 @@ impl eframe::App for App {
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
-            tracing::warn!("Failed to save config on exit: {e}");
+            let msg = format!("Failed to save config on exit: {e}");
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
         }
     }
 }
@@ -1264,7 +1257,6 @@ mod tests {
             sync_scroll_enabled: false,
             sync_scroll_horizontal: true,
             sync_scroll_last: None,
-            problem_store: None,
             problems_unread: 0,
             problems_open: false,
         }
@@ -2349,8 +2341,7 @@ mod tests {
         let mut app = test_app();
         // auto_save is disabled by default in test_app
         assert!(!app.auto_save.enabled);
-        let result = app.auto_save.tick(&mut app.tabs);
-        assert!(result.is_none());
+        assert!(!app.auto_save.tick(&mut app.tabs));
     }
 
     #[test]
@@ -2360,7 +2351,7 @@ mod tests {
         app.tabs.active_doc_mut().modified = true;
         app.auto_save.enabled = true;
         app.auto_save.interval_secs = 0; // trigger immediately
-        let _result = app.auto_save.tick(&mut app.tabs);
+        app.auto_save.tick(&mut app.tabs);
         // No file_path, so auto_save should skip — doc still modified
         assert!(app.tabs.active_doc().modified);
     }

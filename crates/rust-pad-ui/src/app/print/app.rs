@@ -99,7 +99,7 @@ impl App {
                 }
                 PrintResponse::Failed { message, temp_path } => {
                     tracing::error!("Print/export failed: {message}");
-                    self.log_problem(&format!("Print/export failed: {message}"));
+                    crate::problem_log::log_problem(&format!("Print/export failed: {message}"));
                     self.print_last_status = None;
                     self.dialog_state = DialogState::PrintError { message, temp_path };
                 }

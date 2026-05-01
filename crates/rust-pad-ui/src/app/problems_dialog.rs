@@ -26,9 +26,7 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                let entries = self
-                    .problem_store
-                    .as_ref()
+                let entries = crate::problem_log::store()
                     .and_then(|s| s.load_all().ok())
                     .unwrap_or_default();
 
@@ -134,7 +132,7 @@ impl App {
         match action {
             ProblemAction::None => {}
             ProblemAction::MarkRead(id) => {
-                if let Some(store) = &self.problem_store {
+                if let Some(store) = crate::problem_log::store() {
                     if let Err(e) = store.mark_as_read(id) {
                         tracing::warn!("Failed to mark problem as read: {e}");
                     }
@@ -142,7 +140,7 @@ impl App {
                 self.refresh_problem_count();
             }
             ProblemAction::MarkAllRead => {
-                if let Some(store) = &self.problem_store {
+                if let Some(store) = crate::problem_log::store() {
                     if let Err(e) = store.mark_all_as_read() {
                         tracing::warn!("Failed to mark all problems as read: {e}");
                     }
@@ -155,7 +153,7 @@ impl App {
                 }
             }
             ProblemAction::ClearAll => {
-                if let Some(store) = &self.problem_store {
+                if let Some(store) = crate::problem_log::store() {
                     if let Err(e) = store.clear_all() {
                         tracing::warn!("Failed to clear problem log: {e}");
                     }
