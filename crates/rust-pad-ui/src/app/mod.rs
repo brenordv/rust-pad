@@ -545,40 +545,12 @@ impl App {
                 IoResponse::DialogFileOpened { path, bytes } => {
                     self.io_activity.dialog_open = false;
                     self.file_dialog.update_last_folder(&path);
-                    if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
-                        let msg = format!("{e:#}");
-                        tracing::error!("Failed to open file: {msg}");
-                        crate::problem_log::log_problem(&format!(
-                            "Failed to open '{}': {msg}",
-                            path.display()
-                        ));
-                        self.dialog_state = DialogState::FileOpenError {
-                            can_recover_utf8: Self::is_decode_error(&msg),
-                            path,
-                            message: msg,
-                        };
-                    } else {
-                        self.recent_files.track(&path);
-                    }
+                    self.try_open_file_from_bytes(path, bytes);
                 }
                 IoResponse::FileRead { path, bytes } => {
                     self.io_activity.pending_reads =
                         self.io_activity.pending_reads.saturating_sub(1);
-                    if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
-                        let msg = format!("{e:#}");
-                        tracing::error!("Failed to open file: {msg}");
-                        crate::problem_log::log_problem(&format!(
-                            "Failed to open '{}': {msg}",
-                            path.display()
-                        ));
-                        self.dialog_state = DialogState::FileOpenError {
-                            can_recover_utf8: Self::is_decode_error(&msg),
-                            path,
-                            message: msg,
-                        };
-                    } else {
-                        self.recent_files.track(&path);
-                    }
+                    self.try_open_file_from_bytes(path, bytes);
                 }
                 IoResponse::DialogFileSavedAs { path } => {
                     self.io_activity.dialog_open = false;
@@ -901,6 +873,23 @@ impl App {
 
         if !open {
             self.dialog_state = DialogState::None;
+        }
+    }
+
+    /// Attempts to open a file from raw bytes, tracking it as a recent file
+    /// on success or showing an error dialog on failure.
+    fn try_open_file_from_bytes(&mut self, path: std::path::PathBuf, bytes: Vec<u8>) {
+        if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
+            let msg = format!("{e:#}");
+            tracing::error!("Failed to open file: {msg}");
+            crate::problem_log::log_problem(&format!("Failed to open '{}': {msg}", path.display()));
+            self.dialog_state = DialogState::FileOpenError {
+                can_recover_utf8: Self::is_decode_error(&msg),
+                path,
+                message: msg,
+            };
+        } else {
+            self.recent_files.track(&path);
         }
     }
 

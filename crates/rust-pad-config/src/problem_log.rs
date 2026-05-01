@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
+use crate::db_helpers::{read_table, write_table};
+
 /// Table layout: `u64` (entry ID) → `&[u8]` (4-field record, see below).
 ///
 /// Each value is a simple length-prefixed format:
@@ -78,6 +80,11 @@ fn decode_entry(id: u64, bytes: &[u8]) -> Option<ProblemEntry> {
         message,
         read,
     })
+}
+
+/// Returns `true` when raw entry bytes represent an unread entry (byte 8 == 0).
+fn is_unread_bytes(bytes: &[u8]) -> bool {
+    bytes.len() > 8 && bytes[8] == 0
 }
 
 impl ProblemStore {
@@ -148,58 +155,34 @@ impl ProblemStore {
         let timestamp = chrono::Utc::now().timestamp();
         let bytes = encode_entry(timestamp, false, message);
 
-        let write_txn = self
-            .db
-            .begin_write()
-            .context("Failed to begin write transaction")?;
-        {
-            let mut table = write_txn
-                .open_table(PROBLEM_TABLE)
-                .context("Failed to open problems table")?;
+        write_table!(self.db, PROBLEM_TABLE, |table| {
             table
                 .insert(id, bytes.as_slice())
                 .context("Failed to insert problem entry")?;
-        }
-        write_txn
-            .commit()
-            .context("Failed to commit problem entry")?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Returns all entries ordered by timestamp descending (newest first).
     pub fn load_all(&self) -> Result<Vec<ProblemEntry>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .context("Failed to begin read transaction")?;
-        let table = read_txn
-            .open_table(PROBLEM_TABLE)
-            .context("Failed to open problems table")?;
-
-        let mut entries = Vec::new();
-        for item in table.iter().context("Failed to iterate problems")? {
-            let (key, value) = item.context("Failed to read problem entry")?;
-            if let Some(entry) = decode_entry(key.value(), value.value()) {
-                entries.push(entry);
+        read_table!(self.db, PROBLEM_TABLE, |table| {
+            let mut entries = Vec::new();
+            for item in table.iter().context("Failed to iterate problems")? {
+                let (key, value) = item.context("Failed to read problem entry")?;
+                if let Some(entry) = decode_entry(key.value(), value.value()) {
+                    entries.push(entry);
+                }
             }
-        }
-        // Sort by timestamp descending (newest first), then by id descending
-        // as a tiebreaker.
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.id.cmp(&a.id)));
-        Ok(entries)
+            // Sort by timestamp descending (newest first), then by id descending
+            // as a tiebreaker.
+            entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.id.cmp(&a.id)));
+            Ok(entries)
+        })
     }
 
     /// Marks a single entry as read.
     pub fn mark_as_read(&self, id: u64) -> Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .context("Failed to begin write transaction")?;
-        {
-            let mut table = write_txn
-                .open_table(PROBLEM_TABLE)
-                .context("Failed to open problems table")?;
-
+        write_table!(self.db, PROBLEM_TABLE, |table| {
             // Read existing bytes into an owned Vec, then drop the guard
             // before mutably borrowing the table for the update.
             let old_bytes = {
@@ -217,24 +200,13 @@ impl ProblemStore {
                     }
                 }
             }
-        }
-        write_txn
-            .commit()
-            .context("Failed to commit mark-as-read")?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Marks all entries as read.
     pub fn mark_all_as_read(&self) -> Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .context("Failed to begin write transaction")?;
-        {
-            let mut table = write_txn
-                .open_table(PROBLEM_TABLE)
-                .context("Failed to open problems table")?;
-
+        write_table!(self.db, PROBLEM_TABLE, |table| {
             // Collect entries that need updating.
             let unread: Vec<(u64, Vec<u8>)> = table
                 .iter()
@@ -243,8 +215,7 @@ impl ProblemStore {
                     let (k, v) = item.ok()?;
                     let id = k.value();
                     let bytes: Vec<u8> = v.value().to_vec();
-                    // Only update entries that are currently unread (byte 8 == 0).
-                    if bytes.len() > 8 && bytes[8] == 0 {
+                    if is_unread_bytes(&bytes) {
                         Some((id, bytes))
                     } else {
                         None
@@ -260,48 +231,30 @@ impl ProblemStore {
                         .context("Failed to update problem entry")?;
                 }
             }
-        }
-        write_txn
-            .commit()
-            .context("Failed to commit mark-all-as-read")?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Returns the number of unread entries.
     pub fn unread_count(&self) -> Result<usize> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .context("Failed to begin read transaction")?;
-        let table = read_txn
-            .open_table(PROBLEM_TABLE)
-            .context("Failed to open problems table")?;
-
-        let mut count = 0usize;
-        for (_, v) in table
-            .iter()
-            .context("Failed to iterate problems")?
-            .flatten()
-        {
-            let bytes = v.value();
-            if bytes.len() > 8 && bytes[8] == 0 {
-                count += 1;
+        read_table!(self.db, PROBLEM_TABLE, |table| {
+            let mut count = 0usize;
+            for (_, v) in table
+                .iter()
+                .context("Failed to iterate problems")?
+                .flatten()
+            {
+                if is_unread_bytes(v.value()) {
+                    count += 1;
+                }
             }
-        }
-        Ok(count)
+            Ok(count)
+        })
     }
 
     /// Deletes all entries from the problem log.
     pub fn clear_all(&self) -> Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .context("Failed to begin write transaction")?;
-        {
-            let mut table = write_txn
-                .open_table(PROBLEM_TABLE)
-                .context("Failed to open problems table")?;
-
+        write_table!(self.db, PROBLEM_TABLE, |table| {
             let keys: Vec<u64> = table
                 .iter()
                 .context("Failed to iterate problems")?
@@ -311,9 +264,8 @@ impl ProblemStore {
             for key in &keys {
                 let _ = table.remove(*key);
             }
-        }
-        write_txn.commit().context("Failed to commit clear-all")?;
-        Ok(())
+            Ok(())
+        })
     }
 }
 

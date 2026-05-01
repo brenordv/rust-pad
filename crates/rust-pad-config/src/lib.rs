@@ -1,5 +1,6 @@
 pub mod color;
 pub mod config;
+mod db_helpers;
 pub mod paths;
 pub mod permissions;
 pub mod problem_log;
