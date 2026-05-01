@@ -11,6 +11,7 @@ mod file_ops;
 mod live_monitor;
 mod menu_bar;
 mod print;
+mod problems_dialog;
 mod recent_files;
 mod search;
 mod settings_dialog;
@@ -33,6 +34,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use rust_pad_config::problem_log::ProblemStore;
 use rust_pad_config::session::{generate_session_id, SessionData, SessionStore, SessionTabEntry};
 use rust_pad_config::AppConfig;
 use rust_pad_core::bookmarks::BookmarkManager;
@@ -175,6 +177,13 @@ pub struct App {
     /// compute deltas for sync-scroll propagation. Cleared whenever sync
     /// scrolling is off or split view is collapsed.
     pub(crate) sync_scroll_last: Option<sync_scroll::SyncScrollSnapshot>,
+    /// Crash-safe problem/error log, backed by a dedicated redb database.
+    pub(crate) problem_store: Option<ProblemStore>,
+    /// Cached unread problem count, refreshed when the problems dialog
+    /// opens or a new entry is logged.
+    pub(crate) problems_unread: usize,
+    /// Whether the Problems dialog is currently visible.
+    pub(crate) problems_open: bool,
 }
 
 #[derive(Debug, Default)]
@@ -266,6 +275,25 @@ impl App {
             }
         };
 
+        // Open problem log store
+        let problem_log_path = if args.portable {
+            rust_pad_config::paths::portable_problem_log_file_path()
+        } else {
+            ProblemStore::default_path()
+        };
+        let problem_store = match ProblemStore::open(&problem_log_path) {
+            Ok(store) => Some(store),
+            Err(e) => {
+                tracing::warn!("Failed to open problem log store: {e}");
+                None
+            }
+        };
+
+        let problems_unread = problem_store
+            .as_ref()
+            .and_then(|s| s.unread_count().ok())
+            .unwrap_or(0);
+
         // Restore session if enabled. The split-view layout is reapplied
         // after the App is fully constructed, since `apply_session_split`
         // needs `&mut self`.
@@ -342,6 +370,9 @@ impl App {
             sync_scroll_enabled: app_config.sync_scroll_enabled,
             sync_scroll_horizontal: app_config.sync_scroll_horizontal,
             sync_scroll_last: None,
+            problem_store,
+            problems_unread,
+            problems_open: false,
         };
 
         // Reapply persisted split-view layout once the App is fully built.
@@ -476,6 +507,26 @@ impl App {
         }
     }
 
+    /// Logs a problem entry to the crash-safe problem store and updates
+    /// the cached unread count. Falls back to tracing if the store is
+    /// unavailable.
+    pub(crate) fn log_problem(&mut self, message: &str) {
+        if let Some(store) = &self.problem_store {
+            if let Err(e) = store.add_entry(message) {
+                tracing::warn!("Failed to write problem log entry: {e}");
+            } else {
+                self.problems_unread = store.unread_count().unwrap_or(self.problems_unread + 1);
+            }
+        }
+    }
+
+    /// Refreshes the cached unread problem count from the store.
+    pub(crate) fn refresh_problem_count(&mut self) {
+        if let Some(store) = &self.problem_store {
+            self.problems_unread = store.unread_count().unwrap_or(0);
+        }
+    }
+
     /// Updates the OS window title to show the active document name.
     ///
     /// Only sends the viewport command when the title actually changes,
@@ -509,8 +560,9 @@ impl App {
                     self.io_activity.dialog_open = false;
                     self.file_dialog.update_last_folder(&path);
                     if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
-                        tracing::error!("Failed to open file: {e:#}");
                         let msg = format!("{e:#}");
+                        tracing::error!("Failed to open file: {msg}");
+                        self.log_problem(&format!("Failed to open '{}': {msg}", path.display()));
                         self.dialog_state = DialogState::FileOpenError {
                             can_recover_utf8: Self::is_decode_error(&msg),
                             path,
@@ -524,8 +576,9 @@ impl App {
                     self.io_activity.pending_reads =
                         self.io_activity.pending_reads.saturating_sub(1);
                     if let Err(e) = self.tabs.open_from_bytes(&path, &bytes) {
-                        tracing::error!("Failed to open file: {e:#}");
                         let msg = format!("{e:#}");
+                        tracing::error!("Failed to open file: {msg}");
+                        self.log_problem(&format!("Failed to open '{}': {msg}", path.display()));
                         self.dialog_state = DialogState::FileOpenError {
                             can_recover_utf8: Self::is_decode_error(&msg),
                             path,
@@ -586,6 +639,7 @@ impl App {
                 }
                 IoResponse::Error { path, message } => {
                     tracing::error!("I/O error: {message}");
+                    self.log_problem(&format!("I/O error: {message}"));
                     // Clean up dialog state if it was a dialog error
                     if self.io_activity.dialog_open {
                         self.io_activity.dialog_open = false;
@@ -650,6 +704,7 @@ impl App {
             self.load_about_logo(ctx);
         }
         self.show_about_dialog(ctx);
+        self.show_problems_dialog(ctx);
 
         if let Some(action) = self.find_replace.show(ctx) {
             self.handle_search_action(action);
@@ -871,7 +926,9 @@ impl App {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
-                tracing::error!("Recovery failed — could not read file: {e}");
+                let msg = format!("Recovery failed — could not read '{}': {e}", path.display());
+                tracing::error!("{msg}");
+                self.log_problem(&msg);
                 return;
             }
         };
@@ -1004,8 +1061,12 @@ impl eframe::App for App {
         self.handle_print_responses();
 
         // Live file monitoring: check for external changes every second
-        self.live_monitor
+        let live_errors = self
+            .live_monitor
             .tick(&mut self.tabs, self.max_file_size_bytes);
+        for msg in live_errors {
+            self.log_problem(&msg);
+        }
 
         // Periodic flush of undo history to disk
         if self.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
@@ -1014,7 +1075,11 @@ impl eframe::App for App {
         }
 
         // Auto-save file-backed documents
-        self.auto_save.tick(&mut self.tabs);
+        if let Some(errors) = self.auto_save.tick(&mut self.tabs) {
+            for msg in errors {
+                self.log_problem(&msg);
+            }
+        }
 
         let has_live_monitoring = self.tabs.documents.iter().any(|d| d.live_monitoring);
         let has_pending_io = self.io_activity.is_busy();
@@ -1199,6 +1264,9 @@ mod tests {
             sync_scroll_enabled: false,
             sync_scroll_horizontal: true,
             sync_scroll_last: None,
+            problem_store: None,
+            problems_unread: 0,
+            problems_open: false,
         }
     }
 
@@ -2281,8 +2349,8 @@ mod tests {
         let mut app = test_app();
         // auto_save is disabled by default in test_app
         assert!(!app.auto_save.enabled);
-        let saved = app.auto_save.tick(&mut app.tabs);
-        assert!(!saved);
+        let result = app.auto_save.tick(&mut app.tabs);
+        assert!(result.is_none());
     }
 
     #[test]
@@ -2292,7 +2360,7 @@ mod tests {
         app.tabs.active_doc_mut().modified = true;
         app.auto_save.enabled = true;
         app.auto_save.interval_secs = 0; // trigger immediately
-        let _saved = app.auto_save.tick(&mut app.tabs);
+        let _result = app.auto_save.tick(&mut app.tabs);
         // No file_path, so auto_save should skip — doc still modified
         assert!(app.tabs.active_doc().modified);
     }

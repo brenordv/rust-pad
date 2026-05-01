@@ -28,23 +28,28 @@ impl AutoSaveController {
 
     /// Checks if it's time to auto-save and saves all modified file-backed documents.
     ///
-    /// Returns `true` if auto-save was performed.
-    pub fn tick(&mut self, tabs: &mut TabManager) -> bool {
+    /// Returns `None` when auto-save was skipped (disabled or interval not
+    /// elapsed), or `Some(errors)` when it ran. The error vec contains
+    /// human-readable messages for any documents that failed to save.
+    pub fn tick(&mut self, tabs: &mut TabManager) -> Option<Vec<String>> {
         if !self.enabled {
-            return false;
+            return None;
         }
         if self.last_save.elapsed() < Duration::from_secs(self.interval_secs) {
-            return false;
+            return None;
         }
+        let mut errors = Vec::new();
         for doc in &mut tabs.documents {
             if doc.modified && doc.file_path.is_some() {
                 if let Err(e) = doc.save() {
-                    tracing::warn!("Auto-save failed for '{}': {e:#}", doc.title);
+                    let msg = format!("Auto-save failed for '{}': {e:#}", doc.title);
+                    tracing::warn!("{msg}");
+                    errors.push(msg);
                 }
             }
         }
         self.last_save = Instant::now();
-        true
+        Some(errors)
     }
 
     /// Returns the auto-save interval for repaint scheduling.
@@ -93,26 +98,26 @@ mod tests {
     // ── tick() ──────────────────────────────────────────────────────
 
     #[test]
-    fn test_tick_returns_false_when_disabled() {
+    fn test_tick_returns_none_when_disabled() {
         let mut ctrl = AutoSaveController::new(false, 0);
         let mut tabs = TabManager::new();
-        assert!(!ctrl.tick(&mut tabs));
+        assert!(ctrl.tick(&mut tabs).is_none());
     }
 
     #[test]
-    fn test_tick_returns_false_before_interval_elapsed() {
+    fn test_tick_returns_none_before_interval_elapsed() {
         let mut ctrl = AutoSaveController::new(true, 3600);
         let mut tabs = TabManager::new();
-        // Interval is 1 hour — tick should return false immediately
-        assert!(!ctrl.tick(&mut tabs));
+        // Interval is 1 hour — tick should return None immediately
+        assert!(ctrl.tick(&mut tabs).is_none());
     }
 
     #[test]
-    fn test_tick_returns_true_when_interval_elapsed() {
+    fn test_tick_returns_some_when_interval_elapsed() {
         let mut ctrl = AutoSaveController::new(true, 0);
         let mut tabs = TabManager::new();
         // interval_secs=0 means the interval has already elapsed
-        assert!(ctrl.tick(&mut tabs));
+        assert!(ctrl.tick(&mut tabs).is_some());
     }
 
     #[test]
@@ -128,8 +133,8 @@ mod tests {
         assert!(doc.modified);
 
         let mut ctrl = AutoSaveController::new(true, 0);
-        let saved = ctrl.tick(&mut tabs);
-        assert!(saved);
+        let result = ctrl.tick(&mut tabs);
+        assert!(result.is_some());
         // Document should no longer be marked as modified after save
         assert!(!tabs.active_doc().modified);
     }
@@ -145,9 +150,9 @@ mod tests {
         assert!(!tabs.active_doc().modified);
 
         let mut ctrl = AutoSaveController::new(true, 0);
-        let saved = ctrl.tick(&mut tabs);
-        // tick returns true (it ran), but nothing was actually saved
-        assert!(saved);
+        let result = ctrl.tick(&mut tabs);
+        // tick returns Some (it ran), but nothing was actually saved
+        assert!(result.is_some());
         assert!(!tabs.active_doc().modified);
     }
 
@@ -168,9 +173,9 @@ mod tests {
         let mut ctrl = AutoSaveController::new(true, 0);
         let mut tabs = TabManager::new();
         // First tick succeeds (interval=0 means always elapsed)
-        assert!(ctrl.tick(&mut tabs));
-        // Second tick with interval_secs=3600 should fail (timer just reset)
+        assert!(ctrl.tick(&mut tabs).is_some());
+        // Second tick with interval_secs=3600 should skip (timer just reset)
         ctrl.interval_secs = 3600;
-        assert!(!ctrl.tick(&mut tabs));
+        assert!(ctrl.tick(&mut tabs).is_none());
     }
 }
