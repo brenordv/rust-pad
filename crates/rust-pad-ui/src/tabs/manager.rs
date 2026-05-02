@@ -364,6 +364,7 @@ impl TabManager {
         let total_pinned = self.documents.iter().filter(|d| d.pinned).count();
         let target = total_pinned - 1;
         self.move_tab(idx, target);
+        self.sort_pane_after_pin(target);
     }
 
     /// Unpins the tab at `idx`. The tab is moved to the leftmost position
@@ -381,6 +382,7 @@ impl TabManager {
         let total_pinned = self.documents.iter().filter(|d| d.pinned).count();
         let target = total_pinned;
         self.move_tab(idx, target);
+        self.sort_pane_after_pin(target);
     }
 
     /// Moves a tab from `from` to `to` while keeping `self.active` pointing
@@ -422,6 +424,17 @@ impl TabManager {
             *idx -= 1;
         } else if from > *idx && to <= *idx {
             *idx += 1;
+        }
+    }
+
+    /// When split view is active, reorders the pane that owns `doc_idx` so
+    /// that pinned tabs come first. No-op in single-pane mode.
+    fn sort_pane_after_pin(&mut self, doc_idx: usize) {
+        if let Some(panes) = self.panes.as_mut() {
+            if let Some(pane) = panes.pane_of(doc_idx) {
+                let docs = &self.documents;
+                panes.sort_pinned_first(pane, |i| docs[i].pinned);
+            }
         }
     }
 
@@ -1587,5 +1600,135 @@ mod tests {
         assert!(!tm.is_split());
         assert_eq!(tm.pane_tab_order(PaneId::Left), vec![0, 1, 2]);
         assert_eq!(tm.pane_tab_order(PaneId::Right), Vec::<usize>::new());
+    }
+
+    // ── Pin / unpin in split view ───────────────────────────────────
+
+    #[test]
+    fn pin_tab_reorders_pane_order_in_split() {
+        let mut tm = make_n_tabs(4);
+        // active=0 → enable_split puts: left=[1,2,3], right=[0]
+        tm.switch_to(0);
+        tm.enable_split();
+
+        // Pin tab at global index 2 (which lives in the left pane).
+        // Before: left_order holds docs [tab1, tab2, tab3].
+        tm.pin_tab(2);
+
+        // After pinning, the pinned tab must appear first in its pane.
+        let left = tm.pane_tab_order(PaneId::Left);
+        let pinned_in_left: Vec<_> = left.iter().filter(|&&i| tm.documents[i].pinned).collect();
+        let unpinned_in_left: Vec<_> = left.iter().filter(|&&i| !tm.documents[i].pinned).collect();
+
+        assert_eq!(pinned_in_left.len(), 1, "exactly one pinned tab in left");
+        assert!(
+            !unpinned_in_left.is_empty(),
+            "there should be unpinned tabs too"
+        );
+        // Pinned section precedes unpinned section in the order vector.
+        let first_unpinned_pos = left.iter().position(|i| !tm.documents[*i].pinned).unwrap();
+        let last_pinned_pos = left.iter().rposition(|i| tm.documents[*i].pinned).unwrap();
+        assert!(
+            last_pinned_pos < first_unpinned_pos,
+            "pinned tabs must precede unpinned tabs"
+        );
+
+        // Right pane should be unaffected.
+        assert_eq!(tm.pane_tab_order(PaneId::Right).len(), 1);
+    }
+
+    #[test]
+    fn unpin_tab_reorders_pane_order_in_split() {
+        let mut tm = make_n_tabs(5);
+        // active=0 → left=[1,2,3,4], right=[0]
+        tm.switch_to(0);
+        tm.enable_split();
+
+        // Pin two tabs in the left pane.
+        tm.pin_tab(1);
+        tm.pin_tab(2);
+
+        let left_before = tm.pane_tab_order(PaneId::Left);
+        let pinned_before = left_before
+            .iter()
+            .filter(|&&i| tm.documents[i].pinned)
+            .count();
+        assert_eq!(pinned_before, 2);
+
+        // Unpin the first pinned tab (find it in the left pane order).
+        let first_pinned_idx = *left_before
+            .iter()
+            .find(|&&i| tm.documents[i].pinned)
+            .unwrap();
+        tm.unpin_tab(first_pinned_idx);
+
+        let left_after = tm.pane_tab_order(PaneId::Left);
+        let pinned_after: Vec<_> = left_after
+            .iter()
+            .filter(|&&i| tm.documents[i].pinned)
+            .collect();
+        assert_eq!(pinned_after.len(), 1, "one pinned tab remains");
+
+        // The remaining pinned tab must still be first.
+        assert!(
+            tm.documents[left_after[0]].pinned,
+            "first tab in left pane should be pinned"
+        );
+    }
+
+    #[test]
+    fn pin_in_right_pane_does_not_affect_left() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2,3], right=[0]
+
+        let left_before = tm.pane_tab_order(PaneId::Left);
+        let right_order = tm.pane_tab_order(PaneId::Right);
+        assert_eq!(right_order.len(), 1);
+
+        // Pin the tab in the right pane.
+        tm.pin_tab(right_order[0]);
+
+        // Left pane order should be unchanged (same doc indices, same order).
+        assert_eq!(tm.pane_tab_order(PaneId::Left), left_before);
+    }
+
+    #[test]
+    fn pin_unpin_roundtrip_in_split() {
+        let mut tm = make_n_tabs(4);
+        tm.switch_to(0);
+        tm.enable_split(); // left=[1,2,3], right=[0]
+
+        // Snapshot documents in the left pane by title (indices shift during
+        // pin/unpin because move_tab physically reorders the vector).
+        let titles_before: std::collections::HashSet<String> = tm
+            .pane_tab_order(PaneId::Left)
+            .iter()
+            .map(|&i| tm.documents[i].title.clone())
+            .collect();
+
+        // Pin then unpin tab2.
+        tm.pin_tab(2);
+        let idx_after_pin = tm
+            .pane_tab_order(PaneId::Left)
+            .into_iter()
+            .find(|&i| tm.documents[i].title.contains("tab2"))
+            .expect("tab2 should still be in left pane");
+        tm.unpin_tab(idx_after_pin);
+
+        // The same documents should remain in the left pane.
+        let titles_after: std::collections::HashSet<String> = tm
+            .pane_tab_order(PaneId::Left)
+            .iter()
+            .map(|&i| tm.documents[i].title.clone())
+            .collect();
+        assert_eq!(titles_before, titles_after);
+
+        // No tabs should be pinned anymore.
+        let any_pinned = tm
+            .pane_tab_order(PaneId::Left)
+            .iter()
+            .any(|&i| tm.documents[i].pinned);
+        assert!(!any_pinned, "all tabs should be unpinned after roundtrip");
     }
 }
