@@ -56,3 +56,58 @@ pub fn log_problem(message: &str) {
 pub fn unread_count() -> usize {
     STORE.get().and_then(|s| s.unread_count().ok()).unwrap_or(0)
 }
+
+/// Extracts a human-readable message from a panic payload.
+///
+/// Handles the two common payload types (`&str` and `String`) and falls
+/// back to `"unknown panic"` for anything else.
+pub fn format_panic_payload(payload: &dyn std::any::Any) -> String {
+    match payload.downcast_ref::<&str>() {
+        Some(s) => (*s).to_string(),
+        None => match payload.downcast_ref::<String>() {
+            Some(s) => s.clone(),
+            None => "unknown panic".to_string(),
+        },
+    }
+}
+
+/// Installs a panic hook that logs crash information to the problem
+/// store so users can review it in Help > Problems after a restart.
+pub fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = format_panic_payload(info.payload());
+        let location = info
+            .location()
+            .map(|l| format!(" at {}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+        log_problem(&format!("Panic{location}: {message}"));
+        default_hook(info);
+    }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_panic_payload_str() {
+        let payload: &str = "something went wrong";
+        let msg = format_panic_payload(&payload as &dyn std::any::Any);
+        assert_eq!(msg, "something went wrong");
+    }
+
+    #[test]
+    fn format_panic_payload_string() {
+        let payload = String::from("owned error message");
+        let msg = format_panic_payload(&payload as &dyn std::any::Any);
+        assert_eq!(msg, "owned error message");
+    }
+
+    #[test]
+    fn format_panic_payload_unknown_type() {
+        let payload: i32 = 42;
+        let msg = format_panic_payload(&payload as &dyn std::any::Any);
+        assert_eq!(msg, "unknown panic");
+    }
+}
