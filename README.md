@@ -22,6 +22,13 @@
 [![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=brenordv_rust-pad&metric=ncloc)](https://sonarcloud.io/summary/new_code?id=brenordv_rust-pad)
 ---
 
+## Demo
+
+[![Watch the demo](https://img.youtube.com/vi/YiH3Qj-Bljc/maxresdefault.jpg)](https://youtu.be/YiH3Qj-Bljc)
+
+The app has even more features. :) 
+
+
 ## Motivation
 I absolutely love Notepad++, so whenever I consider moving away from Windows, I end up looking for a way to run it on Linux.
 Since I prefer native applications, I decided to take the longer route and write my own text editor in Rust.
