@@ -24,7 +24,7 @@
 ### Changed
 
 - Extracted shared database-opening boilerplate (`open_or_create_db`) into a reusable helper, eliminating code duplication between `ProblemStore::open()` and `SessionStore::open()`.
-- Removed leftover mock problem entries that were added during development.
+- Removed leftover mock problem entries added during development.
 
 ## [2.4.0]
 
