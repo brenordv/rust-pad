@@ -71,17 +71,29 @@ pub fn format_panic_payload(payload: &dyn std::any::Any) -> String {
     }
 }
 
+/// Formats a full panic message from a payload and an optional source location.
+///
+/// Returns a string like `"Panic at src/main.rs:42:5: something broke"`
+/// or `"Panic: something broke"` when the location is unavailable.
+pub fn format_panic_message(
+    payload: &dyn std::any::Any,
+    location: Option<(&str, u32, u32)>,
+) -> String {
+    let message = format_panic_payload(payload);
+    let loc = location
+        .map(|(file, line, col)| format!(" at {file}:{line}:{col}"))
+        .unwrap_or_default();
+    format!("Panic{loc}: {message}")
+}
+
 /// Installs a panic hook that logs crash information to the problem
 /// store so users can review it in Help > Problems after a restart.
 pub fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let message = format_panic_payload(info.payload());
-        let location = info
-            .location()
-            .map(|l| format!(" at {}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_default();
-        log_problem(&format!("Panic{location}: {message}"));
+        let location = info.location().map(|l| (l.file(), l.line(), l.column()));
+        let msg = format_panic_message(info.payload(), location);
+        log_problem(&msg);
         default_hook(info);
     }));
 }
@@ -109,5 +121,32 @@ mod tests {
         let payload: i32 = 42;
         let msg = format_panic_payload(&payload as &dyn std::any::Any);
         assert_eq!(msg, "unknown panic");
+    }
+
+    #[test]
+    fn format_panic_message_with_location() {
+        let payload: &str = "index out of bounds";
+        let msg = format_panic_message(
+            &payload as &dyn std::any::Any,
+            Some(("src/editor/widget.rs", 1603, 37)),
+        );
+        assert_eq!(
+            msg,
+            "Panic at src/editor/widget.rs:1603:37: index out of bounds"
+        );
+    }
+
+    #[test]
+    fn format_panic_message_without_location() {
+        let payload = String::from("something failed");
+        let msg = format_panic_message(&payload as &dyn std::any::Any, None);
+        assert_eq!(msg, "Panic: something failed");
+    }
+
+    #[test]
+    fn format_panic_message_unknown_payload_with_location() {
+        let payload: f64 = 3.14;
+        let msg = format_panic_message(&payload as &dyn std::any::Any, Some(("main.rs", 1, 1)));
+        assert_eq!(msg, "Panic at main.rs:1:1: unknown panic");
     }
 }
