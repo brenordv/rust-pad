@@ -172,10 +172,12 @@ impl App {
         if !ctrl {
             return false;
         }
+        let max = self.theme_ctrl.max_zoom_level;
+        let doc = self.tabs.active_doc_mut();
         match key {
-            egui::Key::Plus => self.theme_ctrl.zoom_in(),
-            egui::Key::Minus => self.theme_ctrl.zoom_out(),
-            egui::Key::Num0 => self.theme_ctrl.zoom_reset(),
+            egui::Key::Plus => doc.zoom_level = (doc.zoom_level + 0.1).min(max),
+            egui::Key::Minus => doc.zoom_level = (doc.zoom_level - 0.1).max(0.5),
+            egui::Key::Num0 => doc.zoom_level = 1.0,
             _ => return false,
         }
         true

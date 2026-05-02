@@ -69,6 +69,8 @@ pub struct TabManager {
     pub default_extension: String,
     /// Default line ending for new documents.
     pub default_line_ending: DefaultLineEnding,
+    /// Default zoom multiplier for new documents.
+    pub default_zoom_level: f32,
 }
 
 impl Default for TabManager {
@@ -88,6 +90,7 @@ impl TabManager {
             config: HistoryConfig::default(),
             default_extension: String::new(),
             default_line_ending: DefaultLineEnding::System,
+            default_zoom_level: 1.0,
         }
     }
 
@@ -102,6 +105,7 @@ impl TabManager {
             config,
             default_extension: String::new(),
             default_line_ending: DefaultLineEnding::System,
+            default_zoom_level: 1.0,
         }
     }
 
@@ -439,6 +443,7 @@ impl TabManager {
             None => Document::new(),
         };
         doc.line_ending = self.default_line_ending.resolve();
+        doc.zoom_level = self.default_zoom_level;
         doc
     }
 

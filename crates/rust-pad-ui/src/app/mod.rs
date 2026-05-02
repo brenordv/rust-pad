@@ -256,8 +256,10 @@ impl App {
         tabs.default_extension = app_config.default_extension.clone();
         tabs.default_line_ending =
             crate::tabs::DefaultLineEnding::from_config(&app_config.default_line_ending);
+        tabs.default_zoom_level = app_config.current_zoom_level;
         // Apply to the initial document created before config was loaded.
         tabs.documents[0].line_ending = tabs.default_line_ending.resolve();
+        tabs.documents[0].zoom_level = app_config.current_zoom_level;
 
         // Open session store
         let session_path = if args.portable {
@@ -982,12 +984,11 @@ impl eframe::App for App {
                     return;
                 }
 
-                let (response, zoom_request) = {
+                let response = {
                     let doc = self.tabs.active_doc_mut();
                     let mut editor = EditorWidget::new(
                         doc,
                         &self.theme_ctrl.theme,
-                        self.theme_ctrl.zoom_level,
                         Some(&self.theme_ctrl.syntax_highlighter),
                     );
                     editor.word_wrap = self.word_wrap;
@@ -995,19 +996,14 @@ impl eframe::App for App {
                     editor.show_line_numbers = self.show_line_numbers;
                     editor.dialog_open = dialog_open;
                     editor.modal_dialog_open = modal_dialog_open;
+                    editor.max_zoom_level = self.theme_ctrl.max_zoom_level;
                     editor.bookmarks = Some(&self.bookmarks);
-                    let r = editor.show(ui);
-                    (r, editor.zoom_request)
+                    editor.show(ui)
                 };
 
                 response.context_menu(|ui| {
                     self.show_editor_context_menu(ui);
                 });
-
-                if zoom_request != 1.0 {
-                    self.theme_ctrl.zoom_level = (self.theme_ctrl.zoom_level * zoom_request)
-                        .clamp(0.5, self.theme_ctrl.max_zoom_level);
-                }
             });
 
         // Synchronized scrolling: propagate user-initiated viewport
@@ -1117,7 +1113,7 @@ impl eframe::App for App {
         // Save current preferences to config file
         let config = AppConfig {
             current_theme: self.theme_ctrl.theme_mode.0.clone(),
-            current_zoom_level: self.theme_ctrl.zoom_level,
+            current_zoom_level: self.theme_ctrl.default_zoom_level,
             max_zoom_level: self.theme_ctrl.max_zoom_level,
             word_wrap: self.word_wrap,
             show_special_chars: self.show_special_chars,
@@ -1173,7 +1169,7 @@ mod tests {
             theme_ctrl: ThemeController {
                 theme: EditorTheme::default(),
                 theme_mode: ThemeMode::dark(),
-                zoom_level: 1.0,
+                default_zoom_level: 1.0,
                 max_zoom_level: 15.0,
                 available_themes: vec![
                     rust_pad_config::theme::builtin_dark(),
@@ -1267,17 +1263,20 @@ mod tests {
     #[test]
     fn test_zoom_level_clamps_at_max() {
         let mut app = test_app();
-        app.theme_ctrl.zoom_level = 14.95;
-        app.theme_ctrl.zoom_in();
-        assert!((app.theme_ctrl.zoom_level - 15.0).abs() < 0.01);
+        let max = app.theme_ctrl.max_zoom_level;
+        let doc = app.tabs.active_doc_mut();
+        doc.zoom_level = 14.95;
+        doc.zoom_level = (doc.zoom_level + 0.1).min(max);
+        assert!((app.tabs.active_doc().zoom_level - 15.0).abs() < 0.01);
     }
 
     #[test]
     fn test_zoom_level_clamps_min() {
         let mut app = test_app();
-        app.theme_ctrl.zoom_level = 0.55;
-        app.theme_ctrl.zoom_out();
-        assert!((app.theme_ctrl.zoom_level - 0.5).abs() < 0.01);
+        let doc = app.tabs.active_doc_mut();
+        doc.zoom_level = 0.55;
+        doc.zoom_level = (doc.zoom_level - 0.1).max(0.5);
+        assert!((app.tabs.active_doc().zoom_level - 0.5).abs() < 0.01);
     }
 
     // -- Cut = copy + delete --

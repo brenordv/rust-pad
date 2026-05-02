@@ -202,7 +202,7 @@ When running with `--portable`, all files are stored next to the executable inst
 
 The config file is created automatically on the first launch with default values. If upgrading from an older version that stored files next to the executable, they are automatically migrated (copied) to the new location.
 
-> **Note (upgrading from 1.x to 2.0.0):** the session store schema gained pin and color metadata, which is a breaking change to the bincode format. On the first launch after upgrading to v2.0.0, the previous session file will fail to deserialize and the app will start with a fresh, empty session (a warning is logged). Open files will not be reopened automatically that one time. From v2.0.0 onward, the new fields are persisted and restored normally.
+> **Note (upgrading from 1.x to 2.0.0):** the session store schema gained pin and color metadata, which is a breaking change to the bincode format. On the first launch after upgrading to v2.0.0, the previous session file will fail to deserialize, and the app will start with a fresh, empty session (a warning is logged). Open files will not be reopened automatically that one time. From v2.0.0 onward, the new fields are persisted and restored normally.
 
 ### Environment Variables
 
@@ -390,7 +390,7 @@ The following features are planned for future releases, inspired by Notepad++ fu
 - [ ] Run external commands with file path placeholders
 - [ ] Shortcut mapper (customizable keybindings)
 - [ ] Right-to-left text support
-- [ ] Import/export settings
+- [ ] Import/export settings (kind of already supported)
 
 ---
 
@@ -415,7 +415,7 @@ The obvious alternative, the [`open` crate](https://crates.io/crates/open), does
 The decisions above should be revisited if any of the following occur:
 
 - A new `opener` release drops `normpath`.
-- Any of the currently-flagged crates picks up an actual RustSec advisory or CVE.
+- Any of the currently flagged crates picks up an actual RustSec advisory or CVE.
 - `vet` reports a *Vulnerability*, *Malware*, or *License* finding (currently all green).
 
 ---
