@@ -39,6 +39,10 @@ fn main() -> Result<()> {
     // startup errors can be captured.
     rust_pad_ui::problem_log::init(cli.portable);
 
+    // Install a panic hook that logs to the problem store so users can see
+    // crash information in Help > Problems after a restart.
+    rust_pad_ui::problem_log::install_panic_hook();
+
     let startup_args = rust_pad_ui::StartupArgs {
         files: cli.files,
         new_file_text: cli.new_file,
