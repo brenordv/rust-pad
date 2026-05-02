@@ -1599,6 +1599,9 @@ impl<'a> EditorWidget<'a> {
                 .unwrap_or_default();
             let lchars: Vec<char> = lc.chars().collect();
             let cs = wrap_row * wm.chars_per_visual_line;
+            if cs >= lchars.len() {
+                return Position::new(logical_line, lchars.len());
+            }
             let ce = (cs + wm.chars_per_visual_line).min(lchars.len());
             let seg: String = lchars[cs..ce].iter().collect();
             let visual_col = self.x_to_col_badge_aware(&seg, relative_x, char_width);
@@ -2112,6 +2115,83 @@ mod tests {
         // screen_to_position doesn't clamp — cursor clamping happens elsewhere
         let pos = widget.screen_to_position(Pos2::new(50.0, 500.0), text_area, 20.0, 10.0, None);
         assert!(pos.line > 1);
+    }
+
+    // ── screen_to_position (wrapped) ─────────────────────────────────
+
+    #[test]
+    fn screen_to_position_wrapped_empty_doc() {
+        let mut doc = Document {
+            buffer: "".into(),
+            scroll_y: 0.0,
+            ..Default::default()
+        };
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+        let wm = WrapMap::build(&doc, 40);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        let pos = widget.screen_to_position(Pos2::new(60.0, 5.0), text_area, 20.0, 10.0, Some(&wm));
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.col, 0);
+    }
+
+    #[test]
+    fn screen_to_position_wrapped_empty_line_click_far_below() {
+        // Empty document, but click at a high y — visual_to_logical can
+        // return a wrap_row beyond the (empty) line content.
+        let mut doc = Document {
+            buffer: "".into(),
+            scroll_y: 0.0,
+            ..Default::default()
+        };
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+        let wm = WrapMap::build(&doc, 10);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        // Click way below — should not panic.
+        let pos =
+            widget.screen_to_position(Pos2::new(60.0, 500.0), text_area, 20.0, 10.0, Some(&wm));
+        assert_eq!(pos.col, 0);
+    }
+
+    #[test]
+    fn screen_to_position_wrapped_empty_line_between_content() {
+        let mut doc = Document {
+            buffer: "hello\n\nworld".into(),
+            scroll_y: 0.0,
+            ..Default::default()
+        };
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+        let wm = WrapMap::build(&doc, 40);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        // Click on the empty middle line (visual line 1, y = 25.0 with line_height = 20).
+        let pos =
+            widget.screen_to_position(Pos2::new(80.0, 25.0), text_area, 20.0, 10.0, Some(&wm));
+        assert_eq!(pos.line, 1);
+        assert_eq!(pos.col, 0);
+    }
+
+    #[test]
+    fn screen_to_position_wrapped_long_line() {
+        let mut doc = Document {
+            buffer: "abcdefghijklmnopqrst".into(), // 20 chars
+            scroll_y: 0.0,
+            ..Default::default()
+        };
+        let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
+        let wm = WrapMap::build(&doc, 10);
+        let theme = EditorTheme::default();
+        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+
+        // Click on second visual row (wrap_row=1), col 3.
+        let pos =
+            widget.screen_to_position(Pos2::new(80.0, 25.0), text_area, 20.0, 10.0, Some(&wm));
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.col, 13); // wrap_row(1) * 10 + 3
     }
 
     // ── is_position_in_selection ─────────────────────────────────────

@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.4.1]
+
+### Fixed
+
+- Fixed a crash when clicking on an empty line (or empty document) with word wrap enabled. The wrap-row offset could exceed the line length, causing a slice-out-of-bounds panic in `screen_to_position`.
+- Panics are now captured by the problem logger (Help > Problems) via a custom panic hook, so crash information is visible to users after a restart instead of being lost.
+
+### Changed
+
+- Extracted shared database-opening boilerplate (`open_or_create_db`) into a reusable helper, eliminating code duplication between `ProblemStore::open()` and `SessionStore::open()`.
+- Removed leftover mock problem entries that were added during development.
+
 ## [2.4.0]
 
 ### Added

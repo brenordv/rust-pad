@@ -39,6 +39,25 @@ fn main() -> Result<()> {
     // startup errors can be captured.
     rust_pad_ui::problem_log::init(cli.portable);
 
+    // Install a panic hook that logs to the problem store so users can see
+    // crash information in Help > Problems after a restart.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = match info.payload().downcast_ref::<&str>() {
+            Some(s) => (*s).to_string(),
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => s.clone(),
+                None => "unknown panic".to_string(),
+            },
+        };
+        let location = info
+            .location()
+            .map(|l| format!(" at {}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+        rust_pad_ui::problem_log::log_problem(&format!("Panic{location}: {message}"));
+        default_hook(info);
+    }));
+
     let startup_args = rust_pad_ui::StartupArgs {
         files: cli.files,
         new_file_text: cli.new_file,
