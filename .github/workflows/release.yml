@@ -91,7 +91,9 @@ jobs:
           iconutil -c icns rust-pad.iconset -o "${APP_DIR}/Resources/rust-pad.icns"
 
           # Create Info.plist from template
-          TAG="${GITHUB_REF#refs/tags/release/}"
+          TAG="${GITHUB_REF#refs/tags/}"  # strip refs/tags/ prefix
+          TAG="${TAG#release/}"           # strip release/ if present
+          TAG="${TAG#v}"                  # strip leading v if present
           sed "s/__VERSION__/${TAG}/g" packaging/macos/Info.plist.template > "${APP_DIR}/Info.plist"
 
           zip -r "${{ matrix.archive_name }}" "Rust Pad.app"
@@ -108,7 +110,9 @@ jobs:
       - name: Build .deb package (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          TAG="${GITHUB_REF#refs/tags/release/}"
+          TAG="${GITHUB_REF#refs/tags/}"  # strip refs/tags/ prefix
+          TAG="${TAG#release/}"           # strip release/ if present
+          TAG="${TAG#v}"                  # strip leading v if present
           DEB_DIR="rust-pad_${TAG}_amd64"
           mkdir -p "${DEB_DIR}/DEBIAN"
           mkdir -p "${DEB_DIR}/usr/bin"
