@@ -290,30 +290,18 @@ impl App {
         }
 
         // ── Render each pane in its own child UI. ──────────────────────
-        let zoom_left =
-            self.render_one_pane(ui, PaneId::Left, left_rect, dialog_open, modal_dialog_open);
-        let zoom_right = self.render_one_pane(
+        self.render_one_pane(ui, PaneId::Left, left_rect, dialog_open, modal_dialog_open);
+        self.render_one_pane(
             ui,
             PaneId::Right,
             right_rect,
             dialog_open,
             modal_dialog_open,
         );
-        let zoom_request = if zoom_left != 1.0 {
-            zoom_left
-        } else {
-            zoom_right
-        };
-
-        if zoom_request != 1.0 {
-            self.theme_ctrl.zoom_level = (self.theme_ctrl.zoom_level * zoom_request)
-                .clamp(0.5, self.theme_ctrl.max_zoom_level);
-        }
     }
 
     /// Renders the tab strip and editor for one pane inside a child UI
-    /// clipped to `pane_rect`. Returns the zoom request from the editor
-    /// (1.0 if no zoom change).
+    /// clipped to `pane_rect`.
     fn render_one_pane(
         &mut self,
         parent: &mut egui::Ui,
@@ -321,8 +309,7 @@ impl App {
         pane_rect: Rect,
         dialog_open: bool,
         modal_dialog_open: bool,
-    ) -> f32 {
-        let mut zoom_request = 1.0_f32;
+    ) {
         let focused = self.tabs.focused_pane() == pane;
         let accent = self.theme_ctrl.accent_color;
 
@@ -342,7 +329,6 @@ impl App {
                     let mut editor = EditorWidget::new(
                         doc,
                         &self.theme_ctrl.theme,
-                        self.theme_ctrl.zoom_level,
                         Some(&self.theme_ctrl.syntax_highlighter),
                     );
                     editor.word_wrap = self.word_wrap;
@@ -350,10 +336,10 @@ impl App {
                     editor.show_line_numbers = self.show_line_numbers;
                     editor.dialog_open = dialog_open;
                     editor.modal_dialog_open = modal_dialog_open;
+                    editor.auto_focus = focused;
+                    editor.max_zoom_level = self.theme_ctrl.max_zoom_level;
                     editor.bookmarks = Some(&self.bookmarks);
-                    let r = editor.show(ui);
-                    zoom_request = editor.zoom_request;
-                    r
+                    editor.show(ui)
                 };
                 response.context_menu(|ui| {
                     self.show_editor_context_menu(ui);
@@ -370,8 +356,6 @@ impl App {
                 }
             },
         );
-
-        zoom_request
     }
 }
 

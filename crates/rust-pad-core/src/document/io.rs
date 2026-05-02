@@ -132,6 +132,7 @@ impl Document {
             render_cache: None,
             pinned: false,
             tab_color: None,
+            zoom_level: 1.0,
         })
     }
 

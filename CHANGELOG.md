@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.2]
+
+### Fixed
+
+- Fixed text appearing in both panels when typing in split view. Both pane editors were unconditionally grabbing focus and processing the same frame-global keyboard events. Added an `auto_focus` flag to `EditorWidget` so only the focused pane's editor requests focus and processes keyboard input.
+- Fixed zoom being global instead of per-file/panel. Moved the zoom level from `ThemeController` (single global value) to each `Document`, so each tab maintains its own independent zoom. Zoom changes via Ctrl+Scroll, Ctrl+Plus/Minus, and the View menu now target the active document only.
+
+### Changed
+
+- `ThemeController::zoom_level` renamed to `default_zoom_level` — it now only sets the initial zoom for newly-created documents and is persisted to config on exit. The per-document zoom starts at this default.
+- Removed `zoom_in()`, `zoom_out()`, and `zoom_reset()` methods from `ThemeController`; zoom mutations are now applied directly to `Document::zoom_level`.
+- Removed the `zoom_request` output field from `EditorWidget` and the associated propagation logic in the single-pane and split-pane render paths.
+- Status bar now displays the active document's zoom level rather than the global zoom.
+
 ## [2.4.1]
 
 ### Fixed

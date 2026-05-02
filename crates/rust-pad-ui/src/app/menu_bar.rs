@@ -386,21 +386,24 @@ impl App {
                 .add(egui::Button::new("Zoom In").shortcut_text("Ctrl++"))
                 .clicked()
             {
-                self.theme_ctrl.zoom_in();
+                let max = self.theme_ctrl.max_zoom_level;
+                let doc = self.tabs.active_doc_mut();
+                doc.zoom_level = (doc.zoom_level + 0.1).min(max);
                 ui.close();
             }
             if ui
                 .add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-"))
                 .clicked()
             {
-                self.theme_ctrl.zoom_out();
+                let doc = self.tabs.active_doc_mut();
+                doc.zoom_level = (doc.zoom_level - 0.1).max(0.5);
                 ui.close();
             }
             if ui
                 .add(egui::Button::new("Reset Zoom").shortcut_text("Ctrl+0"))
                 .clicked()
             {
-                self.theme_ctrl.zoom_reset();
+                self.tabs.active_doc_mut().zoom_level = 1.0;
                 ui.close();
             }
             ui.separator();

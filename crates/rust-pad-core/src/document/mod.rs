@@ -153,6 +153,8 @@ pub struct Document {
     pub pinned: bool,
     /// Optional user-assigned color used to highlight the tab in the tab bar.
     pub tab_color: Option<crate::tab_color::TabColor>,
+    /// Per-document zoom multiplier for the editor text.
+    pub zoom_level: f32,
 }
 
 impl std::fmt::Debug for Document {
@@ -224,6 +226,7 @@ impl Document {
             render_cache: None,
             pinned: false,
             tab_color: None,
+            zoom_level: 1.0,
         }
     }
 

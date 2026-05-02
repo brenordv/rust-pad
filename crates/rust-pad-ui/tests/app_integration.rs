@@ -18,7 +18,7 @@ fn test_app_initial_state() {
     let harness = create_harness();
     let app = harness.state();
     assert_eq!(app.tabs.tab_count(), 1);
-    assert!((app.theme_ctrl.zoom_level - 1.0).abs() < f32::EPSILON);
+    assert!((app.tabs.active_doc().zoom_level - 1.0).abs() < f32::EPSILON);
     assert!(!app.word_wrap);
     assert!(!app.show_special_chars);
 }
@@ -187,7 +187,7 @@ fn test_zoom_in_changes_zoom_level() {
     harness.run();
 
     let app = harness.state();
-    assert!((app.theme_ctrl.zoom_level - 1.1).abs() < 0.01);
+    assert!((app.tabs.active_doc().zoom_level - 1.1).abs() < 0.01);
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn test_zoom_out_changes_zoom_level() {
     harness.run();
 
     let app = harness.state();
-    assert!((app.theme_ctrl.zoom_level - 0.9).abs() < 0.01);
+    assert!((app.tabs.active_doc().zoom_level - 0.9).abs() < 0.01);
 }
 
 #[test]
@@ -216,11 +216,11 @@ fn test_zoom_reset() {
     harness.run();
     harness.key_press_modifiers(ctrl, Key::Plus);
     harness.run();
-    assert!((harness.state().theme_ctrl.zoom_level - 1.2).abs() < 0.01);
+    assert!((harness.state().tabs.active_doc().zoom_level - 1.2).abs() < 0.01);
     // Reset
     harness.key_press_modifiers(ctrl, Key::Num0);
     harness.run();
-    assert!((harness.state().theme_ctrl.zoom_level - 1.0).abs() < f32::EPSILON);
+    assert!((harness.state().tabs.active_doc().zoom_level - 1.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -235,8 +235,8 @@ fn test_zoom_max_limit() {
         harness.key_press_modifiers(ctrl, Key::Plus);
         harness.run();
     }
-    assert!(harness.state().theme_ctrl.zoom_level <= 15.0);
-    assert!((harness.state().theme_ctrl.zoom_level - 15.0).abs() < 0.01);
+    assert!(harness.state().tabs.active_doc().zoom_level <= 15.0);
+    assert!((harness.state().tabs.active_doc().zoom_level - 15.0).abs() < 0.01);
 }
 
 #[test]
@@ -251,8 +251,8 @@ fn test_zoom_min_limit() {
         harness.key_press_modifiers(ctrl, Key::Minus);
         harness.run();
     }
-    assert!(harness.state().theme_ctrl.zoom_level >= 0.5);
-    assert!((harness.state().theme_ctrl.zoom_level - 0.5).abs() < 0.01);
+    assert!(harness.state().tabs.active_doc().zoom_level >= 0.5);
+    assert!((harness.state().tabs.active_doc().zoom_level - 0.5).abs() < 0.01);
 }
 
 // ── D. Tab Management ──────────────────────────────────────────────────────

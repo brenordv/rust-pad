@@ -186,7 +186,7 @@ impl App {
             file_path_display: doc.file_path.as_ref().map(|p| p.display().to_string()),
             match_info,
             bookmark_count: self.bookmarks.count(),
-            zoom_level: self.theme_ctrl.zoom_level,
+            zoom_level: doc.zoom_level,
             io_status: self.io_activity.status_message().map(String::from),
             print_in_progress: self.print_in_progress,
         }

@@ -82,7 +82,6 @@ struct FrameLayout {
 pub struct EditorWidget<'a> {
     pub doc: &'a mut Document,
     pub theme: &'a EditorTheme,
-    pub zoom_level: f32,
     pub highlighter: Option<&'a SyntaxHighlighter>,
     pub word_wrap: bool,
     pub show_special_chars: bool,
@@ -95,31 +94,35 @@ pub struct EditorWidget<'a> {
     /// Non-modal dialogs like Find/Replace leave this `false` so the editor
     /// can be edited when the user clicks into it.
     pub modal_dialog_open: bool,
-    /// Zoom factor from Ctrl+scroll (1.0 = no change). Read by the app after `show()`.
-    pub zoom_request: f32,
     /// Optional bookmark manager for rendering bookmark indicators in the gutter.
     pub bookmarks: Option<&'a BookmarkManager>,
+    /// When false, the editor will not auto-grab egui focus. Used in split
+    /// view so only the focused pane's editor requests focus and processes
+    /// keyboard input; the unfocused pane's editor remains passive.
+    pub auto_focus: bool,
+    /// Maximum allowed zoom level (global setting). Used to clamp per-document
+    /// zoom when the user zooms via Ctrl+scroll.
+    pub max_zoom_level: f32,
 }
 
 impl<'a> EditorWidget<'a> {
     pub fn new(
         doc: &'a mut Document,
         theme: &'a EditorTheme,
-        zoom_level: f32,
         highlighter: Option<&'a SyntaxHighlighter>,
     ) -> Self {
         Self {
             doc,
             theme,
-            zoom_level,
             highlighter,
             word_wrap: false,
             show_special_chars: false,
             show_line_numbers: true,
             dialog_open: false,
             modal_dialog_open: false,
-            zoom_request: 1.0,
             bookmarks: None,
+            auto_focus: true,
+            max_zoom_level: 15.0,
         }
     }
 
@@ -213,7 +216,7 @@ impl<'a> EditorWidget<'a> {
         if !self.word_wrap {
             return None;
         }
-        let font_id = FontId::monospace(self.theme.font_size * self.zoom_level);
+        let font_id = FontId::monospace(self.theme.font_size * self.doc.zoom_level);
         let gutter_width = self.compute_gutter_width(ui, &font_id);
         let char_width = self.measure_char_width(ui, &font_id);
         let exact_text_width = rect.width() - gutter_width - SCROLLBAR_WIDTH;
@@ -228,7 +231,7 @@ impl<'a> EditorWidget<'a> {
     }
 
     fn compute_layout(&mut self, ui: &Ui, rect: Rect, wrap_map: Option<&WrapMap>) -> FrameLayout {
-        let effective_font_size = self.theme.font_size * self.zoom_level;
+        let effective_font_size = self.theme.font_size * self.doc.zoom_level;
         let font_id = FontId::monospace(effective_font_size);
         let line_height = effective_font_size * 1.4;
         let char_width = self.measure_char_width(ui, &font_id);
@@ -334,7 +337,8 @@ impl<'a> EditorWidget<'a> {
         }
         let zoom_delta = ui.input(|i| i.zoom_delta());
         if zoom_delta != 1.0 {
-            self.zoom_request = zoom_delta;
+            self.doc.zoom_level =
+                (self.doc.zoom_level * zoom_delta).clamp(0.5, self.max_zoom_level);
         }
         let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
         if scroll_delta.y != 0.0 {
@@ -506,8 +510,11 @@ impl<'a> EditorWidget<'a> {
     fn handle_focus_and_keyboard(&mut self, ui: &mut Ui, response: &Response) {
         // Don't auto-grab focus when any dialog is open; focus transfers
         // to the editor via mouse click (handle_mouse_input calls
-        // response.request_focus()).
-        if !self.dialog_open && !response.has_focus() && !response.lost_focus() {
+        // response.request_focus()).  In split view, only the focused
+        // pane's editor has `auto_focus = true` — the unfocused pane
+        // must not steal focus, otherwise both editors process the same
+        // keyboard events and text appears in both panels.
+        if self.auto_focus && !self.dialog_open && !response.has_focus() && !response.lost_focus() {
             response.request_focus();
         }
         // Process keyboard input when the editor has focus, unless a
@@ -1838,7 +1845,7 @@ mod tests {
             ..Default::default()
         };
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let result = widget.syntax_path();
         assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test.rs")));
     }
@@ -1850,7 +1857,7 @@ mod tests {
             ..Default::default()
         };
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let result = widget.syntax_path();
         assert_eq!(result, Some(std::path::PathBuf::from("Untitled.py")));
     }
@@ -1862,7 +1869,7 @@ mod tests {
             ..Default::default()
         };
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         assert!(widget.syntax_path().is_none());
     }
 
@@ -1874,7 +1881,7 @@ mod tests {
             ..Default::default()
         };
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let result = widget.syntax_path();
         assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test.rs")));
     }
@@ -1890,7 +1897,7 @@ mod tests {
         };
         doc.cursor.position = Position::new(9, 0);
         let theme = EditorTheme::default();
-        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
         widget.ensure_cursor_visible(5, 100.0, 10.0, None);
         assert!(widget.doc.scroll_y > 0.0);
     }
@@ -1904,7 +1911,7 @@ mod tests {
         };
         doc.cursor.position = Position::new(0, 0);
         let theme = EditorTheme::default();
-        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
         widget.ensure_cursor_visible(5, 100.0, 10.0, None);
         assert!(widget.doc.scroll_y < 5.0);
     }
@@ -1920,7 +1927,7 @@ mod tests {
         let theme = EditorTheme::default();
         let char_width = 10.0;
         let text_width = 100.0; // only 10 chars visible
-        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
         widget.ensure_cursor_visible(10, text_width, char_width, None);
         assert!(widget.doc.scroll_x > 0.0);
     }
@@ -1934,7 +1941,7 @@ mod tests {
         };
         doc.cursor.position = Position::new(0, 0);
         let theme = EditorTheme::default();
-        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
         widget.ensure_cursor_visible(10, 200.0, 10.0, None);
         assert!(widget.doc.scroll_x < 100.0);
     }
@@ -1948,7 +1955,7 @@ mod tests {
         };
         let theme = EditorTheme::default();
         let wm = WrapMap::build(&doc, 5);
-        let mut widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
         widget.ensure_cursor_visible(10, 200.0, 10.0, Some(&wm));
         assert!((widget.doc.scroll_x - 0.0).abs() < f32::EPSILON);
     }
@@ -1959,7 +1966,7 @@ mod tests {
     fn x_to_col_normal_text() {
         let mut doc = Document::default();
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let col = widget.x_to_col_badge_aware("hello", 25.0, 10.0);
         // 25.0 / 10.0 = 2.5 → rounds to 3
         assert_eq!(col, 3);
@@ -1969,7 +1976,7 @@ mod tests {
     fn x_to_col_at_start() {
         let mut doc = Document::default();
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let col = widget.x_to_col_badge_aware("hello", 0.0, 10.0);
         assert_eq!(col, 0);
     }
@@ -1978,7 +1985,7 @@ mod tests {
     fn x_to_col_beyond_end() {
         let mut doc = Document::default();
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let col = widget.x_to_col_badge_aware("hi", 100.0, 10.0);
         // Returns unclamped column (cursor clamping happens at a higher level)
         assert_eq!(col, 10);
@@ -1988,7 +1995,7 @@ mod tests {
     fn x_to_col_negative() {
         let mut doc = Document::default();
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let col = widget.x_to_col_badge_aware("hello", -5.0, 10.0);
         assert_eq!(col, 0);
     }
@@ -1999,7 +2006,7 @@ mod tests {
     fn col_to_x_normal_text() {
         let mut doc = Document::default();
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let x = widget.col_to_x_badge_aware("hello", 3, 10.0);
         assert!((x - 30.0).abs() < f32::EPSILON);
     }
@@ -2008,7 +2015,7 @@ mod tests {
     fn col_to_x_at_zero() {
         let mut doc = Document::default();
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         let x = widget.col_to_x_badge_aware("hello", 0, 10.0);
         assert!((x - 0.0).abs() < f32::EPSILON);
     }
@@ -2018,22 +2025,23 @@ mod tests {
     #[test]
     fn editor_widget_defaults() {
         let mut doc = Document::default();
+        doc.zoom_level = 1.5;
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.5, None);
-        assert!((widget.zoom_level - 1.5).abs() < f32::EPSILON);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
+        assert!((widget.doc.zoom_level - 1.5).abs() < f32::EPSILON);
         assert!(widget.highlighter.is_none());
         assert!(!widget.word_wrap);
         assert!(!widget.show_special_chars);
         assert!(!widget.dialog_open);
         assert!(!widget.modal_dialog_open);
-        assert!((widget.zoom_request - 1.0).abs() < f32::EPSILON);
+        assert!(widget.auto_focus);
     }
 
     #[test]
     fn editor_widget_with_settings() {
         let mut doc = Document::default();
         let theme = EditorTheme::default();
-        let mut widget = EditorWidget::new(&mut doc, &theme, 2.0, None);
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
         widget.word_wrap = true;
         widget.show_special_chars = true;
         widget.show_line_numbers = true;
@@ -2057,7 +2065,7 @@ mod tests {
             ..Default::default()
         };
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
 
         let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
         let char_width = 10.0;
@@ -2083,7 +2091,7 @@ mod tests {
             ..Default::default()
         };
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
 
         let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
         let char_width = 10.0;
@@ -2108,7 +2116,7 @@ mod tests {
             ..Default::default()
         };
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
 
         let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
 
@@ -2129,7 +2137,7 @@ mod tests {
         let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
         let wm = WrapMap::build(&doc, 40);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
 
         let pos = widget.screen_to_position(Pos2::new(60.0, 5.0), text_area, 20.0, 10.0, Some(&wm));
         assert_eq!(pos.line, 0);
@@ -2148,7 +2156,7 @@ mod tests {
         let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
         let wm = WrapMap::build(&doc, 10);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
 
         // Click way below — should not panic.
         let pos =
@@ -2166,7 +2174,7 @@ mod tests {
         let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
         let wm = WrapMap::build(&doc, 40);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
 
         // Click on the empty middle line (visual line 1, y = 25.0 with line_height = 20).
         let pos =
@@ -2185,7 +2193,7 @@ mod tests {
         let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
         let wm = WrapMap::build(&doc, 10);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
 
         // Click on second visual row (wrap_row=1), col 3.
         let pos =
@@ -2204,7 +2212,7 @@ mod tests {
         };
         doc.cursor.position = Position::new(0, 3);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         assert!(!widget.is_position_in_selection(Position::new(0, 5)));
     }
 
@@ -2218,7 +2226,7 @@ mod tests {
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         assert!(widget.is_position_in_selection(Position::new(0, 3)));
     }
 
@@ -2232,7 +2240,7 @@ mod tests {
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(0, 5), &doc.buffer);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         assert!(!widget.is_position_in_selection(Position::new(0, 7)));
     }
 
@@ -2246,7 +2254,7 @@ mod tests {
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(0, 7), &doc.buffer);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         // Position at start of selection should be inside
         assert!(widget.is_position_in_selection(Position::new(0, 2)));
     }
@@ -2261,7 +2269,7 @@ mod tests {
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(0, 7), &doc.buffer);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         // Position at end of selection (exclusive) should be outside
         assert!(!widget.is_position_in_selection(Position::new(0, 7)));
     }
@@ -2281,7 +2289,7 @@ mod tests {
         doc.secondary_cursors.push(sc);
 
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         // Inside secondary selection
         assert!(widget.is_position_in_selection(Position::new(0, 8)));
         // Outside both selections
@@ -2298,7 +2306,7 @@ mod tests {
         doc.cursor.start_selection();
         doc.cursor.move_to(Position::new(1, 3), &doc.buffer);
         let theme = EditorTheme::default();
-        let widget = EditorWidget::new(&mut doc, &theme, 1.0, None);
+        let widget = EditorWidget::new(&mut doc, &theme, None);
         // Position on line 0, col 4 should be inside (selection spans line 0 col 2 to line 1 col 3)
         assert!(widget.is_position_in_selection(Position::new(0, 4)));
         // Position on line 1, col 1 should be inside
