@@ -111,4 +111,30 @@ impl PaneTabSplit {
             None
         }
     }
+
+    /// Reorders one pane's tab-order vector so that pinned tabs appear first,
+    /// preserving relative order within pinned and unpinned groups (stable
+    /// partition).
+    ///
+    /// Called by [`TabManager::pin_tab`] / [`TabManager::unpin_tab`] after the
+    /// global `documents` vector has been rearranged, so that the pane's
+    /// display order matches the expected pinned-first layout.
+    ///
+    /// [`TabManager::pin_tab`]: super::TabManager::pin_tab
+    /// [`TabManager::unpin_tab`]: super::TabManager::unpin_tab
+    pub fn sort_pinned_first(&mut self, pane: PaneId, is_pinned: impl Fn(usize) -> bool) {
+        let order = self.order_for_mut(pane);
+        // Pre-allocate for all entries since `pinned` becomes the final combined vec.
+        let mut pinned = Vec::with_capacity(order.len());
+        let mut unpinned = Vec::new();
+        for &idx in order.iter() {
+            if is_pinned(idx) {
+                pinned.push(idx);
+            } else {
+                unpinned.push(idx);
+            }
+        }
+        pinned.extend(unpinned);
+        *order = pinned;
+    }
 }

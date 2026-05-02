@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.4.3]
+
+### Fixed
+
+- Fixed pinned tabs not moving to the beginning of the tab bar in split view. The pin/unpin operations reordered the global document vector but did not reorder the per-pane order vectors, so pinned tabs stayed in place visually. Added a stable-partition step that reorders the affected pane's tab order after each pin/unpin.
+
 ## [2.4.2]
 
 ### Fixed
