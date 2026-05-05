@@ -2403,4 +2403,91 @@ mod tests {
         // Position on line 2 should be outside
         assert!(!widget.is_position_in_selection(Position::new(2, 0)));
     }
+
+    // ── build_clipped_layout_job ───────────────────────────────────
+
+    #[test]
+    fn clipped_layout_job_full_span_included() {
+        let font = FontId::monospace(14.0);
+        let spans = vec![(Color32::RED, "hello".to_string())];
+        let job = EditorWidget::build_clipped_layout_job(&spans, 0, 5, &font);
+        assert_eq!(job.text, "hello");
+        assert_eq!(job.sections.len(), 1);
+    }
+
+    #[test]
+    fn clipped_layout_job_clips_start() {
+        let font = FontId::monospace(14.0);
+        let spans = vec![(Color32::RED, "hello".to_string())];
+        // Only bytes 2..5 → "llo"
+        let job = EditorWidget::build_clipped_layout_job(&spans, 2, 5, &font);
+        assert_eq!(job.text, "llo");
+    }
+
+    #[test]
+    fn clipped_layout_job_clips_end() {
+        let font = FontId::monospace(14.0);
+        let spans = vec![(Color32::RED, "hello".to_string())];
+        // Only bytes 0..3 → "hel"
+        let job = EditorWidget::build_clipped_layout_job(&spans, 0, 3, &font);
+        assert_eq!(job.text, "hel");
+    }
+
+    #[test]
+    fn clipped_layout_job_clips_both_sides() {
+        let font = FontId::monospace(14.0);
+        let spans = vec![(Color32::RED, "hello".to_string())];
+        // Only bytes 1..4 → "ell"
+        let job = EditorWidget::build_clipped_layout_job(&spans, 1, 4, &font);
+        assert_eq!(job.text, "ell");
+    }
+
+    #[test]
+    fn clipped_layout_job_multiple_spans() {
+        let font = FontId::monospace(14.0);
+        let spans = vec![
+            (Color32::RED, "hel".to_string()),    // bytes 0..3
+            (Color32::BLUE, "lo wo".to_string()), // bytes 3..8
+            (Color32::GREEN, "rld".to_string()),  // bytes 8..11
+        ];
+        // Clip to bytes 2..9 → "l" + "lo wo" + "r"
+        let job = EditorWidget::build_clipped_layout_job(&spans, 2, 9, &font);
+        assert_eq!(job.text, "llo wor");
+        assert_eq!(job.sections.len(), 3);
+    }
+
+    #[test]
+    fn clipped_layout_job_skips_out_of_range_spans() {
+        let font = FontId::monospace(14.0);
+        let spans = vec![
+            (Color32::RED, "aaa".to_string()),   // bytes 0..3
+            (Color32::BLUE, "bbb".to_string()),  // bytes 3..6
+            (Color32::GREEN, "ccc".to_string()), // bytes 6..9
+        ];
+        // Clip to bytes 3..6 → only middle span "bbb"
+        let job = EditorWidget::build_clipped_layout_job(&spans, 3, 6, &font);
+        assert_eq!(job.text, "bbb");
+        assert_eq!(job.sections.len(), 1);
+    }
+
+    #[test]
+    fn clipped_layout_job_empty_range() {
+        let font = FontId::monospace(14.0);
+        let spans = vec![(Color32::RED, "hello".to_string())];
+        let job = EditorWidget::build_clipped_layout_job(&spans, 3, 3, &font);
+        assert_eq!(job.text, "");
+    }
+
+    #[test]
+    fn clipped_layout_job_preserves_colors() {
+        let font = FontId::monospace(14.0);
+        let spans = vec![
+            (Color32::RED, "ab".to_string()),  // bytes 0..2
+            (Color32::BLUE, "cd".to_string()), // bytes 2..4
+        ];
+        let job = EditorWidget::build_clipped_layout_job(&spans, 0, 4, &font);
+        assert_eq!(job.sections.len(), 2);
+        assert_eq!(job.sections[0].format.color, Color32::RED);
+        assert_eq!(job.sections[1].format.color, Color32::BLUE);
+    }
 }

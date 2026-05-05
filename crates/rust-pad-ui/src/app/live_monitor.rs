@@ -148,4 +148,84 @@ mod tests {
             "Expected reloaded content with 'line2', got: {content}"
         );
     }
+
+    #[test]
+    fn test_tick_flags_external_change_for_non_monitored_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("readme.txt");
+        std::fs::write(&file, "original\n").unwrap();
+
+        let mut tabs = TabManager::new();
+        tabs.open_file(&file).unwrap();
+        // Not live-monitored — should flag, not auto-reload.
+        assert!(!tabs.active_doc().live_monitoring);
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        tabs.active_doc_mut().last_known_mtime = Some(mtime);
+
+        // Modify the file externally.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&file, "modified externally\n").unwrap();
+
+        let mut ctrl = LiveMonitorController::new();
+        ctrl.last_check = Instant::now() - Duration::from_secs(5);
+        ctrl.tick(&mut tabs, None);
+
+        // Should be flagged for user prompt, NOT auto-reloaded.
+        assert!(
+            tabs.active_doc().external_change_detected,
+            "Expected external_change_detected to be true"
+        );
+        let content = tabs.active_doc().buffer.to_string();
+        assert!(
+            content.contains("original"),
+            "Content should NOT have been reloaded: {content}"
+        );
+    }
+
+    #[test]
+    fn test_tick_does_not_reflag_already_pending_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("readme.txt");
+        std::fs::write(&file, "original\n").unwrap();
+
+        let mut tabs = TabManager::new();
+        tabs.open_file(&file).unwrap();
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        tabs.active_doc_mut().last_known_mtime = Some(mtime);
+        // Pre-flag as pending — tick should not re-flag.
+        tabs.active_doc_mut().external_change_detected = true;
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&file, "modified again\n").unwrap();
+
+        let mut ctrl = LiveMonitorController::new();
+        ctrl.last_check = Instant::now() - Duration::from_secs(5);
+        ctrl.tick(&mut tabs, None);
+
+        // Flag stays true but content unchanged (not reloaded).
+        assert!(tabs.active_doc().external_change_detected);
+        let content = tabs.active_doc().buffer.to_string();
+        assert!(content.contains("original"));
+    }
+
+    #[test]
+    fn test_tick_records_mtime_baseline_for_non_monitored_without_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("new.txt");
+        std::fs::write(&file, "content\n").unwrap();
+
+        let mut tabs = TabManager::new();
+        tabs.open_file(&file).unwrap();
+        // Clear the baseline that open_file sets.
+        tabs.active_doc_mut().last_known_mtime = None;
+        assert!(!tabs.active_doc().live_monitoring);
+
+        let mut ctrl = LiveMonitorController::new();
+        ctrl.last_check = Instant::now() - Duration::from_secs(5);
+        ctrl.tick(&mut tabs, None);
+
+        // Should record the baseline, not flag as changed.
+        assert!(!tabs.active_doc().external_change_detected);
+        assert!(tabs.active_doc().last_known_mtime.is_some());
+    }
 }

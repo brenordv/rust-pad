@@ -258,4 +258,41 @@ mod tests {
         let color = syntect_color_to_egui(style);
         assert_eq!(color, Color32::from_rgba_unmultiplied(255, 128, 64, 200));
     }
+
+    // ── highlight_line_spans ───────────────────────────────────────
+
+    #[test]
+    fn highlight_line_spans_returns_non_empty_for_rust() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("test.rs")));
+        let mut highlighter = hl.create_highlighter(syntax).unwrap();
+
+        let spans = hl.highlight_line_spans("fn main() {}\n", syntax, &mut highlighter);
+        assert!(!spans.is_empty());
+        // Concatenated text should reproduce the input.
+        let combined: String = spans.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(combined, "fn main() {}\n");
+    }
+
+    #[test]
+    fn highlight_line_spans_empty_input() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(Some(Path::new("test.rs")));
+        let mut highlighter = hl.create_highlighter(syntax).unwrap();
+
+        let spans = hl.highlight_line_spans("", syntax, &mut highlighter);
+        let combined: String = spans.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(combined, "");
+    }
+
+    #[test]
+    fn highlight_line_spans_plain_text_passthrough() {
+        let hl = SyntaxHighlighter::new();
+        let syntax = hl.detect_syntax(None); // Plain Text
+        let mut highlighter = hl.create_highlighter(syntax).unwrap();
+
+        let spans = hl.highlight_line_spans("hello world\n", syntax, &mut highlighter);
+        let combined: String = spans.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(combined, "hello world\n");
+    }
 }

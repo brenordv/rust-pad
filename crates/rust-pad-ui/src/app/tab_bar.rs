@@ -350,6 +350,134 @@ fn layout_tab_title(
     (title_galley, title_color, tab_size)
 }
 
+/// Computes the scroll offset needed to make `target_rect` fully visible.
+///
+/// Converts the tab rect from screen coordinates to scroll content
+/// coordinates and adjusts the offset so the tab is within the visible
+/// region. Returns the current offset unchanged when the tab is already
+/// fully visible.
+///
+/// Parameters:
+/// - `target_rect`: screen-space rect of the tab to scroll into view.
+/// - `inner_rect`: the scroll area's visible viewport rect.
+/// - `content_width`: total width of the scrollable content.
+/// - `current_offset`: current horizontal scroll offset.
+fn auto_scroll_offset(
+    target_rect: Rect,
+    inner_rect: Rect,
+    content_width: f32,
+    current_offset: f32,
+) -> f32 {
+    let visible_min = current_offset;
+    let visible_width = inner_rect.width();
+    let visible_max = visible_min + visible_width;
+
+    let content_left = target_rect.min.x - inner_rect.min.x + visible_min;
+    let content_right = target_rect.max.x - inner_rect.min.x + visible_min;
+
+    let padding = TAB_PADDING;
+
+    if content_left < visible_min {
+        (content_left - padding).max(0.0)
+    } else if content_right > visible_max {
+        let max_offset = (content_width - visible_width).max(0.0);
+        (content_right - visible_width + padding).min(max_offset)
+    } else {
+        current_offset
+    }
+}
+
+/// Renders a pair of left/right scroll arrow buttons.
+///
+/// Used by both the main tab bar and per-pane tab bars. Updates `offset`
+/// in place when an arrow is clicked.
+fn render_scroll_arrow_pair(
+    ui: &mut egui::Ui,
+    visuals: &Visuals,
+    offset: &mut f32,
+    max_offset: f32,
+) {
+    ui.spacing_mut().item_spacing.x = 0.0;
+
+    let at_start = *offset <= 0.0;
+    let at_end = *offset >= max_offset;
+
+    // Left arrow
+    let left_color = if at_start {
+        visuals
+            .widgets
+            .noninteractive
+            .fg_stroke
+            .color
+            .gamma_multiply(0.3)
+    } else {
+        visuals.widgets.noninteractive.fg_stroke.color
+    };
+    let left_btn = egui::Button::new(RichText::new("\u{25C0}").color(left_color).size(10.0))
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
+        .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
+
+    if ui.add(left_btn).clicked() && !at_start {
+        *offset = (*offset - SCROLL_STEP).max(0.0);
+    }
+
+    // Right arrow
+    let right_color = if at_end {
+        visuals
+            .widgets
+            .noninteractive
+            .fg_stroke
+            .color
+            .gamma_multiply(0.3)
+    } else {
+        visuals.widgets.noninteractive.fg_stroke.color
+    };
+    let right_btn = egui::Button::new(RichText::new("\u{25B6}").color(right_color).size(10.0))
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
+        .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
+
+    if ui.add(right_btn).clicked() && !at_end {
+        *offset = (*offset + SCROLL_STEP).min(max_offset);
+    }
+}
+
+/// Result from the shared pin/color submenu.
+enum PinColorResult {
+    /// Toggle pin state.
+    TogglePin,
+    /// Set (or clear) the tab color.
+    SetColor(Option<TabColor>),
+}
+
+/// Renders the "Pin/Unpin" toggle and "Set Tab Color" submenu shared by
+/// both the main and pane context menus.
+fn render_pin_color_menu_items(ui: &mut egui::Ui, is_pinned: bool) -> Option<PinColorResult> {
+    let mut result = None;
+    let pin_label = if is_pinned { "Unpin Tab" } else { "Pin Tab" };
+    if ui.button(pin_label).clicked() {
+        result = Some(PinColorResult::TogglePin);
+        ui.close();
+    }
+    ui.menu_button("Set Tab Color", |ui| {
+        for variant in TabColor::ALL {
+            let [r, g, b] = variant.to_rgb();
+            let label = RichText::new(variant.label()).color(Color32::from_rgb(r, g, b));
+            if ui.button(label).clicked() {
+                result = Some(PinColorResult::SetColor(Some(variant)));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button("Clear Color").clicked() {
+            result = Some(PinColorResult::SetColor(None));
+            ui.close();
+        }
+    });
+    result
+}
+
 impl App {
     /// Renders the tab bar with active tab highlighting, close buttons,
     /// and horizontal scrolling when tabs overflow.
@@ -431,7 +559,12 @@ impl App {
             // 3. Auto-scroll to the active tab if it changed.
             if need_auto_scroll {
                 if let Some(active_rect) = tab_rects.get(self.tabs.active).copied() {
-                    self.auto_scroll_to_tab(active_rect, &scroll_output);
+                    self.tab_scroll_offset = auto_scroll_offset(
+                        active_rect,
+                        scroll_output.inner_rect,
+                        scroll_output.content_size.x,
+                        self.tab_scroll_offset,
+                    );
                 }
             }
 
@@ -674,81 +807,9 @@ impl App {
         }
     }
 
-    /// Adjusts the scroll offset so that `target_rect` (in scroll content
-    /// coordinates) is fully visible within the scroll area.
-    fn auto_scroll_to_tab(
-        &mut self,
-        target_rect: Rect,
-        scroll_output: &egui::scroll_area::ScrollAreaOutput<()>,
-    ) {
-        let visible_min = scroll_output.state.offset.x;
-        let visible_width = scroll_output.inner_rect.width();
-        let visible_max = visible_min + visible_width;
-
-        // Convert the tab rect from screen coordinates to scroll content coordinates
-        // by subtracting the inner_rect origin and adding back the offset.
-        let content_left = target_rect.min.x - scroll_output.inner_rect.min.x + visible_min;
-        let content_right = target_rect.max.x - scroll_output.inner_rect.min.x + visible_min;
-
-        let padding = TAB_PADDING;
-
-        if content_left < visible_min {
-            // Tab is to the left of the visible area — scroll left.
-            self.tab_scroll_offset = (content_left - padding).max(0.0);
-        } else if content_right > visible_max {
-            // Tab is to the right of the visible area — scroll right.
-            let max_offset = (scroll_output.content_size.x - visible_width).max(0.0);
-            self.tab_scroll_offset = (content_right - visible_width + padding).min(max_offset);
-        }
-        // Otherwise the tab is already fully visible — no adjustment needed.
-    }
-
-    /// Renders the left/right scroll arrow buttons.
+    /// Renders the left/right scroll arrow buttons for the main tab bar.
     fn render_scroll_arrows(&mut self, ui: &mut egui::Ui, visuals: &Visuals, max_offset: f32) {
-        ui.spacing_mut().item_spacing.x = 0.0;
-
-        let at_start = self.tab_scroll_offset <= 0.0;
-        let at_end = self.tab_scroll_offset >= max_offset;
-
-        // Left arrow
-        let left_color = if at_start {
-            visuals
-                .widgets
-                .noninteractive
-                .fg_stroke
-                .color
-                .gamma_multiply(0.3)
-        } else {
-            visuals.widgets.noninteractive.fg_stroke.color
-        };
-        let left_btn = egui::Button::new(RichText::new("\u{25C0}").color(left_color).size(10.0))
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
-
-        if ui.add(left_btn).clicked() && !at_start {
-            self.tab_scroll_offset = (self.tab_scroll_offset - SCROLL_STEP).max(0.0);
-        }
-
-        // Right arrow
-        let right_color = if at_end {
-            visuals
-                .widgets
-                .noninteractive
-                .fg_stroke
-                .color
-                .gamma_multiply(0.3)
-        } else {
-            visuals.widgets.noninteractive.fg_stroke.color
-        };
-        let right_btn = egui::Button::new(RichText::new("\u{25B6}").color(right_color).size(10.0))
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
-
-        if ui.add(right_btn).clicked() && !at_end {
-            self.tab_scroll_offset = (self.tab_scroll_offset + SCROLL_STEP).min(max_offset);
-        }
+        render_scroll_arrow_pair(ui, visuals, &mut self.tab_scroll_offset, max_offset);
     }
 
     /// Renders the right-click context menu for a tab.
@@ -782,31 +843,18 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            let pin_label = if is_pinned { "Unpin Tab" } else { "Pin Tab" };
-            if ui.button(pin_label).clicked() {
-                *deferred_action = Some(if is_pinned {
-                    DeferredTabAction::Unpin(idx)
-                } else {
-                    DeferredTabAction::Pin(idx)
-                });
-                ui.close();
-            }
-            ui.menu_button("Set Tab Color", |ui| {
-                for variant in rust_pad_core::tab_color::TabColor::ALL {
-                    let [r, g, b] = variant.to_rgb();
-                    let label =
-                        egui::RichText::new(variant.label()).color(Color32::from_rgb(r, g, b));
-                    if ui.button(label).clicked() {
-                        *deferred_action = Some(DeferredTabAction::SetTabColor(idx, Some(variant)));
-                        ui.close();
+            if let Some(result) = render_pin_color_menu_items(ui, is_pinned) {
+                *deferred_action = Some(match result {
+                    PinColorResult::TogglePin => {
+                        if is_pinned {
+                            DeferredTabAction::Unpin(idx)
+                        } else {
+                            DeferredTabAction::Pin(idx)
+                        }
                     }
-                }
-                ui.separator();
-                if ui.button("Clear Color").clicked() {
-                    *deferred_action = Some(DeferredTabAction::SetTabColor(idx, None));
-                    ui.close();
-                }
-            });
+                    PinColorResult::SetColor(color) => DeferredTabAction::SetTabColor(idx, color),
+                });
+            }
         });
     }
 
@@ -898,23 +946,12 @@ impl App {
             if need_auto_scroll {
                 if let Some(pos) = order.iter().position(|&idx| idx == active_doc) {
                     if let Some(active_rect) = tab_rects.get(pos).copied() {
-                        let visible_min = scroll_output.state.offset.x;
-                        let visible_width = scroll_output.inner_rect.width();
-                        let visible_max = visible_min + visible_width;
-                        let content_left =
-                            active_rect.min.x - scroll_output.inner_rect.min.x + visible_min;
-                        let content_right =
-                            active_rect.max.x - scroll_output.inner_rect.min.x + visible_min;
-
-                        if content_left < visible_min {
-                            self.pane_tab_scroll_offset[pane_idx] =
-                                (content_left - TAB_PADDING).max(0.0);
-                        } else if content_right > visible_max {
-                            let max_offset =
-                                (scroll_output.content_size.x - visible_width).max(0.0);
-                            self.pane_tab_scroll_offset[pane_idx] =
-                                (content_right - visible_width + TAB_PADDING).min(max_offset);
-                        }
+                        self.pane_tab_scroll_offset[pane_idx] = auto_scroll_offset(
+                            active_rect,
+                            scroll_output.inner_rect,
+                            scroll_output.content_size.x,
+                            self.pane_tab_scroll_offset[pane_idx],
+                        );
                     }
                 }
             }
@@ -923,67 +960,18 @@ impl App {
             if self.pane_tabs_overflow[pane_idx] {
                 let max_offset =
                     (scroll_output.content_size.x - scroll_output.inner_rect.width()).max(0.0);
-                self.render_pane_scroll_arrows(ui, &visuals, max_offset, pane_idx);
+                render_scroll_arrow_pair(
+                    ui,
+                    &visuals,
+                    &mut self.pane_tab_scroll_offset[pane_idx],
+                    max_offset,
+                );
             }
 
             render_pane_new_tab_button(ui, &visuals, &mut actions);
         });
 
         self.apply_pane_tab_actions(pane, actions);
-    }
-
-    /// Renders scroll arrows for a pane tab bar.
-    fn render_pane_scroll_arrows(
-        &mut self,
-        ui: &mut egui::Ui,
-        visuals: &Visuals,
-        max_offset: f32,
-        pane_idx: usize,
-    ) {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        let offset = self.pane_tab_scroll_offset[pane_idx];
-        let at_start = offset <= 0.0;
-        let at_end = offset >= max_offset;
-
-        let left_color = if at_start {
-            visuals
-                .widgets
-                .noninteractive
-                .fg_stroke
-                .color
-                .gamma_multiply(0.3)
-        } else {
-            visuals.widgets.noninteractive.fg_stroke.color
-        };
-        let left_btn = egui::Button::new(RichText::new("\u{25C0}").color(left_color).size(10.0))
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
-
-        if ui.add(left_btn).clicked() && !at_start {
-            self.pane_tab_scroll_offset[pane_idx] =
-                (self.pane_tab_scroll_offset[pane_idx] - SCROLL_STEP).max(0.0);
-        }
-
-        let right_color = if at_end {
-            visuals
-                .widgets
-                .noninteractive
-                .fg_stroke
-                .color
-                .gamma_multiply(0.3)
-        } else {
-            visuals.widgets.noninteractive.fg_stroke.color
-        };
-        let right_btn = egui::Button::new(RichText::new("\u{25B6}").color(right_color).size(10.0))
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
-
-        if ui.add(right_btn).clicked() && !at_end {
-            self.pane_tab_scroll_offset[pane_idx] =
-                (self.pane_tab_scroll_offset[pane_idx] + SCROLL_STEP).min(max_offset);
-        }
     }
 
     /// Renders a single tab button for the per-pane tab bar.
@@ -1122,26 +1110,16 @@ fn render_pane_tab_context_menu(
             ui.close();
         }
         ui.separator();
-        let pin_label = if is_pinned { "Unpin Tab" } else { "Pin Tab" };
-        if ui.button(pin_label).clicked() {
-            actions.pin_action = Some((doc_idx, !is_pinned));
-            ui.close();
-        }
-        ui.menu_button("Set Tab Color", |ui| {
-            for variant in TabColor::ALL {
-                let [r, g, b] = variant.to_rgb();
-                let label = RichText::new(variant.label()).color(Color32::from_rgb(r, g, b));
-                if ui.button(label).clicked() {
-                    actions.color_action = Some((doc_idx, Some(variant)));
-                    ui.close();
+        if let Some(result) = render_pin_color_menu_items(ui, is_pinned) {
+            match result {
+                PinColorResult::TogglePin => {
+                    actions.pin_action = Some((doc_idx, !is_pinned));
+                }
+                PinColorResult::SetColor(color) => {
+                    actions.color_action = Some((doc_idx, color));
                 }
             }
-            ui.separator();
-            if ui.button("Clear Color").clicked() {
-                actions.color_action = Some((doc_idx, None));
-                ui.close();
-            }
-        });
+        }
     });
 }
 
@@ -1500,5 +1478,70 @@ mod tests {
         assert!(a.pin_action.is_none());
         assert!(a.color_action.is_none());
         assert!(!a.new_tab_in_pane);
+    }
+
+    // ── auto_scroll_offset ─────────────────────────────────────────
+
+    /// Helper: builds a scroll-area scenario.
+    ///
+    /// `inner_rect` is positioned at screen x=`inner_x` with the given
+    /// `visible_width`. `content_width` is the total scrollable content
+    /// width. The target tab rect has width 100 starting at screen x=`tab_screen_x`.
+    fn scroll_scenario(
+        inner_x: f32,
+        visible_width: f32,
+        content_width: f32,
+        offset: f32,
+        tab_screen_x: f32,
+    ) -> f32 {
+        let inner_rect =
+            Rect::from_min_size(Pos2::new(inner_x, 0.0), Vec2::new(visible_width, 32.0));
+        let target_rect = Rect::from_min_size(Pos2::new(tab_screen_x, 0.0), Vec2::new(100.0, 32.0));
+        auto_scroll_offset(target_rect, inner_rect, content_width, offset)
+    }
+
+    #[test]
+    fn auto_scroll_tab_already_visible_no_change() {
+        // Viewport at inner_x=0, visible_width=500, offset=0.
+        // Tab at screen x=100 → content_left=100, content_right=200.
+        // Both within [0, 500) → no change.
+        let result = scroll_scenario(0.0, 500.0, 1000.0, 0.0, 100.0);
+        assert_eq!(result, 0.0);
+    }
+
+    #[test]
+    fn auto_scroll_tab_left_of_viewport_scrolls_left() {
+        // Viewport at inner_x=0, visible_width=500, offset=300.
+        // Tab at screen x=-50 → content_left = -50 - 0 + 300 = 250 < 300.
+        // Should scroll left to (250 - TAB_PADDING).
+        let result = scroll_scenario(0.0, 500.0, 1000.0, 300.0, -50.0);
+        assert_eq!(result, 250.0 - TAB_PADDING);
+    }
+
+    #[test]
+    fn auto_scroll_tab_right_of_viewport_scrolls_right() {
+        // Viewport at inner_x=0, visible_width=300, offset=0.
+        // Tab at screen x=350 → content_right = 350 + 100 = 450 > 300.
+        // max_offset = 1000 - 300 = 700.
+        // new offset = (450 - 300 + TAB_PADDING) = 158 → clamped to 158.
+        let result = scroll_scenario(0.0, 300.0, 1000.0, 0.0, 350.0);
+        assert_eq!(result, (450.0 - 300.0 + TAB_PADDING).min(700.0));
+    }
+
+    #[test]
+    fn auto_scroll_left_clamps_to_zero() {
+        // Tab far to the left — scroll should not go negative.
+        let result = scroll_scenario(0.0, 500.0, 1000.0, 10.0, -500.0);
+        assert_eq!(result, 0.0);
+    }
+
+    #[test]
+    fn auto_scroll_right_clamps_to_max_offset() {
+        // Content barely wider than viewport.
+        // content_width=310, visible_width=300 → max_offset=10.
+        // Tab at screen x=305 → content_right = 405 > 300.
+        // new offset = (405 - 300 + TAB_PADDING) = 113, clamped to 10.
+        let result = scroll_scenario(0.0, 300.0, 310.0, 0.0, 305.0);
+        assert_eq!(result, 10.0);
     }
 }
