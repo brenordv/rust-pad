@@ -839,29 +839,156 @@ impl App {
     /// Renders a pane-aware tab strip showing only the documents owned by
     /// `pane`. Used by [`App::render_split_panes`] when split view is active.
     ///
-    /// Compared to [`App::show_tab_bar`], this version is intentionally
-    /// minimal: no horizontal overflow scrolling, no auto-scroll, no
-    /// cross-pane drag-and-drop reordering. The right-click context menu
-    /// adds "Move to Other Pane" so users can reassign tabs without DnD.
+    /// Includes horizontal scroll support with overflow detection, scroll
+    /// arrows, and auto-scroll to active tab — mirroring the main tab bar.
     pub(crate) fn show_pane_tab_bar(&mut self, ui: &mut egui::Ui, pane: PaneId) {
         let visuals = ui.visuals().clone();
         let order = self.tabs.pane_tab_order(pane);
         let active_doc = self.tabs.pane_active_doc(pane);
         let mut actions = PaneTabActions::default();
 
+        let pane_idx = match pane {
+            PaneId::Left => 0,
+            PaneId::Right => 1,
+        };
+
+        // Detect active tab change for auto-scroll.
+        let need_auto_scroll = self.prev_pane_active[pane_idx] != active_doc;
+        self.prev_pane_active[pane_idx] = active_doc;
+
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            for &doc_idx in &order {
-                self.render_pane_tab_button(ui, doc_idx, active_doc, &visuals, &mut actions);
+            let mut tab_rects: Vec<Rect> = Vec::with_capacity(order.len());
+
+            let arrows_width = if self.pane_tabs_overflow[pane_idx] {
+                ARROW_BUTTON_WIDTH * 2.0
+            } else {
+                0.0
+            };
+            let new_tab_btn_width = 24.0;
+            let reserved = arrows_width + new_tab_btn_width;
+            let scroll_max_width = (ui.available_width() - reserved).max(0.0);
+
+            ui.style_mut().always_scroll_the_only_direction = true;
+            let scroll_output = ScrollArea::horizontal()
+                .id_salt(format!("pane_tab_scroll_{pane_idx}"))
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .horizontal_scroll_offset(self.pane_tab_scroll_offset[pane_idx])
+                .max_width(scroll_max_width)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for &doc_idx in &order {
+                        let rect = self.render_pane_tab_button(
+                            ui,
+                            doc_idx,
+                            active_doc,
+                            &visuals,
+                            &mut actions,
+                        );
+                        tab_rects.push(rect);
+                    }
+                });
+
+            // Update scroll state.
+            self.pane_tab_scroll_offset[pane_idx] = scroll_output.state.offset.x;
+            self.pane_tabs_overflow[pane_idx] =
+                scroll_output.content_size.x > scroll_output.inner_rect.width();
+
+            // Auto-scroll to active tab on change.
+            if need_auto_scroll {
+                if let Some(pos) = order.iter().position(|&idx| idx == active_doc) {
+                    if let Some(active_rect) = tab_rects.get(pos).copied() {
+                        let visible_min = scroll_output.state.offset.x;
+                        let visible_width = scroll_output.inner_rect.width();
+                        let visible_max = visible_min + visible_width;
+                        let content_left =
+                            active_rect.min.x - scroll_output.inner_rect.min.x + visible_min;
+                        let content_right =
+                            active_rect.max.x - scroll_output.inner_rect.min.x + visible_min;
+
+                        if content_left < visible_min {
+                            self.pane_tab_scroll_offset[pane_idx] =
+                                (content_left - TAB_PADDING).max(0.0);
+                        } else if content_right > visible_max {
+                            let max_offset =
+                                (scroll_output.content_size.x - visible_width).max(0.0);
+                            self.pane_tab_scroll_offset[pane_idx] =
+                                (content_right - visible_width + TAB_PADDING).min(max_offset);
+                        }
+                    }
+                }
             }
+
+            // Scroll arrows when overflow.
+            if self.pane_tabs_overflow[pane_idx] {
+                let max_offset =
+                    (scroll_output.content_size.x - scroll_output.inner_rect.width()).max(0.0);
+                self.render_pane_scroll_arrows(ui, &visuals, max_offset, pane_idx);
+            }
+
             render_pane_new_tab_button(ui, &visuals, &mut actions);
         });
 
         self.apply_pane_tab_actions(pane, actions);
     }
 
+    /// Renders scroll arrows for a pane tab bar.
+    fn render_pane_scroll_arrows(
+        &mut self,
+        ui: &mut egui::Ui,
+        visuals: &Visuals,
+        max_offset: f32,
+        pane_idx: usize,
+    ) {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let offset = self.pane_tab_scroll_offset[pane_idx];
+        let at_start = offset <= 0.0;
+        let at_end = offset >= max_offset;
+
+        let left_color = if at_start {
+            visuals
+                .widgets
+                .noninteractive
+                .fg_stroke
+                .color
+                .gamma_multiply(0.3)
+        } else {
+            visuals.widgets.noninteractive.fg_stroke.color
+        };
+        let left_btn = egui::Button::new(RichText::new("\u{25C0}").color(left_color).size(10.0))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
+
+        if ui.add(left_btn).clicked() && !at_start {
+            self.pane_tab_scroll_offset[pane_idx] =
+                (self.pane_tab_scroll_offset[pane_idx] - SCROLL_STEP).max(0.0);
+        }
+
+        let right_color = if at_end {
+            visuals
+                .widgets
+                .noninteractive
+                .fg_stroke
+                .color
+                .gamma_multiply(0.3)
+        } else {
+            visuals.widgets.noninteractive.fg_stroke.color
+        };
+        let right_btn = egui::Button::new(RichText::new("\u{25B6}").color(right_color).size(10.0))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .min_size(Vec2::new(ARROW_BUTTON_WIDTH, TAB_HEIGHT));
+
+        if ui.add(right_btn).clicked() && !at_end {
+            self.pane_tab_scroll_offset[pane_idx] =
+                (self.pane_tab_scroll_offset[pane_idx] + SCROLL_STEP).min(max_offset);
+        }
+    }
+
     /// Renders a single tab button for the per-pane tab bar.
     ///
+    /// Returns the allocated `Rect` for auto-scroll calculations.
     /// Updates `actions` rather than mutating tab state directly so the
     /// caller can defer all mutations until after the rendering loop has
     /// stopped iterating over `pane_tab_order`.
@@ -872,7 +999,7 @@ impl App {
         active_doc: usize,
         visuals: &Visuals,
         actions: &mut PaneTabActions,
-    ) {
+    ) -> Rect {
         let doc = &self.tabs.documents[doc_idx];
         let is_active = doc_idx == active_doc;
         let (title_galley, title_color, tab_size) = layout_tab_title(ui, visuals, doc, is_active);
@@ -908,6 +1035,8 @@ impl App {
         // omitted since they don't have an obvious pane scope in v1.
         let is_pinned = self.tabs.documents[doc_idx].pinned;
         render_pane_tab_context_menu(doc_idx, is_pinned, &response, actions);
+
+        tab_rect
     }
 
     /// Applies the deferred actions collected during the per-pane tab bar

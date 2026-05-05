@@ -59,6 +59,11 @@ struct LineSegmentInfo<'a> {
     scroll_x: f32,
     /// When `Some(idx)`, enables galley caching for this line index.
     cache_line_idx: Option<usize>,
+    /// Full logical line content for syntax highlighting context (wrapped mode only).
+    /// When set, the highlighter processes the full line and clips to this segment.
+    full_line_for_highlight: Option<&'a str>,
+    /// Byte offset of this segment within `full_line_for_highlight`.
+    segment_byte_start: usize,
 }
 
 struct FrameLayout {
@@ -219,13 +224,19 @@ impl<'a> EditorWidget<'a> {
         let font_id = FontId::monospace(self.theme.font_size * self.doc.zoom_level);
         let gutter_width = self.compute_gutter_width(ui, &font_id);
         let char_width = self.measure_char_width(ui, &font_id);
+        // Always subtract SCROLLBAR_WIDTH when word wrap is active. This is
+        // the stable choice: narrower text → more visual lines → scrollbar
+        // confirmed. Using the same constant in both initial and rebuild
+        // eliminates chars_per_line oscillation that causes flickering.
         let exact_text_width = rect.width() - gutter_width - SCROLLBAR_WIDTH;
         let chars_per_line = (exact_text_width / char_width).floor().max(1.0) as usize;
         Some(WrapMap::build(self.doc, chars_per_line))
     }
 
     fn rebuild_wrap_map(&self, rect: Rect, layout: &FrameLayout) -> Option<WrapMap> {
-        let exact_text_width = rect.width() - layout.gutter_width - layout.vscroll_width;
+        // Always use SCROLLBAR_WIDTH (not layout.vscroll_width) to match
+        // build_initial_wrap_map and prevent oscillation between frames.
+        let exact_text_width = rect.width() - layout.gutter_width - SCROLLBAR_WIDTH;
         let chars_per_line = (exact_text_width / layout.char_width).floor().max(1.0) as usize;
         Some(WrapMap::build(self.doc, chars_per_line))
     }
@@ -629,9 +640,9 @@ impl<'a> EditorWidget<'a> {
                 last_visual,
                 Some(wm),
             );
-            let (first_log, _) = wm.visual_to_logical(first_visual);
-            let (last_log, _) = wm.visual_to_logical(last_visual.saturating_sub(1));
-            (first_log, last_log)
+            // Use visual line indices for pruning — matches the cache keys
+            // used in render_lines_wrapped (visual_line as key).
+            (first_visual, last_visual.saturating_sub(1))
         } else {
             let first_visible_line = self.doc.scroll_y as usize;
             let last_visible_line =
@@ -944,6 +955,8 @@ impl<'a> EditorWidget<'a> {
                 text_pos,
                 &render_content,
                 info.cache_line_idx,
+                info.full_line_for_highlight,
+                info.segment_byte_start,
             );
         }
 
@@ -1115,7 +1128,10 @@ impl<'a> EditorWidget<'a> {
 
     /// Renders text with syntax highlighting and optional galley caching.
     ///
-    /// Uses early returns to flatten the nested highlighter/cache logic.
+    /// When `full_line_for_highlight` is provided (wrapped mode), the full
+    /// logical line is highlighted for correct syntax context, then the
+    /// LayoutJob is clipped to the segment's byte range.
+    #[allow(clippy::too_many_arguments)]
     fn render_highlighted_text(
         &mut self,
         ui: &mut Ui,
@@ -1124,6 +1140,8 @@ impl<'a> EditorWidget<'a> {
         text_pos: Pos2,
         render_content: &str,
         cache_line_idx: Option<usize>,
+        full_line_for_highlight: Option<&str>,
+        segment_byte_start: usize,
     ) {
         let text_color = self.theme.text_color;
 
@@ -1138,7 +1156,7 @@ impl<'a> EditorWidget<'a> {
             return;
         };
 
-        // Try galley cache for non-wrapped lines.
+        // Try galley cache.
         let content_hash = hash_str(render_content);
         if let Some(line_idx) = cache_line_idx {
             let cached = {
@@ -1164,9 +1182,25 @@ impl<'a> EditorWidget<'a> {
             return;
         };
 
-        let line_with_nl = format!("{render_content}\n");
-        let job = highlighter.highlight_line(&line_with_nl, syntax, &mut hl, font_id);
-        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        let galley = if let Some(full_line) = full_line_for_highlight {
+            // Wrapped mode: highlight the full logical line for correct syntax
+            // context, then clip the resulting spans to this segment's range.
+            let full_with_nl = format!("{full_line}\n");
+            let spans = highlighter.highlight_line_spans(&full_with_nl, syntax, &mut hl);
+            let segment_byte_end = segment_byte_start + render_content.len();
+            let job = Self::build_clipped_layout_job(
+                &spans,
+                segment_byte_start,
+                segment_byte_end,
+                font_id,
+            );
+            ui.fonts_mut(|f| f.layout_job(job))
+        } else {
+            // Non-wrapped: highlight just this line directly.
+            let line_with_nl = format!("{render_content}\n");
+            let job = highlighter.highlight_line(&line_with_nl, syntax, &mut hl, font_id);
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
 
         // Store in cache when applicable.
         if let Some(line_idx) = cache_line_idx {
@@ -1175,6 +1209,48 @@ impl<'a> EditorWidget<'a> {
         }
 
         painter.galley(text_pos, galley, Color32::WHITE);
+    }
+
+    /// Builds a `LayoutJob` from highlighted spans clipped to a byte sub-range.
+    ///
+    /// Walks the spans (which cover the full line), accumulates byte offsets,
+    /// and includes only the portions that overlap `[byte_start, byte_end)`.
+    fn build_clipped_layout_job(
+        spans: &[(Color32, String)],
+        byte_start: usize,
+        byte_end: usize,
+        font_id: &FontId,
+    ) -> LayoutJob {
+        let mut job = LayoutJob::default();
+        let mut offset: usize = 0;
+
+        for (color, text) in spans {
+            let span_start = offset;
+            let span_end = offset + text.len();
+            offset = span_end;
+
+            // Skip spans entirely before or after the segment range.
+            if span_end <= byte_start || span_start >= byte_end {
+                continue;
+            }
+
+            // Clip span to the segment range.
+            let clip_start = span_start.max(byte_start) - span_start;
+            let clip_end = span_end.min(byte_end) - span_start;
+            let clipped = &text[clip_start..clip_end];
+
+            job.append(
+                clipped,
+                0.0,
+                TextFormat {
+                    font_id: font_id.clone(),
+                    color: *color,
+                    ..Default::default()
+                },
+            );
+        }
+
+        job
     }
 
     /// Renders the gutter for a line: current-line highlight, change tracking, line number.
@@ -1322,6 +1398,8 @@ impl<'a> EditorWidget<'a> {
                 line_has_newline,
                 scroll_x,
                 cache_line_idx: Some(line_idx),
+                full_line_for_highlight: None,
+                segment_byte_start: 0,
             };
 
             self.render_line_segment(
@@ -1529,8 +1607,13 @@ impl<'a> EditorWidget<'a> {
                     .map(rope_slice_ends_with_newline)
                     .unwrap_or(false);
 
-            // Wrapped mode doesn't use galley caching
-            let cache_line_idx = None;
+            // Use visual_line as cache key for wrapped segments.
+            // Content-hash validation ensures correctness across edits.
+            let cache_line_idx = Some(visual_line);
+
+            // Tab-replace the full line for highlighting context (tabs are
+            // 1 byte → 1 byte so byte offsets are preserved).
+            let full_line_replaced = line_content.replace('\t', " ");
 
             let info = LineSegmentInfo {
                 line_y,
@@ -1540,6 +1623,8 @@ impl<'a> EditorWidget<'a> {
                 line_has_newline,
                 scroll_x: 0.0,
                 cache_line_idx,
+                full_line_for_highlight: Some(&full_line_replaced),
+                segment_byte_start: byte_start,
             };
 
             self.render_line_segment(
@@ -1813,6 +1898,8 @@ mod tests {
             line_has_newline: true,
             scroll_x: 5.0,
             cache_line_idx: Some(0),
+            full_line_for_highlight: None,
+            segment_byte_start: 0,
         };
         assert_eq!(info.content, "hello world");
         assert_eq!(info.segment_char_end - info.segment_char_start, 11);
@@ -1830,6 +1917,8 @@ mod tests {
             line_has_newline: false,
             scroll_x: 0.0,
             cache_line_idx: None,
+            full_line_for_highlight: Some("hello world"),
+            segment_byte_start: 6,
         };
         assert_eq!(info.segment_char_end - info.segment_char_start, 5);
         assert!(!info.line_has_newline);

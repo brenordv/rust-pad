@@ -70,6 +70,26 @@ impl SyntaxHighlighter {
         job
     }
 
+    /// Highlights a line and returns raw `(Color32, text)` spans.
+    ///
+    /// Used by the wrapped rendering path to highlight the full logical line
+    /// once and then extract per-segment colors.
+    pub fn highlight_line_spans(
+        &self,
+        line: &str,
+        _syntax: &SyntaxReference,
+        highlighter: &mut HighlightLines<'_>,
+    ) -> Vec<(Color32, String)> {
+        let ranges = highlighter
+            .highlight_line(line, &self.syntax_set)
+            .unwrap_or_default();
+
+        ranges
+            .into_iter()
+            .map(|(style, text)| (syntect_color_to_egui(style), text.to_string()))
+            .collect()
+    }
+
     /// Creates a new highlighter instance for line-by-line highlighting.
     pub fn create_highlighter(&self, syntax: &SyntaxReference) -> Option<HighlightLines<'_>> {
         let theme = self.theme_set.themes.get(&self.current_theme)?;

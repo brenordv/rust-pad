@@ -134,6 +134,9 @@ pub struct Document {
     pub live_monitoring: bool,
     /// Last known file modification time, for change detection.
     pub last_known_mtime: Option<std::time::SystemTime>,
+    /// Whether an external file change has been detected but not yet acted on.
+    /// When true, the UI shows a prompt asking the user to reload or keep.
+    pub external_change_detected: bool,
     /// Monotonically increasing version counter, bumped on every buffer mutation.
     /// Used by UI caches (wrap map, occurrence highlights, etc.) to detect changes
     /// without comparing content.
@@ -220,6 +223,7 @@ impl Document {
             last_saved_at: None,
             live_monitoring: false,
             last_known_mtime: None,
+            external_change_detected: false,
             content_version: 0,
             cached_max_line_chars: None,
             cached_occurrences: None,

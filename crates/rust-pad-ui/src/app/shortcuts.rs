@@ -19,6 +19,11 @@ impl App {
             || self.problems_open
             || !matches!(self.dialog_state, DialogState::None)
             || self.io_activity.dialog_open
+            || self
+                .tabs
+                .documents
+                .iter()
+                .any(|d| d.external_change_detected)
     }
 
     /// Returns true if any dialog is currently open (modal or non-modal).

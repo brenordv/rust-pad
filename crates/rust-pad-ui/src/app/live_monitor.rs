@@ -20,7 +20,11 @@ impl LiveMonitorController {
         }
     }
 
-    /// Checks all live-monitored documents for external file changes and reloads them.
+    /// Checks all documents with file paths for external changes.
+    ///
+    /// Live-monitored documents are auto-reloaded (tail behavior).
+    /// Non-monitored documents are flagged via `external_change_detected`
+    /// so the UI can prompt the user.
     ///
     /// Only runs at most once per second. When `max_file_size_bytes` is `Some`,
     /// files exceeding the limit are skipped during reload.
@@ -29,9 +33,6 @@ impl LiveMonitorController {
             return;
         }
         for doc in &mut tabs.documents {
-            if !doc.live_monitoring {
-                continue;
-            }
             let path = match &doc.file_path {
                 Some(p) => p.clone(),
                 None => continue,
@@ -42,9 +43,21 @@ impl LiveMonitorController {
             };
             let changed = match doc.last_known_mtime {
                 Some(known) => current_mtime > known,
-                None => true,
+                None => {
+                    if doc.live_monitoring {
+                        true
+                    } else {
+                        // No baseline for non-monitored docs — record mtime and skip.
+                        doc.last_known_mtime = Some(current_mtime);
+                        false
+                    }
+                }
             };
-            if changed {
+            if !changed {
+                continue;
+            }
+
+            if doc.live_monitoring {
                 if let Err(e) = doc.reload_from_disk(max_file_size_bytes) {
                     let msg = format!("Live reload failed for '{}': {e:#}", doc.title);
                     tracing::warn!("{msg}");
@@ -56,6 +69,9 @@ impl LiveMonitorController {
                     doc.cursor.position = rust_pad_core::cursor::Position::new(last_line, 0);
                     doc.scroll_to_cursor = true;
                 }
+            } else if !doc.external_change_detected {
+                // Flag for user prompt (don't re-flag if already pending).
+                doc.external_change_detected = true;
             }
         }
         self.last_check = Instant::now();

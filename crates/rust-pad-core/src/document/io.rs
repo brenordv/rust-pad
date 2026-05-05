@@ -126,6 +126,7 @@ impl Document {
             last_saved_at: None,
             live_monitoring: false,
             last_known_mtime: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+            external_change_detected: false,
             content_version: 0,
             cached_max_line_chars: None,
             cached_occurrences: None,
