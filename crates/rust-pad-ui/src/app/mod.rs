@@ -1750,6 +1750,14 @@ mod tests {
     }
 
     #[test]
+    fn test_is_modal_dialog_open_includes_external_change_detected() {
+        let mut app = test_app();
+        assert!(!app.is_modal_dialog_open());
+        app.tabs.active_doc_mut().external_change_detected = true;
+        assert!(app.is_modal_dialog_open());
+    }
+
+    #[test]
     fn test_editing_blocked_during_io_dialog() {
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("original");

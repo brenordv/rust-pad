@@ -1544,4 +1544,98 @@ mod tests {
         let result = scroll_scenario(0.0, 300.0, 310.0, 0.0, 305.0);
         assert_eq!(result, 10.0);
     }
+
+    // ── apply_pane_tab_actions ──────────────────────────────────────
+
+    use super::super::tests::test_app;
+    use crate::tabs::PaneId;
+
+    #[test]
+    fn apply_pane_tab_actions_switch_to() {
+        let mut app = test_app();
+        // Create a second tab so we can switch.
+        app.new_tab();
+        let actions = PaneTabActions {
+            switch_to: Some(0),
+            ..Default::default()
+        };
+        app.apply_pane_tab_actions(PaneId::Left, actions);
+        // switch_pane_to + focus_pane were called — verify no panic.
+    }
+
+    #[test]
+    fn apply_pane_tab_actions_pin() {
+        let mut app = test_app();
+        let actions = PaneTabActions {
+            pin_action: Some((0, true)),
+            ..Default::default()
+        };
+        app.apply_pane_tab_actions(PaneId::Left, actions);
+        assert!(app.tabs.documents[0].pinned);
+    }
+
+    #[test]
+    fn apply_pane_tab_actions_unpin() {
+        let mut app = test_app();
+        app.tabs.documents[0].pinned = true;
+        let actions = PaneTabActions {
+            pin_action: Some((0, false)),
+            ..Default::default()
+        };
+        app.apply_pane_tab_actions(PaneId::Left, actions);
+        assert!(!app.tabs.documents[0].pinned);
+    }
+
+    #[test]
+    fn apply_pane_tab_actions_set_color() {
+        let mut app = test_app();
+        let actions = PaneTabActions {
+            color_action: Some((0, Some(TabColor::Red))),
+            ..Default::default()
+        };
+        app.apply_pane_tab_actions(PaneId::Left, actions);
+        assert_eq!(app.tabs.documents[0].tab_color, Some(TabColor::Red));
+    }
+
+    #[test]
+    fn apply_pane_tab_actions_clear_color() {
+        let mut app = test_app();
+        app.tabs.documents[0].tab_color = Some(TabColor::Blue);
+        let actions = PaneTabActions {
+            color_action: Some((0, None)),
+            ..Default::default()
+        };
+        app.apply_pane_tab_actions(PaneId::Left, actions);
+        assert_eq!(app.tabs.documents[0].tab_color, None);
+    }
+
+    #[test]
+    fn apply_pane_tab_actions_new_tab_in_pane() {
+        let mut app = test_app();
+        let before_count = app.tabs.tab_count();
+        let actions = PaneTabActions {
+            new_tab_in_pane: true,
+            ..Default::default()
+        };
+        app.apply_pane_tab_actions(PaneId::Right, actions);
+        assert_eq!(app.tabs.tab_count(), before_count + 1);
+    }
+
+    // ── apply_pin_action ────────────────────────────────────────────
+
+    #[test]
+    fn apply_pin_action_pins_tab() {
+        let mut app = test_app();
+        assert!(!app.tabs.documents[0].pinned);
+        app.apply_pin_action(0, true);
+        assert!(app.tabs.documents[0].pinned);
+    }
+
+    #[test]
+    fn apply_pin_action_unpins_tab() {
+        let mut app = test_app();
+        app.tabs.documents[0].pinned = true;
+        app.apply_pin_action(0, false);
+        assert!(!app.tabs.documents[0].pinned);
+    }
 }
