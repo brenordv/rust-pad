@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.4.4]
+
+### Fixed
+
+- Fixed syntax highlighting breaking across wrapped lines. Each wrapped segment was highlighted independently without context from the rest of the logical line, causing incorrect colors at wrap boundaries. The full line is now highlighted once and clipped to each segment's byte range.
+- Fixed word-wrap flickering caused by `chars_per_line` oscillating between frames. The initial wrap map used `SCROLLBAR_WIDTH` while the rebuild path used `layout.vscroll_width`, which could differ. Both now consistently use the `SCROLLBAR_WIDTH` constant.
+- Enabled galley caching for wrapped lines. Previously wrapped segments always bypassed the cache (`cache_line_idx` was `None`), causing redundant layout work every frame.
+- Fixed galley cache pruning using logical line indices instead of visual line indices, which caused cache misses in wrapped mode.
+- Added external file change detection for all open documents (not just live-monitored ones). When a file is modified outside the editor, a dialog now prompts the user to reload or keep their version.
+- Added horizontal scroll support (overflow arrows, auto-scroll to active tab) to the split-pane tab bar, matching the main tab bar behavior.
+
 ## [2.4.3]
 
 ### Fixed

@@ -6,6 +6,7 @@ mod clipboard;
 mod context_menu;
 mod drag_drop;
 mod editing;
+mod external_change_dialog;
 mod file_dialog_state;
 mod file_ops;
 mod live_monitor;
@@ -148,6 +149,12 @@ pub struct App {
     closing_all: bool,
     /// Active tab drag-and-drop state (`None` when no drag is in progress).
     pub(crate) tab_drag: Option<tab_bar::TabDragState>,
+    /// Per-pane tab scroll offsets (left/right pane).
+    pub(crate) pane_tab_scroll_offset: [f32; 2],
+    /// Per-pane tab overflow flags (left/right pane).
+    pub(crate) pane_tabs_overflow: [bool; 2],
+    /// Previous active doc per pane for auto-scroll detection.
+    pub(crate) prev_pane_active: [usize; 2],
     /// Background worker that renders PDFs for the "Print..." and
     /// "Export as PDF..." actions.
     pub(crate) print_worker: print::PrintWorker,
@@ -349,6 +356,9 @@ impl App {
             prev_tab_count: 0,
             closing_all: false,
             tab_drag: None,
+            pane_tab_scroll_offset: [0.0; 2],
+            pane_tabs_overflow: [false; 2],
+            prev_pane_active: [0; 2],
             print_worker: print::PrintWorker::new(),
             print_in_progress: false,
             print_show_line_numbers: app_config.print_show_line_numbers,
@@ -651,6 +661,7 @@ impl App {
         self.show_confirm_large_file_dialog(ctx);
         self.show_file_open_error_dialog(ctx);
         self.show_print_error_dialog(ctx);
+        self.show_external_change_dialog(ctx);
         self.show_settings_dialog(ctx);
 
         if self.about_open {
@@ -1221,6 +1232,9 @@ mod tests {
             prev_tab_count: 0,
             closing_all: false,
             tab_drag: None,
+            pane_tab_scroll_offset: [0.0; 2],
+            pane_tabs_overflow: [false; 2],
+            prev_pane_active: [0; 2],
             print_worker: print::PrintWorker::new(),
             print_in_progress: false,
             print_show_line_numbers: true,
@@ -1732,6 +1746,14 @@ mod tests {
     fn test_is_modal_dialog_open_includes_io_dialog() {
         let mut app = test_app();
         app.io_activity.dialog_open = true;
+        assert!(app.is_modal_dialog_open());
+    }
+
+    #[test]
+    fn test_is_modal_dialog_open_includes_external_change_detected() {
+        let mut app = test_app();
+        assert!(!app.is_modal_dialog_open());
+        app.tabs.active_doc_mut().external_change_detected = true;
         assert!(app.is_modal_dialog_open());
     }
 
