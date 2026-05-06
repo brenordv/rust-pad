@@ -14,6 +14,7 @@ const CONFIG_FILE_NAME: &str = "rust-pad.json";
 const SESSION_FILE_NAME: &str = "rust-pad-session.redb";
 const HISTORY_FILE_NAME: &str = "history.redb";
 const PROBLEM_LOG_FILE_NAME: &str = "rust-pad-problems.redb";
+const WORKSPACE_FILE_NAME: &str = "rust-pad-workspaces.redb";
 
 /// Legacy sub-directory name for history data (next to the executable).
 const LEGACY_HISTORY_DIR: &str = ".data";
@@ -65,6 +66,11 @@ pub fn session_file_path() -> PathBuf {
 /// Returns the full path for the problem-log database.
 pub fn problem_log_file_path() -> PathBuf {
     app_data_dir().join(PROBLEM_LOG_FILE_NAME)
+}
+
+/// Returns the full path for the workspace database.
+pub fn workspace_file_path() -> PathBuf {
+    app_data_dir().join(WORKSPACE_FILE_NAME)
 }
 
 /// Returns the directory where the history database lives.
@@ -131,6 +137,11 @@ pub fn portable_session_file_path() -> PathBuf {
 /// Returns the problem-log file path next to the executable (portable mode).
 pub fn portable_problem_log_file_path() -> PathBuf {
     exe_dir().join(PROBLEM_LOG_FILE_NAME)
+}
+
+/// Returns the workspace file path next to the executable (portable mode).
+pub fn portable_workspace_file_path() -> PathBuf {
+    exe_dir().join(WORKSPACE_FILE_NAME)
 }
 
 /// Returns the history data directory next to the executable (portable mode).

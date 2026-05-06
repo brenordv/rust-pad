@@ -22,6 +22,7 @@ mod status_bar;
 mod sync_scroll;
 mod tab_bar;
 mod theme_controller;
+mod workspace_ops;
 
 pub use auto_save::AutoSaveController;
 pub use file_dialog_state::FileDialogState;
@@ -188,6 +189,10 @@ pub struct App {
     pub(crate) problems_unread: usize,
     /// Whether the Problems dialog is currently visible.
     pub(crate) problems_open: bool,
+    /// Workspace sidebar state (tree, watcher, visibility).
+    pub workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar,
+    /// Workspace persistence store (redb-backed).
+    pub(crate) workspace_store: Option<rust_pad_config::WorkspaceStore>,
 }
 
 #[derive(Debug, Default)]
@@ -300,6 +305,8 @@ impl App {
         Self::open_startup_files(&mut tabs, &args);
 
         let max_file_size_bytes = app_config.max_file_size_bytes();
+        let ws_sidebar_visible = app_config.workspace_sidebar_visible;
+        let ws_sidebar_width = app_config.workspace_sidebar_width;
 
         // Best-effort cleanup of stale temp PDFs from previous sessions.
         Self::cleanup_stale_print_temp_files();
@@ -369,11 +376,19 @@ impl App {
             sync_scroll_last: None,
             problems_unread,
             problems_open: false,
+            workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar::new(),
+            workspace_store: Self::init_workspace_store(args.portable),
         };
 
         // Reapply persisted split-view layout once the App is fully built.
         if let Some(split) = restored_split {
             app.apply_session_split(&split);
+        }
+
+        // Restore workspace sidebar state from config.
+        app.workspace_sidebar.set_width(ws_sidebar_width);
+        if ws_sidebar_visible {
+            app.restore_workspace_on_startup();
         }
 
         app
@@ -933,6 +948,10 @@ impl eframe::App for App {
         // Prevent egui's built-in Ctrl+scroll zoom — we handle zoom ourselves
         ctx.set_zoom_factor(1.0);
 
+        // Clear the one-frame rename confirmation flag from the previous frame.
+        // Must happen before handle_global_shortcuts which checks rename_buffer.
+        self.workspace_sidebar.rename_just_confirmed = false;
+
         self.handle_global_shortcuts(&ctx);
         self.handle_dropped_files(&ctx);
 
@@ -981,9 +1000,27 @@ impl eframe::App for App {
                 self.show_status_bar(ui);
             });
 
+        // Workspace sidebar (left panel)
+        let sidebar_action = if self.workspace_sidebar.is_visible() {
+            let width = self.workspace_sidebar.width();
+            egui::Panel::left("workspace_sidebar")
+                .resizable(true)
+                .default_size(width)
+                .size_range(150.0..=500.0)
+                .show_inside(ui, |ui| self.workspace_sidebar.show(ui))
+                .inner
+        } else {
+            crate::workspace::sidebar::SidebarAction::None
+        };
+        if sidebar_action != crate::workspace::sidebar::SidebarAction::None {
+            self.handle_sidebar_action(sidebar_action);
+        }
+
         // Editor area
-        let dialog_open = self.is_dialog_open();
-        let modal_dialog_open = self.is_modal_dialog_open();
+        let workspace_renaming = self.workspace_sidebar.rename_buffer.is_some()
+            || self.workspace_sidebar.rename_just_confirmed;
+        let dialog_open = self.is_dialog_open() || workspace_renaming;
+        let modal_dialog_open = self.is_modal_dialog_open() || workspace_renaming;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme_ctrl.theme.bg_color))
             .show_inside(ui, |ui| {
@@ -1039,6 +1076,9 @@ impl eframe::App for App {
         self.live_monitor
             .tick(&mut self.tabs, self.max_file_size_bytes);
 
+        // Workspace filesystem watcher: apply pending events to the tree
+        self.tick_workspace_watcher();
+
         // Periodic flush of undo history to disk
         if self.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
             self.tabs.flush_all_history();
@@ -1052,11 +1092,12 @@ impl eframe::App for App {
         self.problems_unread = crate::problem_log::unread_count();
 
         let has_live_monitoring = self.tabs.documents.iter().any(|d| d.live_monitoring);
+        let has_workspace_watcher = self.workspace_sidebar.watcher.is_some();
         let has_pending_io = self.io_activity.is_busy();
         let next_repaint = if has_pending_io {
             // Poll more frequently while I/O is in flight
             Duration::from_millis(100)
-        } else if has_live_monitoring {
+        } else if has_live_monitoring || has_workspace_watcher {
             Duration::from_secs(1)
         } else if let Some(interval) = self.auto_save.repaint_interval() {
             interval.min(Duration::from_secs(FLUSH_INTERVAL_SECS))
@@ -1153,6 +1194,8 @@ impl eframe::App for App {
             print_show_line_numbers: self.print_show_line_numbers,
             sync_scroll_enabled: self.sync_scroll_enabled,
             sync_scroll_horizontal: self.sync_scroll_horizontal,
+            workspace_sidebar_visible: self.workspace_sidebar.visible,
+            workspace_sidebar_width: self.workspace_sidebar.width,
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
@@ -1245,6 +1288,8 @@ mod tests {
             sync_scroll_last: None,
             problems_unread: 0,
             problems_open: false,
+            workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar::new(),
+            workspace_store: None,
         }
     }
 

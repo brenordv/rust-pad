@@ -45,3 +45,5 @@ pdf-writer = "0.14.0"
 ttf-parser = "0.25.1"
 opener = { version = "0.8.4", features = ["reveal"] }
 uuid = { version = "1.23.1", features = ["v4"] }
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+notify-debouncer-mini = "0.6"
