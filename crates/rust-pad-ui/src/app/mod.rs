@@ -22,7 +22,7 @@ mod status_bar;
 mod sync_scroll;
 mod tab_bar;
 mod theme_controller;
-mod workspace_ops;
+pub(crate) mod workspace_ops;
 
 pub use auto_save::AutoSaveController;
 pub use file_dialog_state::FileDialogState;
@@ -193,6 +193,9 @@ pub struct App {
     pub workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar,
     /// Workspace persistence store (redb-backed).
     pub(crate) workspace_store: Option<rust_pad_config::WorkspaceStore>,
+    /// Cached workspace list (id, name) to avoid DB reads every frame.
+    /// Invalidated after workspace create/delete/rename operations.
+    pub(crate) cached_workspace_list: Option<Vec<(String, String)>>,
 }
 
 #[derive(Debug, Default)]
@@ -378,6 +381,7 @@ impl App {
             problems_open: false,
             workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar::new(),
             workspace_store: Self::init_workspace_store(args.portable),
+            cached_workspace_list: None,
         };
 
         // Reapply persisted split-view layout once the App is fully built.
@@ -1002,6 +1006,8 @@ impl eframe::App for App {
 
         // Workspace sidebar (left panel)
         let sidebar_action = if self.workspace_sidebar.is_visible() {
+            // Populate workspace list from cache (refreshed only after mutations)
+            self.workspace_sidebar.available_workspaces = self.get_cached_workspace_list().clone();
             let width = self.workspace_sidebar.width();
             egui::Panel::left("workspace_sidebar")
                 .resizable(true)
@@ -1017,10 +1023,12 @@ impl eframe::App for App {
         }
 
         // Editor area
-        let workspace_renaming = self.workspace_sidebar.rename_buffer.is_some()
-            || self.workspace_sidebar.rename_just_confirmed;
-        let dialog_open = self.is_dialog_open() || workspace_renaming;
-        let modal_dialog_open = self.is_modal_dialog_open() || workspace_renaming;
+        let workspace_editing = self.workspace_sidebar.rename_buffer.is_some()
+            || self.workspace_sidebar.rename_just_confirmed
+            || self.workspace_sidebar.new_entry.is_some()
+            || self.workspace_sidebar.rename_entry.is_some();
+        let dialog_open = self.is_dialog_open() || workspace_editing;
+        let modal_dialog_open = self.is_modal_dialog_open() || workspace_editing;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme_ctrl.theme.bg_color))
             .show_inside(ui, |ui| {
@@ -1290,6 +1298,7 @@ mod tests {
             problems_open: false,
             workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar::new(),
             workspace_store: None,
+            cached_workspace_list: None,
         }
     }
 

@@ -19,10 +19,15 @@ use notify_debouncer_mini::{new_debouncer, DebounceEventResult, DebouncedEventKi
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsEvent {
     /// A file or directory was created.
+    ///
+    /// Note: this variant is only produced by manual tree updates in
+    /// `workspace_ops` (e.g., after creating a file or applying a rename).
+    /// The filesystem watcher itself never emits `Created` — new paths
+    /// surface as `Modified` (since the debouncer only sees that the path exists).
     Created(PathBuf),
     /// A file or directory was removed.
     Removed(PathBuf),
-    /// A file was modified (content change).
+    /// A file or directory was modified, or a new path was detected by the watcher.
     Modified(PathBuf),
 }
 
@@ -172,6 +177,25 @@ mod tests {
             _ => false,
         });
         assert!(has_our_file, "Events should reference the created file");
+    }
+
+    #[test]
+    fn test_fs_event_clone_and_eq() {
+        let event = FsEvent::Created(PathBuf::from("/a/b"));
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+
+        let modified = FsEvent::Modified(PathBuf::from("/c"));
+        let removed = FsEvent::Removed(PathBuf::from("/c"));
+        assert_ne!(modified, removed);
+    }
+
+    #[test]
+    fn test_fs_event_debug_format() {
+        let event = FsEvent::Created(PathBuf::from("/test"));
+        let debug = format!("{event:?}");
+        assert!(debug.contains("Created"));
+        assert!(debug.contains("test"));
     }
 
     #[test]

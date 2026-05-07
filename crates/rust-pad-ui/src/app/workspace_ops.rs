@@ -10,8 +10,38 @@ use rust_pad_config::{WorkspaceEntry, WorkspaceStore};
 use super::App;
 use crate::workspace::scanner::scan_directory;
 use crate::workspace::sidebar::SidebarAction;
-use crate::workspace::tree::FolderRoot;
-use crate::workspace::watcher::WorkspaceWatcher;
+use crate::workspace::tree::{FolderRoot, TreeEntry};
+use crate::workspace::watcher::{FsEvent, WorkspaceWatcher};
+
+/// Generates a unique filename or folder name within `parent` that avoids collisions.
+///
+/// Given a base name like "new_file.txt", returns "new_file.txt" if unused,
+/// otherwise "new_file 2.txt", "new_file 3.txt", etc.
+/// For directories (is_dir=true), appends " 2", " 3", etc. without extension logic.
+pub(crate) fn generate_unique_name(parent: &Path, base: &str, is_dir: bool) -> String {
+    if !parent.join(base).exists() {
+        return base.to_string();
+    }
+    let (stem, ext) = if is_dir {
+        (base, "")
+    } else {
+        match base.rsplit_once('.') {
+            Some((s, e)) => (s, e),
+            None => (base, ""),
+        }
+    };
+    for i in 2u32.. {
+        let candidate = if ext.is_empty() {
+            format!("{stem} {i}")
+        } else {
+            format!("{stem} {i}.{ext}")
+        };
+        if !parent.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    base.to_string()
+}
 
 /// Generates a unique workspace name by checking existing names.
 ///
@@ -35,7 +65,37 @@ fn generate_workspace_name(existing: &[WorkspaceEntry]) -> String {
     base.to_string()
 }
 
+/// Scans a directory if it exists, returning an empty list on failure or non-directory paths.
+fn scan_dir_safe(folder_path: &Path) -> Vec<TreeEntry> {
+    if folder_path.is_dir() {
+        scan_directory(folder_path).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
 impl App {
+    /// Returns the cached workspace list, refreshing it from the DB if stale.
+    pub(crate) fn get_cached_workspace_list(&mut self) -> &Vec<(String, String)> {
+        if self.cached_workspace_list.is_none() {
+            let list = self
+                .workspace_store
+                .as_ref()
+                .and_then(|s| s.list_workspaces().ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|ws| (ws.id, ws.name))
+                .collect();
+            self.cached_workspace_list = Some(list);
+        }
+        self.cached_workspace_list.as_ref().unwrap()
+    }
+
+    /// Invalidates the cached workspace list, forcing a DB re-read next access.
+    fn invalidate_workspace_cache(&mut self) {
+        self.cached_workspace_list = None;
+    }
+
     /// Initializes the workspace store. Called during App construction.
     pub(crate) fn init_workspace_store(portable: bool) -> Option<WorkspaceStore> {
         let path = if portable {
@@ -52,6 +112,27 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Activates a workspace in the sidebar (shared setup for create/open).
+    fn activate_sidebar(
+        &mut self,
+        id: String,
+        name: String,
+        tree: Vec<FolderRoot>,
+        watcher: Option<WorkspaceWatcher>,
+    ) {
+        self.workspace_sidebar.workspace_id = Some(id);
+        self.workspace_sidebar.workspace_name = name;
+        self.workspace_sidebar.tree = tree;
+        self.workspace_sidebar.visible = true;
+        self.workspace_sidebar.watcher = watcher;
+        self.invalidate_workspace_cache();
+    }
+
+    /// Applies a filesystem event to the sidebar tree.
+    fn notify_tree(&mut self, event: &FsEvent) {
+        crate::workspace::scanner::apply_fs_event(&mut self.workspace_sidebar.tree, event);
     }
 
     /// Creates a new workspace with the given name and activates it.
@@ -78,13 +159,12 @@ impl App {
             tracing::warn!("Failed to set active workspace: {e}");
         }
 
-        self.workspace_sidebar.workspace_id = Some(entry.id);
-        self.workspace_sidebar.workspace_name = entry.name;
-        self.workspace_sidebar.tree.clear();
-        self.workspace_sidebar.visible = true;
-
-        // Start a fresh watcher
-        self.workspace_sidebar.watcher = WorkspaceWatcher::new().ok();
+        self.activate_sidebar(
+            entry.id,
+            entry.name,
+            Vec::new(),
+            WorkspaceWatcher::new().ok(),
+        );
     }
 
     /// Creates a new workspace with an auto-generated unique name.
@@ -95,7 +175,7 @@ impl App {
             .and_then(|s| s.list_workspaces().ok())
             .unwrap_or_default();
         let name = generate_workspace_name(&existing);
-        self.create_workspace(&name);
+        self.create_workspace(&name); // invalidates cache internally
     }
 
     /// Opens an existing workspace by ID.
@@ -121,21 +201,13 @@ impl App {
             tracing::warn!("Failed to set active workspace: {e}");
         }
 
-        self.workspace_sidebar.workspace_id = Some(entry.id);
-        self.workspace_sidebar.workspace_name = entry.name;
-        self.workspace_sidebar.visible = true;
-
         // Scan folders and start watching
         let mut watcher = WorkspaceWatcher::new().ok();
         let mut tree = Vec::new();
 
         for folder_str in &entry.folders {
             let folder_path = PathBuf::from(folder_str);
-            let entries = if folder_path.is_dir() {
-                scan_directory(&folder_path).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let entries = scan_dir_safe(&folder_path);
 
             if let Some(ref mut w) = watcher {
                 if folder_path.is_dir() {
@@ -152,8 +224,7 @@ impl App {
             });
         }
 
-        self.workspace_sidebar.tree = tree;
-        self.workspace_sidebar.watcher = watcher;
+        self.activate_sidebar(entry.id, entry.name, tree, watcher);
     }
 
     /// Closes the active workspace (hides sidebar, stops watcher).
@@ -232,11 +303,7 @@ impl App {
         }
 
         // Scan and add to tree
-        let scanned = if folder_path.is_dir() {
-            scan_directory(folder_path).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let scanned = scan_dir_safe(folder_path);
 
         // Start watching
         if let Some(ref mut w) = self.workspace_sidebar.watcher {
@@ -299,6 +366,7 @@ impl App {
         if self.workspace_sidebar.workspace_id.as_deref() == Some(id) {
             self.workspace_sidebar.workspace_name = new_name.to_string();
         }
+        self.invalidate_workspace_cache();
     }
 
     /// Deletes a workspace from the store. Closes it if active.
@@ -312,6 +380,72 @@ impl App {
                 tracing::warn!("Failed to delete workspace: {e}");
             }
         }
+        self.invalidate_workspace_cache();
+    }
+
+    /// Creates a new empty file with the given name in the specified directory.
+    pub(crate) fn create_new_file_in_workspace(&mut self, parent: &Path, name: &str) {
+        let path = parent.join(name);
+        if path.exists() {
+            let msg = format!("'{}' already exists in '{}'", name, parent.display());
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
+        if let Err(e) = std::fs::write(&path, "") {
+            let msg = format!("Failed to create file '{}': {e}", path.display());
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
+        self.notify_tree(&FsEvent::Created(path));
+    }
+
+    /// Creates a new subdirectory with the given name in the specified directory.
+    pub(crate) fn create_new_folder_in_workspace(&mut self, parent: &Path, name: &str) {
+        let path = parent.join(name);
+        if path.exists() {
+            let msg = format!("'{}' already exists in '{}'", name, parent.display());
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
+        if let Err(e) = std::fs::create_dir(&path) {
+            let msg = format!("Failed to create folder '{}': {e}", path.display());
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
+        self.notify_tree(&FsEvent::Created(path));
+    }
+
+    /// Renames a file or folder in the workspace.
+    pub(crate) fn rename_entry_in_workspace(&mut self, old_path: &Path, new_name: &str) {
+        let Some(parent) = old_path.parent() else {
+            return;
+        };
+        let new_path = parent.join(new_name);
+
+        if new_path.exists() {
+            let msg = format!("'{}' already exists", new_path.display());
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
+
+        if let Err(e) = std::fs::rename(old_path, &new_path) {
+            let msg = format!(
+                "Failed to rename '{}' to '{}': {e}",
+                old_path.display(),
+                new_path.display()
+            );
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
+
+        self.notify_tree(&FsEvent::Removed(old_path.to_path_buf()));
+        self.notify_tree(&FsEvent::Created(new_path));
     }
 
     /// Processes a sidebar action returned from the sidebar render pass.
@@ -348,22 +482,29 @@ impl App {
             SidebarAction::DeleteWorkspace(id) => {
                 self.delete_workspace(&id);
             }
+            SidebarAction::ConfirmNewFile(parent, name) => {
+                self.create_new_file_in_workspace(&parent, &name);
+            }
+            SidebarAction::ConfirmNewFolder(parent, name) => {
+                self.create_new_folder_in_workspace(&parent, &name);
+            }
+            SidebarAction::ConfirmRenameEntry(old_path, new_name) => {
+                self.rename_entry_in_workspace(&old_path, &new_name);
+            }
             SidebarAction::None => {}
         }
     }
 
     /// Polls filesystem events and applies them to the sidebar tree.
     pub(crate) fn tick_workspace_watcher(&mut self) {
-        if let Some(ref watcher) = self.workspace_sidebar.watcher {
-            let events = watcher.poll_events();
-            if !events.is_empty() {
-                for event in &events {
-                    crate::workspace::scanner::apply_fs_event(
-                        &mut self.workspace_sidebar.tree,
-                        event,
-                    );
-                }
-            }
+        let events = self
+            .workspace_sidebar
+            .watcher
+            .as_ref()
+            .map(|w| w.poll_events())
+            .unwrap_or_default();
+        for event in &events {
+            self.notify_tree(event);
         }
     }
 
@@ -429,5 +570,86 @@ mod tests {
         let existing = vec![make_entry("New Workspace"), make_entry("New Workspace 3")];
         let name = generate_workspace_name(&existing);
         assert_eq!(name, "New Workspace 2");
+    }
+
+    #[test]
+    fn test_generate_unique_name_no_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = generate_unique_name(dir.path(), "new_file.txt", false);
+        assert_eq!(name, "new_file.txt");
+    }
+
+    #[test]
+    fn test_generate_unique_name_file_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("new_file.txt"), "").unwrap();
+        let name = generate_unique_name(dir.path(), "new_file.txt", false);
+        assert_eq!(name, "new_file 2.txt");
+    }
+
+    #[test]
+    fn test_generate_unique_name_multiple_file_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("new_file.txt"), "").unwrap();
+        std::fs::write(dir.path().join("new_file 2.txt"), "").unwrap();
+        std::fs::write(dir.path().join("new_file 3.txt"), "").unwrap();
+        let name = generate_unique_name(dir.path(), "new_file.txt", false);
+        assert_eq!(name, "new_file 4.txt");
+    }
+
+    #[test]
+    fn test_generate_unique_name_dir_no_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = generate_unique_name(dir.path(), "new_folder", true);
+        assert_eq!(name, "new_folder");
+    }
+
+    #[test]
+    fn test_generate_unique_name_dir_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("new_folder")).unwrap();
+        let name = generate_unique_name(dir.path(), "new_folder", true);
+        assert_eq!(name, "new_folder 2");
+    }
+
+    #[test]
+    fn test_generate_unique_name_dir_multiple_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("new_folder")).unwrap();
+        std::fs::create_dir(dir.path().join("new_folder 2")).unwrap();
+        let name = generate_unique_name(dir.path(), "new_folder", true);
+        assert_eq!(name, "new_folder 3");
+    }
+
+    #[test]
+    fn test_generate_unique_name_no_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README"), "").unwrap();
+        let name = generate_unique_name(dir.path(), "README", false);
+        assert_eq!(name, "README 2");
+    }
+
+    #[test]
+    fn test_scan_dir_safe_nonexistent() {
+        let result = scan_dir_safe(Path::new("/nonexistent_dir_xyz_123"));
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_scan_dir_safe_valid_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "").unwrap();
+        let result = scan_dir_safe(dir.path());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "file.txt");
+    }
+
+    #[test]
+    fn test_scan_dir_safe_file_path_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not_a_dir.txt");
+        std::fs::write(&file, "").unwrap();
+        let result = scan_dir_safe(&file);
+        assert!(result.is_empty());
     }
 }

@@ -624,26 +624,22 @@ impl App {
                 ui.close();
             }
 
-            // Open Workspace submenu
-            let workspaces = self
-                .workspace_store
-                .as_ref()
-                .and_then(|s| s.list_workspaces().ok())
-                .unwrap_or_default();
+            // Open Workspace submenu (uses cached list)
+            let workspaces = self.get_cached_workspace_list().clone();
 
             if !workspaces.is_empty() {
                 ui.menu_button("Open Workspace", |ui| {
-                    for ws in &workspaces {
+                    for (ws_id, ws_name) in &workspaces {
                         let is_active =
-                            self.workspace_sidebar.workspace_id.as_deref() == Some(&ws.id);
+                            self.workspace_sidebar.workspace_id.as_deref() == Some(ws_id.as_str());
                         let label = if is_active {
-                            format!("\u{2713} {}", ws.name)
+                            format!("\u{2713} {ws_name}")
                         } else {
-                            ws.name.clone()
+                            ws_name.clone()
                         };
                         if ui.button(&label).clicked() {
                             if !is_active {
-                                self.switch_workspace(&ws.id);
+                                self.switch_workspace(ws_id);
                             }
                             ui.close();
                         }
@@ -693,9 +689,9 @@ impl App {
             if !workspaces.is_empty() {
                 ui.separator();
                 ui.menu_button("Delete Workspace", |ui| {
-                    for ws in &workspaces {
-                        if ui.button(&ws.name).clicked() {
-                            self.delete_workspace(&ws.id);
+                    for (ws_id, ws_name) in &workspaces {
+                        if ui.button(ws_name).clicked() {
+                            self.delete_workspace(ws_id);
                             ui.close();
                         }
                     }

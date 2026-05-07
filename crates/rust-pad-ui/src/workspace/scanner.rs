@@ -341,4 +341,124 @@ mod tests {
         let result = scan_directory(Path::new("/nonexistent_dir_xyz_123"));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_scan_empty_directory() {
+        let dir = TempDir::new().expect("create temp dir");
+        let entries = scan_directory(dir.path()).expect("scan");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_apply_fs_event_modified_existing_is_noop() {
+        let mut roots = vec![FolderRoot {
+            path: PathBuf::from("/project"),
+            entries: vec![TreeEntry {
+                name: "file.rs".to_string(),
+                path: PathBuf::from("/project/file.rs"),
+                kind: EntryKind::File,
+                expanded: false,
+                children: Vec::new(),
+            }],
+            expanded: true,
+        }];
+
+        // Modified event for existing entry should not duplicate it
+        apply_fs_event(
+            &mut roots,
+            &FsEvent::Modified(PathBuf::from("/project/file.rs")),
+        );
+        assert_eq!(roots[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_fs_event_created_hidden_file_ignored() {
+        let dir = TempDir::new().expect("create temp dir");
+        let hidden = dir.path().join(".hidden_file");
+        std::fs::write(&hidden, "").expect("write");
+
+        let mut roots = vec![FolderRoot {
+            path: dir.path().to_path_buf(),
+            entries: Vec::new(),
+            expanded: true,
+        }];
+
+        apply_fs_event(&mut roots, &FsEvent::Created(hidden));
+        assert!(
+            roots[0].entries.is_empty(),
+            "Hidden files should not be added to the tree"
+        );
+    }
+
+    #[test]
+    fn test_apply_fs_event_created_duplicate_ignored() {
+        let mut roots = vec![FolderRoot {
+            path: PathBuf::from("/project"),
+            entries: vec![TreeEntry {
+                name: "file.rs".to_string(),
+                path: PathBuf::from("/project/file.rs"),
+                kind: EntryKind::File,
+                expanded: false,
+                children: Vec::new(),
+            }],
+            expanded: true,
+        }];
+
+        apply_fs_event(
+            &mut roots,
+            &FsEvent::Created(PathBuf::from("/project/file.rs")),
+        );
+        assert_eq!(
+            roots[0].entries.len(),
+            1,
+            "Duplicate Created event should not add a second entry"
+        );
+    }
+
+    #[test]
+    fn test_apply_fs_event_removed_nonexistent_is_noop() {
+        let mut roots = vec![FolderRoot {
+            path: PathBuf::from("/project"),
+            entries: vec![TreeEntry {
+                name: "keep.rs".to_string(),
+                path: PathBuf::from("/project/keep.rs"),
+                kind: EntryKind::File,
+                expanded: false,
+                children: Vec::new(),
+            }],
+            expanded: true,
+        }];
+
+        apply_fs_event(
+            &mut roots,
+            &FsEvent::Removed(PathBuf::from("/project/gone.rs")),
+        );
+        assert_eq!(roots[0].entries.len(), 1);
+        assert_eq!(roots[0].entries[0].name, "keep.rs");
+    }
+
+    #[test]
+    fn test_find_parent_entries_deeply_nested() {
+        let mut roots = vec![FolderRoot {
+            path: PathBuf::from("/project"),
+            entries: vec![TreeEntry {
+                name: "src".to_string(),
+                path: PathBuf::from("/project/src"),
+                kind: EntryKind::Directory,
+                expanded: true,
+                children: vec![TreeEntry {
+                    name: "utils".to_string(),
+                    path: PathBuf::from("/project/src/utils"),
+                    kind: EntryKind::Directory,
+                    expanded: true,
+                    children: Vec::new(),
+                }],
+            }],
+            expanded: true,
+        }];
+
+        let result =
+            find_parent_entries(&mut roots, &PathBuf::from("/project/src/utils/helper.rs"));
+        assert!(result.is_some(), "Should find parent at depth 3");
+    }
 }
