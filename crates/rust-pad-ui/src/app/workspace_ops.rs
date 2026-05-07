@@ -65,6 +65,36 @@ fn generate_workspace_name(existing: &[WorkspaceEntry]) -> String {
     base.to_string()
 }
 
+/// Scans all workspace folders and creates a watcher for them.
+fn scan_workspace_folders(folders: &[String]) -> (Vec<FolderRoot>, Option<WorkspaceWatcher>) {
+    let mut watcher = WorkspaceWatcher::new().ok();
+    let mut tree = Vec::new();
+
+    for folder_str in folders {
+        let folder_path = PathBuf::from(folder_str);
+        let entries = scan_dir_safe(&folder_path);
+        try_watch_folder(&mut watcher, &folder_path);
+        tree.push(FolderRoot {
+            path: folder_path,
+            entries,
+            expanded: true,
+        });
+    }
+
+    (tree, watcher)
+}
+
+/// Starts watching a folder if the watcher is available and the folder exists.
+fn try_watch_folder(watcher: &mut Option<WorkspaceWatcher>, folder_path: &Path) {
+    if let Some(ref mut w) = watcher {
+        if folder_path.is_dir() {
+            if let Err(e) = w.watch(folder_path) {
+                tracing::warn!("Failed to watch {}: {e}", folder_path.display());
+            }
+        }
+    }
+}
+
 /// Scans a directory if it exists, returning an empty list on failure or non-directory paths.
 fn scan_dir_safe(folder_path: &Path) -> Vec<TreeEntry> {
     if folder_path.is_dir() {
@@ -201,29 +231,7 @@ impl App {
             tracing::warn!("Failed to set active workspace: {e}");
         }
 
-        // Scan folders and start watching
-        let mut watcher = WorkspaceWatcher::new().ok();
-        let mut tree = Vec::new();
-
-        for folder_str in &entry.folders {
-            let folder_path = PathBuf::from(folder_str);
-            let entries = scan_dir_safe(&folder_path);
-
-            if let Some(ref mut w) = watcher {
-                if folder_path.is_dir() {
-                    if let Err(e) = w.watch(&folder_path) {
-                        tracing::warn!("Failed to watch {}: {e}", folder_path.display());
-                    }
-                }
-            }
-
-            tree.push(FolderRoot {
-                path: folder_path,
-                entries,
-                expanded: true,
-            });
-        }
-
+        let (tree, watcher) = scan_workspace_folders(&entry.folders);
         self.activate_sidebar(entry.id, entry.name, tree, watcher);
     }
 
@@ -272,15 +280,7 @@ impl App {
             return;
         };
 
-        // Prevent duplicate folders, sub-folders of existing roots, or parent
-        // folders when a subfolder is already in the workspace.
-        let folder_str = folder_path.to_string_lossy().into_owned();
-        let is_duplicate_or_nested = self.workspace_sidebar.tree.iter().any(|r| {
-            r.path == folder_path
-                || folder_path.starts_with(&r.path)
-                || r.path.starts_with(folder_path)
-        });
-        if is_duplicate_or_nested {
+        if self.is_duplicate_or_nested_folder(folder_path) {
             let msg = format!(
                 "Folder '{}' was not added: it duplicates or overlaps with an existing workspace folder.",
                 folder_path.display()
@@ -291,6 +291,7 @@ impl App {
         }
 
         // Update store
+        let folder_str = folder_path.to_string_lossy().into_owned();
         let mut entries = store.list_workspaces().unwrap_or_default();
         if let Some(ws) = entries.iter_mut().find(|e| e.id == ws_id) {
             ws.folders.push(folder_str);
@@ -302,23 +303,23 @@ impl App {
             }
         }
 
-        // Scan and add to tree
+        // Scan, watch, and add to tree
         let scanned = scan_dir_safe(folder_path);
-
-        // Start watching
-        if let Some(ref mut w) = self.workspace_sidebar.watcher {
-            if folder_path.is_dir() {
-                if let Err(e) = w.watch(folder_path) {
-                    tracing::warn!("Failed to watch {}: {e}", folder_path.display());
-                }
-            }
-        }
-
+        try_watch_folder(&mut self.workspace_sidebar.watcher, folder_path);
         self.workspace_sidebar.tree.push(FolderRoot {
             path: folder_path.to_path_buf(),
             entries: scanned,
             expanded: true,
         });
+    }
+
+    /// Checks if a folder path duplicates or overlaps with existing workspace folders.
+    fn is_duplicate_or_nested_folder(&self, folder_path: &Path) -> bool {
+        self.workspace_sidebar.tree.iter().any(|r| {
+            r.path == folder_path
+                || folder_path.starts_with(&r.path)
+                || r.path.starts_with(folder_path)
+        })
     }
 
     /// Removes a folder from the active workspace (not from disk).
@@ -651,5 +652,79 @@ mod tests {
         std::fs::write(&file, "").unwrap();
         let result = scan_dir_safe(&file);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_scan_workspace_folders_empty() {
+        let (tree, watcher) = scan_workspace_folders(&[]);
+        assert!(tree.is_empty());
+        // Watcher is created but has nothing to watch
+        assert!(watcher.is_some());
+    }
+
+    #[test]
+    fn test_scan_workspace_folders_with_real_dirs() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(dir1.path().join("a.txt"), "").unwrap();
+        std::fs::write(dir2.path().join("b.txt"), "").unwrap();
+        std::fs::create_dir(dir2.path().join("subdir")).unwrap();
+
+        let folders = vec![
+            dir1.path().to_string_lossy().into_owned(),
+            dir2.path().to_string_lossy().into_owned(),
+        ];
+        let (tree, watcher) = scan_workspace_folders(&folders);
+
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].entries.len(), 1);
+        assert_eq!(tree[0].entries[0].name, "a.txt");
+        // dir2 has a file and a directory
+        assert_eq!(tree[1].entries.len(), 2);
+        assert!(tree[0].expanded);
+        assert!(tree[1].expanded);
+        assert!(watcher.is_some());
+    }
+
+    #[test]
+    fn test_scan_workspace_folders_with_nonexistent() {
+        let folders = vec!["/nonexistent_dir_scan_test_xyz".to_string()];
+        let (tree, _watcher) = scan_workspace_folders(&folders);
+
+        assert_eq!(tree.len(), 1);
+        assert!(
+            tree[0].entries.is_empty(),
+            "Nonexistent dir yields empty entries"
+        );
+        assert_eq!(
+            tree[0].path,
+            PathBuf::from("/nonexistent_dir_scan_test_xyz")
+        );
+    }
+
+    #[test]
+    fn test_try_watch_folder_with_none_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut watcher: Option<WorkspaceWatcher> = None;
+        // Should not panic — no-op when watcher is None
+        try_watch_folder(&mut watcher, dir.path());
+        assert!(watcher.is_none());
+    }
+
+    #[test]
+    fn test_try_watch_folder_with_valid_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut watcher = Some(WorkspaceWatcher::new().expect("create watcher"));
+        try_watch_folder(&mut watcher, dir.path());
+        // Watcher should still be Some (not consumed or invalidated)
+        assert!(watcher.is_some());
+    }
+
+    #[test]
+    fn test_try_watch_folder_nonexistent_dir() {
+        let mut watcher = Some(WorkspaceWatcher::new().expect("create watcher"));
+        // Nonexistent path is not a dir, so watch should be skipped silently
+        try_watch_folder(&mut watcher, Path::new("/nonexistent_xyz_watch_test"));
+        assert!(watcher.is_some());
     }
 }

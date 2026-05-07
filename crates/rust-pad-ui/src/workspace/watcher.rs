@@ -46,6 +46,25 @@ impl std::fmt::Debug for WorkspaceWatcher {
     }
 }
 
+/// Classifies a debounced filesystem event into an `FsEvent`.
+///
+/// Returns `None` for event kinds that don't map to sidebar-relevant changes.
+/// Note: for rapid create-then-delete sequences within the debounce window,
+/// the event will be classified as `Removed` even though a create also happened.
+/// This is acceptable for the sidebar use case.
+fn classify_debounced_event(event: notify_debouncer_mini::DebouncedEvent) -> Option<FsEvent> {
+    match event.kind {
+        DebouncedEventKind::Any | DebouncedEventKind::AnyContinuous => {
+            if event.path.exists() {
+                Some(FsEvent::Modified(event.path))
+            } else {
+                Some(FsEvent::Removed(event.path))
+            }
+        }
+        _ => None,
+    }
+}
+
 impl WorkspaceWatcher {
     /// Creates a new workspace watcher with 500ms debounce.
     pub fn new() -> Result<Self> {
@@ -53,33 +72,16 @@ impl WorkspaceWatcher {
 
         let debouncer = new_debouncer(
             Duration::from_millis(500),
-            move |result: DebounceEventResult| {
-                match result {
-                    Ok(events) => {
-                        for event in events {
-                            let fs_event = match event.kind {
-                                DebouncedEventKind::Any | DebouncedEventKind::AnyContinuous => {
-                                    // We can't distinguish create/remove/modify from debounced
-                                    // events alone — the path existence tells us if it was
-                                    // created or removed.
-                                    // Note: for rapid create-then-delete sequences within the
-                                    // debounce window, the event will be classified as Removed
-                                    // even though a create also happened. This is acceptable
-                                    // for the sidebar use case.
-                                    if event.path.exists() {
-                                        FsEvent::Modified(event.path)
-                                    } else {
-                                        FsEvent::Removed(event.path)
-                                    }
-                                }
-                                _ => continue,
-                            };
+            move |result: DebounceEventResult| match result {
+                Ok(events) => {
+                    for event in events {
+                        if let Some(fs_event) = classify_debounced_event(event) {
                             let _ = tx.send(fs_event);
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Filesystem watch error: {e}");
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Filesystem watch error: {e}");
                 }
             },
         )
@@ -196,6 +198,64 @@ mod tests {
         let debug = format!("{event:?}");
         assert!(debug.contains("Created"));
         assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn test_classify_existing_path_returns_modified() {
+        let dir = TempDir::new().expect("create temp dir");
+        let file = dir.path().join("exists.txt");
+        std::fs::write(&file, "data").expect("write");
+
+        let debounced = notify_debouncer_mini::DebouncedEvent {
+            path: file.clone(),
+            kind: DebouncedEventKind::Any,
+        };
+        let result = classify_debounced_event(debounced);
+        assert_eq!(result, Some(FsEvent::Modified(file)));
+    }
+
+    #[test]
+    fn test_classify_nonexistent_path_returns_removed() {
+        let debounced = notify_debouncer_mini::DebouncedEvent {
+            path: PathBuf::from("/nonexistent_xyz_classify_test"),
+            kind: DebouncedEventKind::Any,
+        };
+        let result = classify_debounced_event(debounced);
+        assert_eq!(
+            result,
+            Some(FsEvent::Removed(PathBuf::from(
+                "/nonexistent_xyz_classify_test"
+            )))
+        );
+    }
+
+    #[test]
+    fn test_classify_any_continuous_existing_returns_modified() {
+        let dir = TempDir::new().expect("create temp dir");
+        let file = dir.path().join("continuous.txt");
+        std::fs::write(&file, "data").expect("write");
+
+        let debounced = notify_debouncer_mini::DebouncedEvent {
+            path: file.clone(),
+            kind: DebouncedEventKind::AnyContinuous,
+        };
+        let result = classify_debounced_event(debounced);
+        assert_eq!(result, Some(FsEvent::Modified(file)));
+    }
+
+    #[test]
+    fn test_classify_any_continuous_nonexistent_returns_removed() {
+        let debounced = notify_debouncer_mini::DebouncedEvent {
+            path: PathBuf::from("/nonexistent_xyz_continuous_test"),
+            kind: DebouncedEventKind::AnyContinuous,
+        };
+        let result = classify_debounced_event(debounced);
+        assert_eq!(
+            result,
+            Some(FsEvent::Removed(PathBuf::from(
+                "/nonexistent_xyz_continuous_test"
+            )))
+        );
     }
 
     #[test]

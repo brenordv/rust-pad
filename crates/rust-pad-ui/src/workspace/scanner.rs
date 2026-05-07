@@ -88,42 +88,7 @@ fn sort_entries(entries: &mut [TreeEntry]) {
 pub fn apply_fs_event(roots: &mut [FolderRoot], event: &FsEvent) {
     match event {
         FsEvent::Created(path) | FsEvent::Modified(path) => {
-            // For Modified events on existing entries, no tree change needed.
-            // For Created events (or Modified on paths not in tree), insert.
-            if let Some(parent_entries) = find_parent_entries(roots, path) {
-                // Check if already present
-                let already_exists = parent_entries.iter().any(|e| e.path == *path);
-                if already_exists {
-                    return;
-                }
-
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-
-                // Skip hidden
-                if name.starts_with('.') {
-                    return;
-                }
-
-                let kind = if path.is_dir() {
-                    EntryKind::Directory
-                } else {
-                    EntryKind::File
-                };
-
-                let new_entry = TreeEntry {
-                    name,
-                    path: path.clone(),
-                    kind,
-                    expanded: false,
-                    children: Vec::new(),
-                };
-
-                parent_entries.push(new_entry);
-                sort_entries(parent_entries);
-            }
+            insert_entry_if_new(roots, path);
         }
         FsEvent::Removed(path) => {
             if let Some(parent_entries) = find_parent_entries(roots, path) {
@@ -131,6 +96,45 @@ pub fn apply_fs_event(roots: &mut [FolderRoot], event: &FsEvent) {
             }
         }
     }
+}
+
+/// Inserts a new tree entry for `path` if it doesn't already exist.
+///
+/// Used for both Created and Modified events — Modified events on existing
+/// entries are no-ops, while new paths are inserted and sorted.
+fn insert_entry_if_new(roots: &mut [FolderRoot], path: &Path) {
+    let Some(parent_entries) = find_parent_entries(roots, path) else {
+        return;
+    };
+
+    if parent_entries.iter().any(|e| e.path == *path) {
+        return;
+    }
+
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    // Skip hidden files
+    if name.starts_with('.') {
+        return;
+    }
+
+    let kind = if path.is_dir() {
+        EntryKind::Directory
+    } else {
+        EntryKind::File
+    };
+
+    parent_entries.push(TreeEntry {
+        name,
+        path: path.to_path_buf(),
+        kind,
+        expanded: false,
+        children: Vec::new(),
+    });
+    sort_entries(parent_entries);
 }
 
 /// Finds the parent directory's children list for a given path.
@@ -460,5 +464,201 @@ mod tests {
         let result =
             find_parent_entries(&mut roots, &PathBuf::from("/project/src/utils/helper.rs"));
         assert!(result.is_some(), "Should find parent at depth 3");
+    }
+
+    #[test]
+    fn test_apply_fs_event_created_directory() {
+        let dir = TempDir::new().expect("create temp dir");
+        let new_dir = dir.path().join("new_subdir");
+        std::fs::create_dir(&new_dir).expect("mkdir");
+
+        let mut roots = vec![FolderRoot {
+            path: dir.path().to_path_buf(),
+            entries: Vec::new(),
+            expanded: true,
+        }];
+
+        apply_fs_event(&mut roots, &FsEvent::Created(new_dir));
+
+        assert_eq!(roots[0].entries.len(), 1);
+        assert_eq!(roots[0].entries[0].name, "new_subdir");
+        assert_eq!(roots[0].entries[0].kind, EntryKind::Directory);
+    }
+
+    #[test]
+    fn test_apply_fs_event_created_no_parent_in_tree() {
+        let mut roots = vec![FolderRoot {
+            path: PathBuf::from("/project"),
+            entries: Vec::new(),
+            expanded: true,
+        }];
+
+        // Event for a file under /other (not in the tree) — should be a no-op
+        apply_fs_event(
+            &mut roots,
+            &FsEvent::Created(PathBuf::from("/other/file.rs")),
+        );
+
+        assert!(
+            roots[0].entries.is_empty(),
+            "Should not insert when parent is not in tree"
+        );
+    }
+
+    #[test]
+    fn test_apply_fs_event_in_nested_directory() {
+        let dir = TempDir::new().expect("create temp dir");
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir(&src_dir).expect("mkdir src");
+        let new_file = src_dir.join("lib.rs");
+        std::fs::write(&new_file, "").expect("write");
+
+        let mut roots = vec![FolderRoot {
+            path: dir.path().to_path_buf(),
+            entries: vec![TreeEntry {
+                name: "src".to_string(),
+                path: src_dir,
+                kind: EntryKind::Directory,
+                expanded: true,
+                children: Vec::new(),
+            }],
+            expanded: true,
+        }];
+
+        apply_fs_event(&mut roots, &FsEvent::Created(new_file.clone()));
+
+        assert_eq!(roots[0].entries[0].children.len(), 1);
+        assert_eq!(roots[0].entries[0].children[0].name, "lib.rs");
+    }
+
+    #[test]
+    fn test_apply_fs_event_removed_from_nested() {
+        let mut roots = vec![FolderRoot {
+            path: PathBuf::from("/project"),
+            entries: vec![TreeEntry {
+                name: "src".to_string(),
+                path: PathBuf::from("/project/src"),
+                kind: EntryKind::Directory,
+                expanded: true,
+                children: vec![TreeEntry {
+                    name: "main.rs".to_string(),
+                    path: PathBuf::from("/project/src/main.rs"),
+                    kind: EntryKind::File,
+                    expanded: false,
+                    children: Vec::new(),
+                }],
+            }],
+            expanded: true,
+        }];
+
+        apply_fs_event(
+            &mut roots,
+            &FsEvent::Removed(PathBuf::from("/project/src/main.rs")),
+        );
+
+        assert!(
+            roots[0].entries[0].children.is_empty(),
+            "Removed file should be deleted from nested children"
+        );
+    }
+
+    #[test]
+    fn test_sort_entries_dirs_before_files() {
+        let mut entries = vec![
+            TreeEntry {
+                name: "zebra.txt".to_string(),
+                path: PathBuf::from("/zebra.txt"),
+                kind: EntryKind::File,
+                expanded: false,
+                children: Vec::new(),
+            },
+            TreeEntry {
+                name: "alpha_dir".to_string(),
+                path: PathBuf::from("/alpha_dir"),
+                kind: EntryKind::Directory,
+                expanded: false,
+                children: Vec::new(),
+            },
+            TreeEntry {
+                name: "beta.rs".to_string(),
+                path: PathBuf::from("/beta.rs"),
+                kind: EntryKind::File,
+                expanded: false,
+                children: Vec::new(),
+            },
+        ];
+
+        sort_entries(&mut entries);
+
+        assert_eq!(entries[0].name, "alpha_dir");
+        assert_eq!(entries[0].kind, EntryKind::Directory);
+        assert_eq!(entries[1].name, "beta.rs");
+        assert_eq!(entries[2].name, "zebra.txt");
+    }
+
+    #[test]
+    fn test_insert_preserves_sort_order() {
+        let dir = TempDir::new().expect("create temp dir");
+        let file_a = dir.path().join("aaa.txt");
+        let file_z = dir.path().join("zzz.txt");
+        let file_m = dir.path().join("mmm.txt");
+        std::fs::write(&file_a, "").expect("write");
+        std::fs::write(&file_z, "").expect("write");
+        std::fs::write(&file_m, "").expect("write");
+
+        let mut roots = vec![FolderRoot {
+            path: dir.path().to_path_buf(),
+            entries: vec![TreeEntry {
+                name: "aaa.txt".to_string(),
+                path: file_a,
+                kind: EntryKind::File,
+                expanded: false,
+                children: Vec::new(),
+            }],
+            expanded: true,
+        }];
+
+        // Insert out of order
+        apply_fs_event(&mut roots, &FsEvent::Created(file_z));
+        apply_fs_event(&mut roots, &FsEvent::Created(file_m));
+
+        assert_eq!(roots[0].entries.len(), 3);
+        assert_eq!(roots[0].entries[0].name, "aaa.txt");
+        assert_eq!(roots[0].entries[1].name, "mmm.txt");
+        assert_eq!(roots[0].entries[2].name, "zzz.txt");
+    }
+
+    #[test]
+    fn test_find_parent_entries_multiple_roots() {
+        let mut roots = vec![
+            FolderRoot {
+                path: PathBuf::from("/project1"),
+                entries: Vec::new(),
+                expanded: true,
+            },
+            FolderRoot {
+                path: PathBuf::from("/project2"),
+                entries: Vec::new(),
+                expanded: true,
+            },
+        ];
+
+        // Should find parent in the second root
+        let result = find_parent_entries(&mut roots, &PathBuf::from("/project2/file.txt"));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_in_children_skips_files() {
+        let mut entries = vec![TreeEntry {
+            name: "not_a_dir.txt".to_string(),
+            path: PathBuf::from("/project/not_a_dir.txt"),
+            kind: EntryKind::File,
+            expanded: false,
+            children: Vec::new(),
+        }];
+
+        let result = find_in_children(&mut entries, Path::new("/project/not_a_dir.txt"));
+        assert!(result.is_none(), "Should not match file entries");
     }
 }
