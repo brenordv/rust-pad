@@ -675,4 +675,55 @@ mod tests {
         config.sanitize();
         assert!((config.workspace_sidebar_width - 300.0).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn test_workspace_sidebar_visible_default_false() {
+        let config = AppConfig::default();
+        assert!(!config.workspace_sidebar_visible);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_width_boundary_min() {
+        let mut config = AppConfig {
+            workspace_sidebar_width: 150.0,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!((config.workspace_sidebar_width - 150.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_width_boundary_max() {
+        let mut config = AppConfig {
+            workspace_sidebar_width: 500.0,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!((config.workspace_sidebar_width - 500.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_fields_serde_roundtrip() {
+        let mut config = AppConfig::default();
+        config.workspace_sidebar_visible = true;
+        config.workspace_sidebar_width = 350.0;
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.workspace_sidebar_visible);
+        assert!((parsed.workspace_sidebar_width - 350.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_fields_missing_in_json_uses_defaults() {
+        // A JSON without workspace fields should deserialize with defaults
+        let json = r#"{"tab_size": 4}"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!parsed.workspace_sidebar_visible);
+        assert!(
+            (parsed.workspace_sidebar_width - 0.0).abs() < f32::EPSILON
+                || (parsed.workspace_sidebar_width - 250.0).abs() < f32::EPSILON
+        );
+    }
 }

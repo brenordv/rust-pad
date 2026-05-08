@@ -353,4 +353,92 @@ mod tests {
         let decoded: WorkspaceEntry = bincode::deserialize(&bytes).expect("deserialize");
         assert_eq!(decoded, entry);
     }
+
+    #[test]
+    fn test_workspace_store_debug() {
+        let (store, _dir) = open_test_store();
+        let debug = format!("{store:?}");
+        assert!(debug.contains("WorkspaceStore"));
+    }
+
+    #[test]
+    fn test_overwrite_active_workspace() {
+        let (store, _dir) = open_test_store();
+        store.set_active_workspace_id(Some("ws-1")).expect("set 1");
+        store.set_active_workspace_id(Some("ws-2")).expect("set 2");
+        let active = store.get_active_workspace_id().expect("get");
+        assert_eq!(active.as_deref(), Some("ws-2"));
+    }
+
+    #[test]
+    fn test_delete_all_workspaces() {
+        let (store, _dir) = open_test_store();
+        store
+            .save_workspace(&make_entry("ws-1", "A", &[]))
+            .expect("save");
+        store
+            .save_workspace(&make_entry("ws-2", "B", &[]))
+            .expect("save");
+        store.delete_workspace("ws-1").expect("delete");
+        store.delete_workspace("ws-2").expect("delete");
+        let entries = store.list_workspaces().expect("list");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_workspace_entry_with_multiple_folders() {
+        let (store, _dir) = open_test_store();
+        let entry = make_entry("ws-1", "Multi", &["/a", "/b", "/c"]);
+        store.save_workspace(&entry).expect("save");
+        let entries = store.list_workspaces().expect("list");
+        assert_eq!(entries[0].folders.len(), 3);
+    }
+
+    #[test]
+    fn test_workspace_entry_clone_and_eq() {
+        let entry = make_entry("ws-1", "Test", &["/path"]);
+        let cloned = entry.clone();
+        assert_eq!(entry, cloned);
+    }
+
+    #[test]
+    fn test_workspace_path_is_non_empty() {
+        let path = WorkspaceStore::workspace_path();
+        assert!(!path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_save_workspace_with_empty_folders() {
+        let (store, _dir) = open_test_store();
+        let entry = make_entry("ws-empty", "Empty", &[]);
+        store.save_workspace(&entry).expect("save");
+        let entries = store.list_workspaces().expect("list");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].folders.is_empty());
+    }
+
+    #[test]
+    fn test_upsert_preserves_other_workspaces() {
+        let (store, _dir) = open_test_store();
+        store
+            .save_workspace(&make_entry("ws-1", "First", &["/a"]))
+            .expect("save");
+        store
+            .save_workspace(&make_entry("ws-2", "Second", &["/b"]))
+            .expect("save");
+
+        // Update only ws-1
+        store
+            .save_workspace(&make_entry("ws-1", "Updated First", &["/a", "/c"]))
+            .expect("upsert");
+
+        let entries = store.list_workspaces().expect("list");
+        assert_eq!(entries.len(), 2);
+        let ws1 = entries.iter().find(|e| e.id == "ws-1").unwrap();
+        let ws2 = entries.iter().find(|e| e.id == "ws-2").unwrap();
+        assert_eq!(ws1.name, "Updated First");
+        assert_eq!(ws1.folders.len(), 2);
+        assert_eq!(ws2.name, "Second");
+        assert_eq!(ws2.folders.len(), 1);
+    }
 }

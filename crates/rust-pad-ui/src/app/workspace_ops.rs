@@ -727,4 +727,671 @@ mod tests {
         try_watch_folder(&mut watcher, Path::new("/nonexistent_xyz_watch_test"));
         assert!(watcher.is_some());
     }
+
+    // ── App-level integration tests ──────────────────────────────────
+
+    /// Creates a test App with a real WorkspaceStore backed by a temp directory.
+    /// Returns (app, temp_dir) — keep `_dir` alive for the lifetime of the test.
+    fn app_with_workspace() -> (super::super::App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = dir.path().join("test-workspace.redb");
+        let store = WorkspaceStore::open(&db_path).expect("open workspace store");
+        let mut app = super::super::tests::test_app();
+        app.workspace_store = Some(store);
+        (app, dir)
+    }
+
+    #[test]
+    fn test_app_create_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Test WS");
+
+        assert!(app.workspace_sidebar.visible);
+        assert_eq!(app.workspace_sidebar.workspace_name, "Test WS");
+        assert!(app.workspace_sidebar.workspace_id.is_some());
+        assert!(app.workspace_sidebar.tree.is_empty());
+    }
+
+    #[test]
+    fn test_app_create_new_workspace_generates_unique_name() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_new_workspace();
+        assert_eq!(app.workspace_sidebar.workspace_name, "New Workspace");
+
+        // Creating another should increment the name
+        app.create_new_workspace();
+        assert_eq!(app.workspace_sidebar.workspace_name, "New Workspace 2");
+    }
+
+    #[test]
+    fn test_app_close_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("To Close");
+        assert!(app.workspace_sidebar.visible);
+
+        app.close_workspace();
+        assert!(!app.workspace_sidebar.visible);
+        assert!(app.workspace_sidebar.workspace_id.is_none());
+        assert!(app.workspace_sidebar.workspace_name.is_empty());
+        assert!(app.workspace_sidebar.tree.is_empty());
+        assert!(app.workspace_sidebar.watcher.is_none());
+    }
+
+    #[test]
+    fn test_app_open_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Open Me");
+        let ws_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+        app.close_workspace();
+
+        app.open_workspace(&ws_id);
+        assert!(app.workspace_sidebar.visible);
+        assert_eq!(app.workspace_sidebar.workspace_name, "Open Me");
+        assert_eq!(
+            app.workspace_sidebar.workspace_id.as_deref(),
+            Some(ws_id.as_str())
+        );
+    }
+
+    #[test]
+    fn test_app_open_nonexistent_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.open_workspace("nonexistent-id");
+        // Should remain closed
+        assert!(!app.workspace_sidebar.visible);
+        assert!(app.workspace_sidebar.workspace_id.is_none());
+    }
+
+    #[test]
+    fn test_app_switch_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("First");
+        let first_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+
+        app.create_workspace("Second");
+        let second_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+        assert_eq!(app.workspace_sidebar.workspace_name, "Second");
+
+        app.switch_workspace(&first_id);
+        assert_eq!(app.workspace_sidebar.workspace_name, "First");
+        assert_eq!(
+            app.workspace_sidebar.workspace_id.as_deref(),
+            Some(first_id.as_str())
+        );
+
+        app.switch_workspace(&second_id);
+        assert_eq!(app.workspace_sidebar.workspace_name, "Second");
+    }
+
+    #[test]
+    fn test_app_rename_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Before");
+        let ws_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+
+        app.rename_workspace(&ws_id, "After");
+        assert_eq!(app.workspace_sidebar.workspace_name, "After");
+
+        // Verify persisted in store
+        let entries = app
+            .workspace_store
+            .as_ref()
+            .unwrap()
+            .list_workspaces()
+            .unwrap();
+        assert_eq!(entries[0].name, "After");
+    }
+
+    #[test]
+    fn test_app_rename_workspace_invalidates_cache() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Cached Name");
+        let ws_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+
+        // Populate cache
+        let _ = app.get_cached_workspace_list();
+        assert!(app.cached_workspace_list.is_some());
+
+        app.rename_workspace(&ws_id, "New Name");
+        // Cache should be invalidated
+        assert!(app.cached_workspace_list.is_none());
+    }
+
+    #[test]
+    fn test_app_delete_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("To Delete");
+        let ws_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+
+        app.delete_workspace(&ws_id);
+        // Active workspace was deleted, so sidebar should be closed
+        assert!(!app.workspace_sidebar.visible);
+        assert!(app.workspace_sidebar.workspace_id.is_none());
+
+        let entries = app
+            .workspace_store
+            .as_ref()
+            .unwrap()
+            .list_workspaces()
+            .unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_app_delete_inactive_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Keep");
+        app.create_workspace("Delete Me");
+        let delete_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+
+        // Switch to the first one
+        let entries = app
+            .workspace_store
+            .as_ref()
+            .unwrap()
+            .list_workspaces()
+            .unwrap();
+        let keep_id = entries
+            .iter()
+            .find(|e| e.name == "Keep")
+            .unwrap()
+            .id
+            .clone();
+        app.switch_workspace(&keep_id);
+
+        app.delete_workspace(&delete_id);
+        // Active workspace should still be open
+        assert!(app.workspace_sidebar.visible);
+        assert_eq!(app.workspace_sidebar.workspace_name, "Keep");
+
+        let entries = app
+            .workspace_store
+            .as_ref()
+            .unwrap()
+            .list_workspaces()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Keep");
+    }
+
+    #[test]
+    fn test_app_add_folder_path_to_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("test.rs"), "fn main() {}").unwrap();
+
+        app.create_workspace("With Folder");
+        app.add_folder_path_to_workspace(folder.path());
+
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+        assert_eq!(app.workspace_sidebar.tree[0].path, folder.path());
+        assert!(!app.workspace_sidebar.tree[0].entries.is_empty());
+    }
+
+    #[test]
+    fn test_app_add_duplicate_folder_rejected() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+
+        app.create_workspace("Dup Test");
+        app.add_folder_path_to_workspace(folder.path());
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+
+        // Adding the same folder again should be rejected
+        app.add_folder_path_to_workspace(folder.path());
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+    }
+
+    #[test]
+    fn test_app_add_nested_folder_rejected() {
+        let (mut app, _dir) = app_with_workspace();
+        let parent = tempfile::tempdir().unwrap();
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+
+        app.create_workspace("Nested Test");
+        app.add_folder_path_to_workspace(parent.path());
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+
+        // Adding a subfolder of an existing root should be rejected
+        app.add_folder_path_to_workspace(&child);
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+    }
+
+    #[test]
+    fn test_app_add_parent_folder_of_existing_rejected() {
+        let (mut app, _dir) = app_with_workspace();
+        let parent = tempfile::tempdir().unwrap();
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+
+        app.create_workspace("Parent Test");
+        app.add_folder_path_to_workspace(&child);
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+
+        // Adding a parent of an existing root should be rejected
+        app.add_folder_path_to_workspace(parent.path());
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+    }
+
+    #[test]
+    fn test_app_remove_folder_from_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+
+        app.create_workspace("Remove Test");
+        app.add_folder_path_to_workspace(folder.path());
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+
+        app.remove_folder_from_workspace(folder.path());
+        assert!(app.workspace_sidebar.tree.is_empty());
+
+        // Verify persisted
+        let entries = app
+            .workspace_store
+            .as_ref()
+            .unwrap()
+            .list_workspaces()
+            .unwrap();
+        let ws = entries.iter().find(|e| e.name == "Remove Test").unwrap();
+        assert!(ws.folders.is_empty());
+    }
+
+    #[test]
+    fn test_app_create_new_file_in_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+
+        app.create_workspace("File Create");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.create_new_file_in_workspace(folder.path(), "hello.txt");
+        assert!(folder.path().join("hello.txt").exists());
+        // Tree should be updated with the new file
+        let has_file = app.workspace_sidebar.tree[0]
+            .entries
+            .iter()
+            .any(|e| e.name == "hello.txt");
+        assert!(has_file, "New file should appear in tree");
+    }
+
+    #[test]
+    fn test_app_create_file_already_exists() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("exists.txt"), "original").unwrap();
+
+        app.create_workspace("Exists Test");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.create_new_file_in_workspace(folder.path(), "exists.txt");
+        // File content should not be overwritten
+        let content = std::fs::read_to_string(folder.path().join("exists.txt")).unwrap();
+        assert_eq!(content, "original");
+    }
+
+    #[test]
+    fn test_app_create_new_folder_in_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+
+        app.create_workspace("Folder Create");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.create_new_folder_in_workspace(folder.path(), "subdir");
+        assert!(folder.path().join("subdir").is_dir());
+        let has_dir = app.workspace_sidebar.tree[0]
+            .entries
+            .iter()
+            .any(|e| e.name == "subdir");
+        assert!(has_dir, "New folder should appear in tree");
+    }
+
+    #[test]
+    fn test_app_create_folder_already_exists() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::create_dir(folder.path().join("existing")).unwrap();
+        std::fs::write(folder.path().join("existing").join("keep.txt"), "keep").unwrap();
+
+        app.create_workspace("Exists Folder");
+        app.add_folder_path_to_workspace(folder.path());
+
+        // Should not overwrite existing directory
+        app.create_new_folder_in_workspace(folder.path(), "existing");
+        assert!(folder.path().join("existing").join("keep.txt").exists());
+    }
+
+    #[test]
+    fn test_app_rename_entry_in_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let old_file = folder.path().join("old_name.rs");
+        std::fs::write(&old_file, "fn main() {}").unwrap();
+
+        app.create_workspace("Rename Entry");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.rename_entry_in_workspace(&old_file, "new_name.rs");
+        assert!(!old_file.exists());
+        assert!(folder.path().join("new_name.rs").exists());
+    }
+
+    #[test]
+    fn test_app_rename_entry_target_exists() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("a.rs"), "a").unwrap();
+        std::fs::write(folder.path().join("b.rs"), "b").unwrap();
+
+        app.create_workspace("Rename Conflict");
+        app.add_folder_path_to_workspace(folder.path());
+
+        // Renaming a.rs to b.rs should fail (b.rs already exists)
+        app.rename_entry_in_workspace(&folder.path().join("a.rs"), "b.rs");
+        // Both files should still exist with original content
+        assert_eq!(
+            std::fs::read_to_string(folder.path().join("a.rs")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.path().join("b.rs")).unwrap(),
+            "b"
+        );
+    }
+
+    #[test]
+    fn test_app_rename_entry_no_parent() {
+        let (mut app, _dir) = app_with_workspace();
+        // Renaming a root path with no parent should be a no-op
+        #[cfg(unix)]
+        let root = Path::new("/");
+        #[cfg(windows)]
+        let root = Path::new("C:\\");
+        // This should just return without panicking
+        app.rename_entry_in_workspace(root, "new_name");
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_close() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Action Close");
+        assert!(app.workspace_sidebar.visible);
+
+        app.handle_sidebar_action(SidebarAction::CloseWorkspace);
+        assert!(!app.workspace_sidebar.visible);
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_create() {
+        let (mut app, _dir) = app_with_workspace();
+        app.handle_sidebar_action(SidebarAction::CreateWorkspace);
+        assert!(app.workspace_sidebar.visible);
+        assert_eq!(app.workspace_sidebar.workspace_name, "New Workspace");
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_rename() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Old");
+        let ws_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+
+        app.handle_sidebar_action(SidebarAction::RenameWorkspace(ws_id, "Renamed".to_string()));
+        assert_eq!(app.workspace_sidebar.workspace_name, "Renamed");
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_delete() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("To Delete");
+        let ws_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+
+        app.handle_sidebar_action(SidebarAction::DeleteWorkspace(ws_id));
+        assert!(!app.workspace_sidebar.visible);
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_confirm_new_file() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        app.create_workspace("File Action");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.handle_sidebar_action(SidebarAction::ConfirmNewFile(
+            folder.path().to_path_buf(),
+            "created.txt".to_string(),
+        ));
+        assert!(folder.path().join("created.txt").exists());
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_confirm_new_folder() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        app.create_workspace("Folder Action");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.handle_sidebar_action(SidebarAction::ConfirmNewFolder(
+            folder.path().to_path_buf(),
+            "new_dir".to_string(),
+        ));
+        assert!(folder.path().join("new_dir").is_dir());
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_confirm_rename() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("original.rs");
+        std::fs::write(&file, "").unwrap();
+
+        app.create_workspace("Rename Action");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.handle_sidebar_action(SidebarAction::ConfirmRenameEntry(
+            file.clone(),
+            "renamed.rs".to_string(),
+        ));
+        assert!(!file.exists());
+        assert!(folder.path().join("renamed.rs").exists());
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_none_is_noop() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Noop");
+        let name_before = app.workspace_sidebar.workspace_name.clone();
+        app.handle_sidebar_action(SidebarAction::None);
+        assert_eq!(app.workspace_sidebar.workspace_name, name_before);
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_remove_folder() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        app.create_workspace("Remove Action");
+        app.add_folder_path_to_workspace(folder.path());
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+
+        app.handle_sidebar_action(SidebarAction::RemoveFolder(folder.path().to_path_buf()));
+        assert!(app.workspace_sidebar.tree.is_empty());
+    }
+
+    #[test]
+    fn test_app_tick_workspace_watcher_no_watcher() {
+        let (mut app, _dir) = app_with_workspace();
+        // No watcher, should be a no-op
+        app.tick_workspace_watcher();
+        assert!(app.workspace_sidebar.tree.is_empty());
+    }
+
+    #[test]
+    fn test_app_tick_workspace_watcher_no_events() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        app.create_workspace("Watcher Test");
+        app.add_folder_path_to_workspace(folder.path());
+
+        // Poll immediately — no events expected
+        app.tick_workspace_watcher();
+        // Should not crash or change tree (beyond initial scan)
+    }
+
+    #[test]
+    fn test_app_get_cached_workspace_list() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("WS A");
+        app.create_workspace("WS B");
+
+        let list = app.get_cached_workspace_list().clone();
+        assert_eq!(list.len(), 2);
+        // Should be cached now
+        assert!(app.cached_workspace_list.is_some());
+
+        // Second call returns same cached data
+        let list2 = app.get_cached_workspace_list().clone();
+        assert_eq!(list, list2);
+    }
+
+    #[test]
+    fn test_app_invalidate_workspace_cache() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Cached");
+        let _ = app.get_cached_workspace_list();
+        assert!(app.cached_workspace_list.is_some());
+
+        app.invalidate_workspace_cache();
+        assert!(app.cached_workspace_list.is_none());
+    }
+
+    #[test]
+    fn test_app_restore_workspace_on_startup() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Restore Me");
+        let ws_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+
+        // Close sidebar but leave active in store
+        app.workspace_sidebar.visible = false;
+        app.workspace_sidebar.workspace_id = None;
+        app.workspace_sidebar.workspace_name.clear();
+
+        app.restore_workspace_on_startup();
+        assert!(app.workspace_sidebar.visible);
+        assert_eq!(app.workspace_sidebar.workspace_name, "Restore Me");
+        assert_eq!(
+            app.workspace_sidebar.workspace_id.as_deref(),
+            Some(ws_id.as_str())
+        );
+    }
+
+    #[test]
+    fn test_app_restore_workspace_on_startup_no_active() {
+        let (mut app, _dir) = app_with_workspace();
+        // No active workspace set — should be a no-op
+        app.restore_workspace_on_startup();
+        assert!(!app.workspace_sidebar.visible);
+        assert!(app.workspace_sidebar.workspace_id.is_none());
+    }
+
+    #[test]
+    fn test_app_create_workspace_no_store() {
+        let mut app = super::super::tests::test_app();
+        // workspace_store is None — should return early
+        app.create_workspace("No Store");
+        assert!(!app.workspace_sidebar.visible);
+        assert!(app.workspace_sidebar.workspace_id.is_none());
+    }
+
+    #[test]
+    fn test_app_open_workspace_no_store() {
+        let mut app = super::super::tests::test_app();
+        app.open_workspace("some-id");
+        assert!(!app.workspace_sidebar.visible);
+    }
+
+    #[test]
+    fn test_app_add_folder_no_store() {
+        let mut app = super::super::tests::test_app();
+        let folder = tempfile::tempdir().unwrap();
+        app.add_folder_path_to_workspace(folder.path());
+        assert!(app.workspace_sidebar.tree.is_empty());
+    }
+
+    #[test]
+    fn test_app_add_folder_no_active_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        // Store exists but no workspace is active
+        let folder = tempfile::tempdir().unwrap();
+        app.add_folder_path_to_workspace(folder.path());
+        assert!(app.workspace_sidebar.tree.is_empty());
+    }
+
+    #[test]
+    fn test_app_remove_folder_no_store() {
+        let mut app = super::super::tests::test_app();
+        app.remove_folder_from_workspace(Path::new("/nonexistent"));
+        // Should not panic
+    }
+
+    #[test]
+    fn test_app_rename_workspace_no_store() {
+        let mut app = super::super::tests::test_app();
+        app.rename_workspace("id", "name");
+        // Should not panic
+    }
+
+    #[test]
+    fn test_app_delete_workspace_no_store() {
+        let mut app = super::super::tests::test_app();
+        app.delete_workspace("id");
+        // Should not panic
+    }
+
+    #[test]
+    fn test_app_close_workspace_no_store() {
+        let mut app = super::super::tests::test_app();
+        app.close_workspace();
+        // Should not panic, and store error is silently ignored
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_switch() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("WS One");
+        app.create_workspace("WS Two");
+        let entries = app
+            .workspace_store
+            .as_ref()
+            .unwrap()
+            .list_workspaces()
+            .unwrap();
+        let ws_one_id = entries
+            .iter()
+            .find(|e| e.name == "WS One")
+            .unwrap()
+            .id
+            .clone();
+
+        app.handle_sidebar_action(SidebarAction::SwitchWorkspace(ws_one_id));
+        assert_eq!(app.workspace_sidebar.workspace_name, "WS One");
+    }
+
+    #[test]
+    fn test_app_add_folder_persists_to_store() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        app.create_workspace("Persist Folder");
+
+        app.add_folder_path_to_workspace(folder.path());
+
+        let entries = app
+            .workspace_store
+            .as_ref()
+            .unwrap()
+            .list_workspaces()
+            .unwrap();
+        let ws = entries.iter().find(|e| e.name == "Persist Folder").unwrap();
+        assert_eq!(ws.folders.len(), 1);
+        assert_eq!(ws.folders[0], folder.path().to_string_lossy().as_ref());
+    }
 }

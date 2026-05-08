@@ -661,4 +661,149 @@ mod tests {
         let result = find_in_children(&mut entries, Path::new("/project/not_a_dir.txt"));
         assert!(result.is_none(), "Should not match file entries");
     }
+
+    #[test]
+    fn test_scan_directory_dirs_first_then_files() {
+        let dir = TempDir::new().expect("create temp dir");
+        std::fs::write(dir.path().join("file_z.txt"), "").expect("write");
+        std::fs::create_dir(dir.path().join("dir_z")).expect("mkdir");
+        std::fs::write(dir.path().join("file_a.txt"), "").expect("write");
+        std::fs::create_dir(dir.path().join("dir_a")).expect("mkdir");
+
+        let entries = scan_directory(dir.path()).expect("scan");
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].kind, EntryKind::Directory);
+        assert_eq!(entries[0].name, "dir_a");
+        assert_eq!(entries[1].kind, EntryKind::Directory);
+        assert_eq!(entries[1].name, "dir_z");
+        assert_eq!(entries[2].kind, EntryKind::File);
+        assert_eq!(entries[2].name, "file_a.txt");
+        assert_eq!(entries[3].kind, EntryKind::File);
+        assert_eq!(entries[3].name, "file_z.txt");
+    }
+
+    #[test]
+    fn test_scan_directory_only_hidden_files_returns_empty() {
+        let dir = TempDir::new().expect("create temp dir");
+        std::fs::write(dir.path().join(".gitignore"), "").expect("write");
+        std::fs::create_dir(dir.path().join(".vscode")).expect("mkdir");
+
+        let entries = scan_directory(dir.path()).expect("scan");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_apply_fs_event_created_sorted_among_existing() {
+        let dir = TempDir::new().expect("create temp dir");
+        let file_a = dir.path().join("aaa.txt");
+        let file_c = dir.path().join("ccc.txt");
+        let file_b = dir.path().join("bbb.txt");
+        std::fs::write(&file_a, "").expect("write");
+        std::fs::write(&file_c, "").expect("write");
+        std::fs::write(&file_b, "").expect("write");
+
+        let mut roots = vec![FolderRoot {
+            path: dir.path().to_path_buf(),
+            entries: vec![
+                TreeEntry {
+                    name: "aaa.txt".to_string(),
+                    path: file_a,
+                    kind: EntryKind::File,
+                    expanded: false,
+                    children: Vec::new(),
+                },
+                TreeEntry {
+                    name: "ccc.txt".to_string(),
+                    path: file_c,
+                    kind: EntryKind::File,
+                    expanded: false,
+                    children: Vec::new(),
+                },
+            ],
+            expanded: true,
+        }];
+
+        apply_fs_event(&mut roots, &FsEvent::Created(file_b));
+        assert_eq!(roots[0].entries.len(), 3);
+        assert_eq!(roots[0].entries[0].name, "aaa.txt");
+        assert_eq!(roots[0].entries[1].name, "bbb.txt");
+        assert_eq!(roots[0].entries[2].name, "ccc.txt");
+    }
+
+    #[test]
+    fn test_apply_fs_event_removed_last_entry() {
+        let mut roots = vec![FolderRoot {
+            path: PathBuf::from("/project"),
+            entries: vec![TreeEntry {
+                name: "only.rs".to_string(),
+                path: PathBuf::from("/project/only.rs"),
+                kind: EntryKind::File,
+                expanded: false,
+                children: Vec::new(),
+            }],
+            expanded: true,
+        }];
+
+        apply_fs_event(
+            &mut roots,
+            &FsEvent::Removed(PathBuf::from("/project/only.rs")),
+        );
+        assert!(roots[0].entries.is_empty());
+    }
+
+    #[test]
+    fn test_apply_multiple_events_sequence() {
+        let dir = TempDir::new().expect("create temp dir");
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        std::fs::write(&file_a, "").expect("write");
+        std::fs::write(&file_b, "").expect("write");
+
+        let mut roots = vec![FolderRoot {
+            path: dir.path().to_path_buf(),
+            entries: Vec::new(),
+            expanded: true,
+        }];
+
+        // Create two files
+        apply_fs_event(&mut roots, &FsEvent::Created(file_a.clone()));
+        apply_fs_event(&mut roots, &FsEvent::Created(file_b.clone()));
+        assert_eq!(roots[0].entries.len(), 2);
+
+        // Remove one
+        apply_fs_event(&mut roots, &FsEvent::Removed(file_a));
+        assert_eq!(roots[0].entries.len(), 1);
+        assert_eq!(roots[0].entries[0].name, "b.txt");
+
+        // Modified on existing is noop
+        apply_fs_event(&mut roots, &FsEvent::Modified(file_b));
+        assert_eq!(roots[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn test_find_parent_entries_empty_roots() {
+        let mut roots: Vec<FolderRoot> = Vec::new();
+        let result = find_parent_entries(&mut roots, &PathBuf::from("/project/file.txt"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_sort_entries_empty_slice() {
+        let mut entries: Vec<TreeEntry> = Vec::new();
+        sort_entries(&mut entries);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_sort_entries_single_item() {
+        let mut entries = vec![TreeEntry {
+            name: "only.txt".to_string(),
+            path: PathBuf::from("/only.txt"),
+            kind: EntryKind::File,
+            expanded: false,
+            children: Vec::new(),
+        }];
+        sort_entries(&mut entries);
+        assert_eq!(entries[0].name, "only.txt");
+    }
 }

@@ -259,6 +259,34 @@ mod tests {
     }
 
     #[test]
+    fn test_watcher_debug_format() {
+        let watcher = WorkspaceWatcher::new().expect("create watcher");
+        let debug = format!("{watcher:?}");
+        assert!(debug.contains("WorkspaceWatcher"));
+    }
+
+    #[test]
+    fn test_watch_and_unwatch_same_dir() {
+        let dir = TempDir::new().expect("create temp dir");
+        let mut watcher = WorkspaceWatcher::new().expect("create watcher");
+        watcher.watch(dir.path()).expect("watch");
+        watcher.unwatch(dir.path()).expect("unwatch");
+        // Should be able to re-watch after unwatching
+        watcher.watch(dir.path()).expect("re-watch");
+    }
+
+    #[test]
+    fn test_fs_event_variants_inequality() {
+        let path = PathBuf::from("/test");
+        let created = FsEvent::Created(path.clone());
+        let modified = FsEvent::Modified(path.clone());
+        let removed = FsEvent::Removed(path);
+        assert_ne!(created, modified);
+        assert_ne!(created, removed);
+        assert_ne!(modified, removed);
+    }
+
+    #[test]
     fn test_file_deletion_produces_removed_event() {
         let dir = TempDir::new().expect("create temp dir");
         let file_path = dir.path().join("to_delete.txt");

@@ -345,4 +345,22 @@ mod tests {
         std::fs::write(&b, "").expect("write b");
         assert!(!paths_equivalent(&a, &b));
     }
+
+    #[test]
+    fn test_workspace_file_path_ends_with_expected_name() {
+        let path = workspace_file_path();
+        assert!(path.ends_with(WORKSPACE_FILE_NAME));
+    }
+
+    #[test]
+    fn test_portable_workspace_file_path_ends_with_expected_name() {
+        let path = portable_workspace_file_path();
+        assert!(path.ends_with(WORKSPACE_FILE_NAME));
+    }
+
+    #[test]
+    fn test_problem_log_file_path_ends_with_expected_name() {
+        let path = problem_log_file_path();
+        assert!(path.ends_with(PROBLEM_LOG_FILE_NAME));
+    }
 }
