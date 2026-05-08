@@ -10,7 +10,7 @@ use super::context_menu::OperationScope;
 use super::{App, ThemeMode};
 
 impl App {
-    /// Renders the menu bar with File, Edit, Search, Encoding, View, Settings, Window, and Help menus.
+    /// Renders the menu bar with File, Edit, Search, Encoding, View, Settings, Window, Workspace, and Help menus.
     pub(crate) fn show_menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         egui::MenuBar::new().ui(ui, |ui| {
             self.show_file_menu(ui, ctx);
@@ -20,6 +20,7 @@ impl App {
             self.show_view_menu(ui, ctx);
             self.show_settings_menu(ui);
             self.show_window_menu(ui);
+            self.show_workspace_menu(ui);
             self.show_help_menu(ui);
         });
     }
@@ -610,6 +611,91 @@ impl App {
             if ui.button("About rust-pad").clicked() {
                 self.about_open = true;
                 ui.close();
+            }
+        });
+    }
+
+    fn show_workspace_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Workspace", |ui| {
+            ui.set_min_width(220.0);
+
+            if ui.button("New Workspace...").clicked() {
+                self.create_new_workspace();
+                ui.close();
+            }
+
+            // Open Workspace submenu (uses cached list)
+            let workspaces = self.get_cached_workspace_list().clone();
+
+            if !workspaces.is_empty() {
+                ui.menu_button("Open Workspace", |ui| {
+                    for (ws_id, ws_name) in &workspaces {
+                        let is_active =
+                            self.workspace_sidebar.workspace_id.as_deref() == Some(ws_id.as_str());
+                        let label = if is_active {
+                            format!("\u{2713} {ws_name}")
+                        } else {
+                            ws_name.clone()
+                        };
+                        if ui.button(&label).clicked() {
+                            if !is_active {
+                                self.switch_workspace(ws_id);
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+            }
+
+            let has_active = self.workspace_sidebar.workspace_id.is_some();
+            ui.separator();
+
+            if ui
+                .add_enabled(has_active, egui::Button::new("Add Folder to Workspace..."))
+                .clicked()
+            {
+                self.add_folder_to_workspace();
+                ui.close();
+            }
+
+            if ui
+                .add_enabled(has_active, egui::Button::new("Close Workspace"))
+                .clicked()
+            {
+                self.close_workspace();
+                ui.close();
+            }
+
+            ui.separator();
+
+            // Toggle sidebar visibility
+            let sidebar_label = if self.workspace_sidebar.visible {
+                "Hide Sidebar"
+            } else {
+                "Show Sidebar"
+            };
+            if ui
+                .add_enabled(
+                    has_active,
+                    egui::Button::new(sidebar_label).shortcut_text("Ctrl+B"),
+                )
+                .clicked()
+            {
+                self.workspace_sidebar.visible = !self.workspace_sidebar.visible;
+                ui.close();
+            }
+
+            // Delete workspace submenu
+            if !workspaces.is_empty() {
+                ui.separator();
+                ui.menu_button("Delete Workspace", |ui| {
+                    for (ws_id, ws_name) in &workspaces {
+                        if ui.button(ws_name).clicked() {
+                            self.delete_workspace(ws_id);
+                            ui.close();
+                        }
+                    }
+                });
             }
         });
     }

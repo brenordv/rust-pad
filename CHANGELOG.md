@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.5.0]
+
+### Added
+
+#### Workspace Sidebar
+- New **Workspace** menu and sidebar panel (Ctrl+B to toggle) that provides a file explorer for organizing project folders into named workspaces.
+- **Named workspaces**: Create, rename, switch, and delete workspaces. Each workspace groups a set of root folders and is persisted across app restarts in a dedicated database (`rust-pad-workspaces.redb`).
+- **Folder management**: Add folders to a workspace via the menu or sidebar toolbar. Duplicate and overlapping (parent/child) folders are detected and rejected with a user-visible message. Remove folders from the workspace without deleting them from disk.
+- **File tree**: Collapsible folder tree with lazy-loaded children (scanned on first expand, cached afterwards). Directories are listed before files, both sorted alphabetically (case-insensitive). Hidden files (starting with `.`) are filtered out. Large directories are capped at 10,000 entries.
+- **File operations from sidebar**: Double-click a file to open it in the editor. Right-click context menus offer New File, New Folder, Rename, and Delete (send to trash) for files and directories. Inline text fields for naming new entries and renaming existing ones.
+- **Real-time filesystem monitoring**: Workspace directories are watched via the `notify` crate with 500ms debouncing. New, modified, and deleted files update the tree incrementally without full re-scans.
+- **Session persistence**: Sidebar visibility, width, and the active workspace are saved to configuration and restored on startup. The sidebar width is resizable (150–500px) via config.
+- **Keyboard shortcut**: Ctrl+B toggles sidebar visibility. Enter confirms inline rename/create; Escape cancels. Key input is suppressed from the editor during inline edits to prevent bleed-through.
+- **Inaccessible folder handling**: Root folders that become unavailable (unmounted drives, deleted directories) are shown with a warning icon and "(unavailable)" label instead of crashing.
+
 ## [2.4.4]
 
 ### Fixed

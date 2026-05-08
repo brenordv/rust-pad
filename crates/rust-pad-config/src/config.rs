@@ -67,6 +67,10 @@ pub struct AppConfig {
     /// Whether synchronized scrolling mirrors horizontal deltas in addition
     /// to vertical. Has no effect when `sync_scroll_enabled` is false.
     pub sync_scroll_horizontal: bool,
+    /// Whether the workspace sidebar was visible in the last session.
+    pub workspace_sidebar_visible: bool,
+    /// Width of the workspace sidebar in the last session.
+    pub workspace_sidebar_width: f32,
     pub themes: Vec<ThemeDefinition>,
 }
 
@@ -98,6 +102,8 @@ impl Default for AppConfig {
             print_show_line_numbers: true,
             sync_scroll_enabled: false,
             sync_scroll_horizontal: true,
+            workspace_sidebar_visible: false,
+            workspace_sidebar_width: 250.0,
             themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
         }
     }
@@ -242,6 +248,7 @@ impl AppConfig {
         if self.session_content_max_kb > 0 {
             self.session_content_max_kb = self.session_content_max_kb.clamp(1, 102_400);
         }
+        self.workspace_sidebar_width = self.workspace_sidebar_width.clamp(150.0, 500.0);
     }
 }
 
@@ -629,5 +636,94 @@ mod tests {
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.max_file_size_mb, 256);
+    }
+
+    // ── Workspace sidebar width tests ────────────────────────────────
+
+    #[test]
+    fn test_workspace_sidebar_width_default() {
+        let config = AppConfig::default();
+        assert!((config.workspace_sidebar_width - 250.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_sanitize_clamps_workspace_sidebar_width_below_min() {
+        let mut config = AppConfig {
+            workspace_sidebar_width: 50.0,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!((config.workspace_sidebar_width - 150.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_sanitize_clamps_workspace_sidebar_width_above_max() {
+        let mut config = AppConfig {
+            workspace_sidebar_width: 800.0,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!((config.workspace_sidebar_width - 500.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_sanitize_preserves_valid_workspace_sidebar_width() {
+        let mut config = AppConfig {
+            workspace_sidebar_width: 300.0,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!((config.workspace_sidebar_width - 300.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_visible_default_false() {
+        let config = AppConfig::default();
+        assert!(!config.workspace_sidebar_visible);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_width_boundary_min() {
+        let mut config = AppConfig {
+            workspace_sidebar_width: 150.0,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!((config.workspace_sidebar_width - 150.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_width_boundary_max() {
+        let mut config = AppConfig {
+            workspace_sidebar_width: 500.0,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!((config.workspace_sidebar_width - 500.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_fields_serde_roundtrip() {
+        let mut config = AppConfig::default();
+        config.workspace_sidebar_visible = true;
+        config.workspace_sidebar_width = 350.0;
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.workspace_sidebar_visible);
+        assert!((parsed.workspace_sidebar_width - 350.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_workspace_sidebar_fields_missing_in_json_uses_defaults() {
+        // A JSON without workspace fields should deserialize with defaults
+        let json = r#"{"tab_size": 4}"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!parsed.workspace_sidebar_visible);
+        assert!(
+            (parsed.workspace_sidebar_width - 0.0).abs() < f32::EPSILON
+                || (parsed.workspace_sidebar_width - 250.0).abs() < f32::EPSILON
+        );
     }
 }

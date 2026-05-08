@@ -71,7 +71,9 @@ impl App {
         // Handle semantic clipboard events (from focused widget).
         // Suppressed when a modal dialog is open or when the Find/Replace
         // dialog has focus (so Ctrl+C/V/X operate on the dialog's text fields).
-        let suppress_editor_input = self.is_modal_dialog_open() || self.find_replace.has_focus;
+        let suppress_editor_input = self.is_modal_dialog_open()
+            || self.find_replace.has_focus
+            || self.workspace_sidebar.rename_buffer.is_some();
         if !suppress_editor_input {
             if has_copy {
                 self.copy();
@@ -125,7 +127,7 @@ impl App {
         }
     }
 
-    /// File operation shortcuts (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+P, Ctrl+W).
+    /// File operation shortcuts (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+P, Ctrl+W, Ctrl+B).
     /// Returns `true` if the key was consumed.
     fn handle_file_shortcut(&mut self, key: egui::Key, ctrl: bool, shift: bool) -> bool {
         if !ctrl {
@@ -144,6 +146,12 @@ impl App {
             egui::Key::W => {
                 let active = self.tabs.active;
                 self.request_close_tab(active);
+            }
+            egui::Key::B => {
+                // Toggle workspace sidebar visibility (only if a workspace is open)
+                if self.workspace_sidebar.workspace_id.is_some() {
+                    self.workspace_sidebar.visible = !self.workspace_sidebar.visible;
+                }
             }
             _ => return false,
         }

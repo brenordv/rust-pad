@@ -24,6 +24,9 @@ pdf-writer.workspace = true
 ttf-parser.workspace = true
 opener.workspace = true
 uuid.workspace = true
+trash.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true

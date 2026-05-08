@@ -4,5 +4,6 @@ mod editor;
 pub mod io_worker;
 pub mod problem_log;
 mod tabs;
+pub mod workspace;
 
 pub use app::{App, SettingsTab, StartupArgs, ThemeController, ThemeMode};
