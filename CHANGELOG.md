@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.6.0]
+
+### Added
+- Added the ability to the **Workspace** sidebar to include hidden folders.
+
 ## [2.5.0]
 
 ### Added

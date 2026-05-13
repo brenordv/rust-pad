@@ -66,13 +66,16 @@ fn generate_workspace_name(existing: &[WorkspaceEntry]) -> String {
 }
 
 /// Scans all workspace folders and creates a watcher for them.
-fn scan_workspace_folders(folders: &[String]) -> (Vec<FolderRoot>, Option<WorkspaceWatcher>) {
+fn scan_workspace_folders(
+    folders: &[String],
+    show_hidden: bool,
+) -> (Vec<FolderRoot>, Option<WorkspaceWatcher>) {
     let mut watcher = WorkspaceWatcher::new().ok();
     let mut tree = Vec::new();
 
     for folder_str in folders {
         let folder_path = PathBuf::from(folder_str);
-        let entries = scan_dir_safe(&folder_path);
+        let entries = scan_dir_safe(&folder_path, show_hidden);
         try_watch_folder(&mut watcher, &folder_path);
         tree.push(FolderRoot {
             path: folder_path,
@@ -96,9 +99,9 @@ fn try_watch_folder(watcher: &mut Option<WorkspaceWatcher>, folder_path: &Path) 
 }
 
 /// Scans a directory if it exists, returning an empty list on failure or non-directory paths.
-fn scan_dir_safe(folder_path: &Path) -> Vec<TreeEntry> {
+fn scan_dir_safe(folder_path: &Path, show_hidden: bool) -> Vec<TreeEntry> {
     if folder_path.is_dir() {
-        scan_directory(folder_path).unwrap_or_default()
+        scan_directory(folder_path, show_hidden).unwrap_or_default()
     } else {
         Vec::new()
     }
@@ -162,7 +165,11 @@ impl App {
 
     /// Applies a filesystem event to the sidebar tree.
     fn notify_tree(&mut self, event: &FsEvent) {
-        crate::workspace::scanner::apply_fs_event(&mut self.workspace_sidebar.tree, event);
+        crate::workspace::scanner::apply_fs_event(
+            &mut self.workspace_sidebar.tree,
+            event,
+            self.workspace_sidebar.show_hidden,
+        );
     }
 
     /// Creates a new workspace with the given name and activates it.
@@ -231,7 +238,8 @@ impl App {
             tracing::warn!("Failed to set active workspace: {e}");
         }
 
-        let (tree, watcher) = scan_workspace_folders(&entry.folders);
+        let (tree, watcher) =
+            scan_workspace_folders(&entry.folders, self.workspace_sidebar.show_hidden);
         self.activate_sidebar(entry.id, entry.name, tree, watcher);
     }
 
@@ -304,7 +312,7 @@ impl App {
         }
 
         // Scan, watch, and add to tree
-        let scanned = scan_dir_safe(folder_path);
+        let scanned = scan_dir_safe(folder_path, self.workspace_sidebar.show_hidden);
         try_watch_folder(&mut self.workspace_sidebar.watcher, folder_path);
         self.workspace_sidebar.tree.push(FolderRoot {
             path: folder_path.to_path_buf(),
@@ -492,6 +500,9 @@ impl App {
             SidebarAction::ConfirmRenameEntry(old_path, new_name) => {
                 self.rename_entry_in_workspace(&old_path, &new_name);
             }
+            SidebarAction::ToggleHiddenFiles => {
+                self.toggle_hidden_files();
+            }
             SidebarAction::None => {}
         }
     }
@@ -519,6 +530,19 @@ impl App {
             _ => return,
         };
         self.open_workspace(&active_id);
+    }
+
+    /// Toggles hidden file visibility and re-scans all folder roots.
+    pub(crate) fn toggle_hidden_files(&mut self) {
+        self.workspace_sidebar.show_hidden = !self.workspace_sidebar.show_hidden;
+        self.rescan_workspace_tree();
+    }
+
+    /// Re-scans all folder roots using the current `show_hidden` setting.
+    pub(crate) fn rescan_workspace_tree(&mut self) {
+        for root in &mut self.workspace_sidebar.tree {
+            root.entries = scan_dir_safe(&root.path, self.workspace_sidebar.show_hidden);
+        }
     }
 }
 
@@ -632,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_scan_dir_safe_nonexistent() {
-        let result = scan_dir_safe(Path::new("/nonexistent_dir_xyz_123"));
+        let result = scan_dir_safe(Path::new("/nonexistent_dir_xyz_123"), false);
         assert!(result.is_empty());
     }
 
@@ -640,7 +664,7 @@ mod tests {
     fn test_scan_dir_safe_valid_directory() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("file.txt"), "").unwrap();
-        let result = scan_dir_safe(dir.path());
+        let result = scan_dir_safe(dir.path(), false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "file.txt");
     }
@@ -650,13 +674,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("not_a_dir.txt");
         std::fs::write(&file, "").unwrap();
-        let result = scan_dir_safe(&file);
+        let result = scan_dir_safe(&file, false);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_scan_workspace_folders_empty() {
-        let (tree, watcher) = scan_workspace_folders(&[]);
+        let (tree, watcher) = scan_workspace_folders(&[], false);
         assert!(tree.is_empty());
         // Watcher is created but has nothing to watch
         assert!(watcher.is_some());
@@ -674,7 +698,7 @@ mod tests {
             dir1.path().to_string_lossy().into_owned(),
             dir2.path().to_string_lossy().into_owned(),
         ];
-        let (tree, watcher) = scan_workspace_folders(&folders);
+        let (tree, watcher) = scan_workspace_folders(&folders, false);
 
         assert_eq!(tree.len(), 2);
         assert_eq!(tree[0].entries.len(), 1);
@@ -689,7 +713,7 @@ mod tests {
     #[test]
     fn test_scan_workspace_folders_with_nonexistent() {
         let folders = vec!["/nonexistent_dir_scan_test_xyz".to_string()];
-        let (tree, _watcher) = scan_workspace_folders(&folders);
+        let (tree, _watcher) = scan_workspace_folders(&folders, false);
 
         assert_eq!(tree.len(), 1);
         assert!(
@@ -1393,5 +1417,52 @@ mod tests {
         let ws = entries.iter().find(|e| e.name == "Persist Folder").unwrap();
         assert_eq!(ws.folders.len(), 1);
         assert_eq!(ws.folders[0], folder.path().to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn test_app_toggle_hidden_files() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join(".hidden"), "").unwrap();
+        std::fs::write(folder.path().join("visible.txt"), "").unwrap();
+
+        app.create_workspace("Hidden Toggle");
+        app.add_folder_path_to_workspace(folder.path());
+
+        // Default: hidden files excluded
+        assert!(!app.workspace_sidebar.show_hidden);
+        assert_eq!(app.workspace_sidebar.tree[0].entries.len(), 1);
+        assert_eq!(app.workspace_sidebar.tree[0].entries[0].name, "visible.txt");
+
+        // Toggle on: hidden files included
+        app.toggle_hidden_files();
+        assert!(app.workspace_sidebar.show_hidden);
+        assert_eq!(app.workspace_sidebar.tree[0].entries.len(), 2);
+        assert!(app.workspace_sidebar.tree[0]
+            .entries
+            .iter()
+            .any(|e| e.name == ".hidden"));
+
+        // Toggle off: hidden files excluded again
+        app.toggle_hidden_files();
+        assert!(!app.workspace_sidebar.show_hidden);
+        assert_eq!(app.workspace_sidebar.tree[0].entries.len(), 1);
+        assert_eq!(app.workspace_sidebar.tree[0].entries[0].name, "visible.txt");
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_toggle_hidden() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join(".dotfile"), "").unwrap();
+        std::fs::write(folder.path().join("normal.txt"), "").unwrap();
+
+        app.create_workspace("Toggle Action");
+        app.add_folder_path_to_workspace(folder.path());
+
+        assert!(!app.workspace_sidebar.show_hidden);
+        app.handle_sidebar_action(SidebarAction::ToggleHiddenFiles);
+        assert!(app.workspace_sidebar.show_hidden);
+        assert_eq!(app.workspace_sidebar.tree[0].entries.len(), 2);
     }
 }

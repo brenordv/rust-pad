@@ -18,6 +18,7 @@ pub enum SettingsTab {
     FileDialogs,
     AutoSave,
     History,
+    Workspace,
 }
 
 /// Fixed width for the navigation sidebar (in logical pixels).
@@ -75,6 +76,11 @@ impl App {
                                 SettingsTab::History,
                                 "History",
                             );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::Workspace,
+                                "Workspace",
+                            );
                         },
                     );
 
@@ -93,6 +99,7 @@ impl App {
                                 SettingsTab::FileDialogs => self.settings_file_dialogs(ui),
                                 SettingsTab::AutoSave => self.settings_auto_save(ui),
                                 SettingsTab::History => self.settings_history(ui),
+                                SettingsTab::Workspace => self.settings_workspace(ui),
                             });
                         },
                     );
@@ -398,5 +405,27 @@ impl App {
                 self.recent_files.files.clear();
             }
         });
+    }
+
+    fn settings_workspace(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Workspace");
+        ui.add_space(4.0);
+
+        if ui
+            .checkbox(
+                &mut self.workspace_sidebar.show_hidden,
+                "Show hidden files and folders",
+            )
+            .changed()
+        {
+            self.rescan_workspace_tree();
+        }
+        ui.label(
+            egui::RichText::new(
+                "When enabled, files and folders starting with '.' are visible in the workspace tree.",
+            )
+            .small()
+            .color(egui::Color32::GRAY),
+        );
     }
 }

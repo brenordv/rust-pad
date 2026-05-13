@@ -13,8 +13,8 @@ const MIN_WIDTH: f32 = 150.0;
 const MAX_WIDTH: f32 = 500.0;
 /// Default sidebar width in pixels.
 const DEFAULT_WIDTH: f32 = 250.0;
-/// Space reserved for toolbar buttons (close, add folder) in the header row.
-const HEADER_TOOLBAR_RESERVED: f32 = 80.0;
+/// Space reserved for toolbar buttons (close, add folder, toggle hidden) in the header row.
+const HEADER_TOOLBAR_RESERVED: f32 = 110.0;
 
 /// Actions the sidebar can request from the main application.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,8 @@ pub enum SidebarAction {
     ConfirmNewFolder(PathBuf, String),
     /// Confirm rename of a file or folder (original_path, new_name).
     ConfirmRenameEntry(PathBuf, String),
+    /// Toggle visibility of hidden files in the workspace tree.
+    ToggleHiddenFiles,
     /// No action.
     None,
 }
@@ -96,6 +98,8 @@ pub struct WorkspaceSidebar {
     pub(crate) new_entry: Option<NewEntryState>,
     /// Inline state for renaming a file or folder.
     pub(crate) rename_entry: Option<RenameEntryState>,
+    /// Whether hidden files/folders (names starting with `.`) are shown.
+    pub show_hidden: bool,
 }
 
 impl Default for WorkspaceSidebar {
@@ -119,6 +123,7 @@ impl WorkspaceSidebar {
             rename_just_confirmed: false,
             new_entry: None,
             rename_entry: None,
+            show_hidden: false,
         }
     }
 
@@ -192,6 +197,23 @@ impl WorkspaceSidebar {
                 }
                 if ui.small_button("+").on_hover_text("Add folder").clicked() {
                     *action = SidebarAction::AddFolder;
+                }
+                let hidden_label = if self.show_hidden {
+                    "\u{25C9}"
+                } else {
+                    "\u{25CE}"
+                };
+                let hidden_tooltip = if self.show_hidden {
+                    "Hide hidden files"
+                } else {
+                    "Show hidden files"
+                };
+                if ui
+                    .small_button(hidden_label)
+                    .on_hover_text(hidden_tooltip)
+                    .clicked()
+                {
+                    *action = SidebarAction::ToggleHiddenFiles;
                 }
             });
         });
@@ -329,6 +351,7 @@ impl WorkspaceSidebar {
                             &mut self.new_entry,
                             &mut self.rename_entry,
                             &mut self.rename_just_confirmed,
+                            self.show_hidden,
                         );
                     } else {
                         ui.weak("Folder not found or inaccessible");
@@ -418,6 +441,7 @@ fn render_directory_entry(
     rename_just_confirmed: &mut bool,
     new_entry_request: &mut Option<NewEntryState>,
     rename_request: &mut Option<RenameEntryState>,
+    show_hidden: bool,
 ) {
     let name = entry.name.clone();
     let path = entry.path.clone();
@@ -461,7 +485,7 @@ fn render_directory_entry(
             // cached in `entry.children` so subsequent frames are free.
             if entry.children.is_empty() {
                 let dir_path = entry.path.clone();
-                if let Ok(children) = super::scanner::scan_directory(&dir_path) {
+                if let Ok(children) = super::scanner::scan_directory(&dir_path, show_hidden) {
                     entry.children = children;
                 }
             }
@@ -473,6 +497,7 @@ fn render_directory_entry(
                 new_entry,
                 rename_entry,
                 rename_just_confirmed,
+                show_hidden,
             );
         });
 
@@ -566,6 +591,7 @@ fn render_inline_new_entry_field(
 ///
 /// Works at any nesting depth — directories lazy-load their children on first
 /// expand and cache the result in `TreeEntry.children`.
+#[allow(clippy::too_many_arguments)]
 fn render_entry_list(
     ui: &mut egui::Ui,
     parent_path: &Path,
@@ -574,6 +600,7 @@ fn render_entry_list(
     new_entry: &mut Option<NewEntryState>,
     rename_entry: &mut Option<RenameEntryState>,
     rename_just_confirmed: &mut bool,
+    show_hidden: bool,
 ) {
     let mut new_entry_request: Option<NewEntryState> = None;
     let mut rename_request: Option<RenameEntryState> = None;
@@ -604,6 +631,7 @@ fn render_entry_list(
                     rename_just_confirmed,
                     &mut new_entry_request,
                     &mut rename_request,
+                    show_hidden,
                 );
             }
             EntryKind::File => {
@@ -696,6 +724,7 @@ mod tests {
         assert!(!sidebar.rename_just_confirmed);
         assert!(sidebar.new_entry.is_none());
         assert!(sidebar.rename_entry.is_none());
+        assert!(!sidebar.show_hidden);
     }
 
     #[test]
@@ -727,6 +756,7 @@ mod tests {
             SidebarAction::ConfirmNewFile(PathBuf::from("/d"), "file.txt".to_string()),
             SidebarAction::ConfirmNewFolder(PathBuf::from("/e"), "folder".to_string()),
             SidebarAction::ConfirmRenameEntry(PathBuf::from("/f"), "new_name".to_string()),
+            SidebarAction::ToggleHiddenFiles,
             SidebarAction::None,
         ];
 

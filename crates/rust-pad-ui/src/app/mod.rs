@@ -310,6 +310,7 @@ impl App {
         let max_file_size_bytes = app_config.max_file_size_bytes();
         let ws_sidebar_visible = app_config.workspace_sidebar_visible;
         let ws_sidebar_width = app_config.workspace_sidebar_width;
+        let ws_show_hidden = app_config.show_hidden_files;
 
         // Best-effort cleanup of stale temp PDFs from previous sessions.
         Self::cleanup_stale_print_temp_files();
@@ -391,6 +392,7 @@ impl App {
 
         // Restore workspace sidebar state from config.
         app.workspace_sidebar.set_width(ws_sidebar_width);
+        app.workspace_sidebar.show_hidden = ws_show_hidden;
         if ws_sidebar_visible {
             app.restore_workspace_on_startup();
         }
@@ -1204,6 +1206,7 @@ impl eframe::App for App {
             sync_scroll_horizontal: self.sync_scroll_horizontal,
             workspace_sidebar_visible: self.workspace_sidebar.visible,
             workspace_sidebar_width: self.workspace_sidebar.width,
+            show_hidden_files: self.workspace_sidebar.show_hidden,
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
