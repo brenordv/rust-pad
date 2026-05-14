@@ -473,13 +473,9 @@ impl App {
             // Synchronized scrolling — only meaningful when split is active.
             // The flag itself is persisted in AppConfig regardless, so
             // disabling/re-enabling the split preserves the user's choice.
-            let sync_button = egui::Button::new(if self.sync_scroll_enabled {
-                "✓ Synchronized Scrolling"
-            } else {
-                "  Synchronized Scrolling"
-            })
-            .shortcut_text("Ctrl+Alt+S");
-            let sync_response = ui.add_enabled(split_active, sync_button);
+            let mut sync_enabled = self.sync_scroll_enabled;
+            let sync_checkbox = egui::Checkbox::new(&mut sync_enabled, "Synchronized Scrolling");
+            let sync_response = ui.add_enabled(split_active, sync_checkbox);
             if !split_active {
                 sync_response.on_hover_text("Enable Split View first");
             } else if sync_response.clicked() {
