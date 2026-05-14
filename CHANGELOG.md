@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.7.0]
+
+### Added
+- Drag-and-drop folders onto the application window to add them to the active workspace. If no workspace exists, one is created automatically. The sidebar is shown after the drop so the user can see the result.
+
+### Fixed
+- Suppressed false-positive SonarCloud security finding about missing `Cargo.lock` in workspace member crates. Cargo workspaces produce a single lock file at the root by design.
+
 ## [2.6.0]
 
 ### Added
