@@ -18,10 +18,15 @@ pub enum SettingsTab {
     FileDialogs,
     AutoSave,
     History,
+    Workspace,
 }
 
 /// Fixed width for the navigation sidebar (in logical pixels).
 const SIDEBAR_WIDTH: f32 = 130.0;
+/// Minimum width for the right content panel (prevents window resize on tab switch).
+const CONTENT_MIN_WIDTH: f32 = 500.0;
+/// Minimum height for the settings window content area.
+const CONTENT_MIN_HEIGHT: f32 = 420.0;
 
 impl App {
     /// Renders the settings dialog window.
@@ -40,8 +45,11 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                // Pin both panels to the full available height so the window
-                // stays the same size regardless of which section is active.
+                // Prevent the window from changing size when switching tabs.
+                ui.set_min_size(egui::vec2(
+                    SIDEBAR_WIDTH + CONTENT_MIN_WIDTH,
+                    CONTENT_MIN_HEIGHT,
+                ));
                 let panel_height = ui.available_height();
 
                 ui.horizontal_top(|ui| {
@@ -75,6 +83,11 @@ impl App {
                                 SettingsTab::History,
                                 "History",
                             );
+                            ui.selectable_value(
+                                &mut self.settings_tab,
+                                SettingsTab::Workspace,
+                                "Workspace",
+                            );
                         },
                     );
 
@@ -84,15 +97,17 @@ impl App {
                     // Explicit top-down layout prevents inheriting the
                     // horizontal direction from the parent.
                     ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), panel_height),
+                        egui::vec2(ui.available_width().max(CONTENT_MIN_WIDTH), panel_height),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
+                            ui.set_min_width(CONTENT_MIN_WIDTH);
                             egui::ScrollArea::vertical().show(ui, |ui| match self.settings_tab {
                                 SettingsTab::General => self.settings_general(ui, ctx),
                                 SettingsTab::Editor => self.settings_editor(ui),
                                 SettingsTab::FileDialogs => self.settings_file_dialogs(ui),
                                 SettingsTab::AutoSave => self.settings_auto_save(ui),
                                 SettingsTab::History => self.settings_history(ui),
+                                SettingsTab::Workspace => self.settings_workspace(ui),
                             });
                         },
                     );
@@ -398,5 +413,27 @@ impl App {
                 self.recent_files.files.clear();
             }
         });
+    }
+
+    fn settings_workspace(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Workspace");
+        ui.add_space(4.0);
+
+        if ui
+            .checkbox(
+                &mut self.workspace_sidebar.show_hidden,
+                "Show hidden files and folders",
+            )
+            .changed()
+        {
+            self.rescan_workspace_tree();
+        }
+        ui.label(
+            egui::RichText::new(
+                "When enabled, files and folders starting with '.' are visible in the workspace tree.",
+            )
+            .small()
+            .color(egui::Color32::GRAY),
+        );
     }
 }

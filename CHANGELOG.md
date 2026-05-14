@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.6.0]
+
+### Added
+- Added the ability to the **Workspace** sidebar to include hidden folders.
+
+### Fixed
+- Updated minimum window dimensions for the settings dialog to accommodate new content and stop it from wiggling around.
+- Fixed toggle menu items (e.g., View -> Synchronized Scrolling) showing a square instead of a checkmark and being misaligned when off. Replaced manual text prefix with a proper checkbox widget.
+
 ## [2.5.0]
 
 ### Added

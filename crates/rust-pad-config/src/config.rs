@@ -71,6 +71,8 @@ pub struct AppConfig {
     pub workspace_sidebar_visible: bool,
     /// Width of the workspace sidebar in the last session.
     pub workspace_sidebar_width: f32,
+    /// Whether hidden files/folders (names starting with `.`) are shown in the workspace tree.
+    pub show_hidden_files: bool,
     pub themes: Vec<ThemeDefinition>,
 }
 
@@ -104,6 +106,7 @@ impl Default for AppConfig {
             sync_scroll_horizontal: true,
             workspace_sidebar_visible: false,
             workspace_sidebar_width: 250.0,
+            show_hidden_files: false,
             themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
         }
     }
@@ -725,5 +728,31 @@ mod tests {
             (parsed.workspace_sidebar_width - 0.0).abs() < f32::EPSILON
                 || (parsed.workspace_sidebar_width - 250.0).abs() < f32::EPSILON
         );
+    }
+
+    // ── Show hidden files tests ─────────────────────────────────────
+
+    #[test]
+    fn test_show_hidden_files_default_false() {
+        let config = AppConfig::default();
+        assert!(!config.show_hidden_files);
+    }
+
+    #[test]
+    fn test_show_hidden_files_serde_roundtrip() {
+        let config = AppConfig {
+            show_hidden_files: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.show_hidden_files);
+    }
+
+    #[test]
+    fn test_show_hidden_files_missing_field_gets_default() {
+        let json = r#"{"current_theme": "Dark"}"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!parsed.show_hidden_files);
     }
 }

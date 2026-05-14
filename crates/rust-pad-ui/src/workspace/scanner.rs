@@ -9,12 +9,37 @@ use super::watcher::FsEvent;
 /// Maximum entries to load per directory (prevents UI slowdown on huge dirs).
 const MAX_ENTRIES_PER_DIR: usize = 10_000;
 
+/// Checks whether a filesystem entry should be considered hidden.
+///
+/// On all platforms, names starting with `.` are considered hidden.
+/// On Windows, the `FILE_ATTRIBUTE_HIDDEN` file attribute is also checked.
+fn is_hidden(name: &str, path: &Path) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    is_os_hidden(path)
+}
+
+#[cfg(windows)]
+fn is_os_hidden(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    path.metadata()
+        .map(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_os_hidden(_path: &Path) -> bool {
+    false
+}
+
 /// Scans one level of a directory and returns sorted entries.
 ///
 /// Directories are listed first, then files. Both groups are sorted
 /// alphabetically (case-insensitive). Hidden files (starting with `.`)
-/// are skipped.
-pub fn scan_directory(path: &Path) -> Result<Vec<TreeEntry>> {
+/// are skipped unless `show_hidden` is true.
+pub fn scan_directory(path: &Path, show_hidden: bool) -> Result<Vec<TreeEntry>> {
     let read_dir = std::fs::read_dir(path)
         .with_context(|| format!("Failed to read directory: {}", path.display()))?;
 
@@ -30,8 +55,8 @@ pub fn scan_directory(path: &Path) -> Result<Vec<TreeEntry>> {
 
         let name = entry.file_name().to_string_lossy().into_owned();
 
-        // Skip hidden files/folders
-        if name.starts_with('.') {
+        // Skip hidden files/folders unless show_hidden is enabled
+        if !show_hidden && is_hidden(&name, &entry.path()) {
             continue;
         }
 
@@ -85,10 +110,10 @@ fn sort_entries(entries: &mut [TreeEntry]) {
 }
 
 /// Applies a filesystem event to the tree, updating it incrementally.
-pub fn apply_fs_event(roots: &mut [FolderRoot], event: &FsEvent) {
+pub fn apply_fs_event(roots: &mut [FolderRoot], event: &FsEvent, show_hidden: bool) {
     match event {
         FsEvent::Created(path) | FsEvent::Modified(path) => {
-            insert_entry_if_new(roots, path);
+            insert_entry_if_new(roots, path, show_hidden);
         }
         FsEvent::Removed(path) => {
             if let Some(parent_entries) = find_parent_entries(roots, path) {
@@ -102,7 +127,7 @@ pub fn apply_fs_event(roots: &mut [FolderRoot], event: &FsEvent) {
 ///
 /// Used for both Created and Modified events — Modified events on existing
 /// entries are no-ops, while new paths are inserted and sorted.
-fn insert_entry_if_new(roots: &mut [FolderRoot], path: &Path) {
+fn insert_entry_if_new(roots: &mut [FolderRoot], path: &Path, show_hidden: bool) {
     let Some(parent_entries) = find_parent_entries(roots, path) else {
         return;
     };
@@ -116,8 +141,8 @@ fn insert_entry_if_new(roots: &mut [FolderRoot], path: &Path) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    // Skip hidden files
-    if name.starts_with('.') {
+    // Skip hidden files unless show_hidden is enabled
+    if !show_hidden && is_hidden(&name, path) {
         return;
     }
 
@@ -196,7 +221,7 @@ mod tests {
         std::fs::write(dir.path().join("charlie.txt"), "").expect("write");
         std::fs::write(dir.path().join("able.rs"), "").expect("write");
 
-        let entries = scan_directory(dir.path()).expect("scan");
+        let entries = scan_directory(dir.path(), false).expect("scan");
 
         // Directories first, then files
         assert_eq!(entries.len(), 4);
@@ -218,9 +243,28 @@ mod tests {
         std::fs::create_dir(dir.path().join(".git")).expect("mkdir");
         std::fs::write(dir.path().join("visible.txt"), "").expect("write");
 
-        let entries = scan_directory(dir.path()).expect("scan");
+        let entries = scan_directory(dir.path(), false).expect("scan");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "visible.txt");
+    }
+
+    #[test]
+    fn test_scan_directory_shows_hidden_when_enabled() {
+        let dir = TempDir::new().expect("create temp dir");
+
+        std::fs::write(dir.path().join(".hidden"), "").expect("write");
+        std::fs::create_dir(dir.path().join(".git")).expect("mkdir");
+        std::fs::write(dir.path().join("visible.txt"), "").expect("write");
+
+        let entries = scan_directory(dir.path(), true).expect("scan");
+        assert_eq!(entries.len(), 3);
+        // Directories first, then files (alphabetical within each group)
+        assert_eq!(entries[0].name, ".git");
+        assert_eq!(entries[0].kind, EntryKind::Directory);
+        assert_eq!(entries[1].name, ".hidden");
+        assert_eq!(entries[1].kind, EntryKind::File);
+        assert_eq!(entries[2].name, "visible.txt");
+        assert_eq!(entries[2].kind, EntryKind::File);
     }
 
     #[test]
@@ -231,7 +275,7 @@ mod tests {
         std::fs::write(dir.path().join("apple.txt"), "").expect("write");
         std::fs::write(dir.path().join("Banana.txt"), "").expect("write");
 
-        let entries = scan_directory(dir.path()).expect("scan");
+        let entries = scan_directory(dir.path(), false).expect("scan");
         assert_eq!(entries[0].name, "apple.txt");
         assert_eq!(entries[1].name, "Banana.txt");
         assert_eq!(entries[2].name, "Zebra.txt");
@@ -258,7 +302,7 @@ mod tests {
         // Create a real file and fire a Created event
         let new_path = dir.path().join("new_file.txt");
         std::fs::write(&new_path, "hello").expect("write");
-        apply_fs_event(&mut roots, &FsEvent::Created(new_path.clone()));
+        apply_fs_event(&mut roots, &FsEvent::Created(new_path.clone()), false);
 
         assert_eq!(roots[0].entries.len(), 2);
         // Entries should be sorted: existing.rs, new_file.txt
@@ -292,6 +336,7 @@ mod tests {
         apply_fs_event(
             &mut roots,
             &FsEvent::Removed(PathBuf::from("/project/remove.rs")),
+            false,
         );
 
         assert_eq!(roots[0].entries.len(), 1);
@@ -342,14 +387,14 @@ mod tests {
 
     #[test]
     fn test_scan_nonexistent_directory_returns_error() {
-        let result = scan_directory(Path::new("/nonexistent_dir_xyz_123"));
+        let result = scan_directory(Path::new("/nonexistent_dir_xyz_123"), false);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_scan_empty_directory() {
         let dir = TempDir::new().expect("create temp dir");
-        let entries = scan_directory(dir.path()).expect("scan");
+        let entries = scan_directory(dir.path(), false).expect("scan");
         assert!(entries.is_empty());
     }
 
@@ -371,6 +416,7 @@ mod tests {
         apply_fs_event(
             &mut roots,
             &FsEvent::Modified(PathBuf::from("/project/file.rs")),
+            false,
         );
         assert_eq!(roots[0].entries.len(), 1);
     }
@@ -387,11 +433,28 @@ mod tests {
             expanded: true,
         }];
 
-        apply_fs_event(&mut roots, &FsEvent::Created(hidden));
+        apply_fs_event(&mut roots, &FsEvent::Created(hidden), false);
         assert!(
             roots[0].entries.is_empty(),
             "Hidden files should not be added to the tree"
         );
+    }
+
+    #[test]
+    fn test_apply_fs_event_created_hidden_file_included_when_show_hidden() {
+        let dir = TempDir::new().expect("create temp dir");
+        let hidden = dir.path().join(".hidden_file");
+        std::fs::write(&hidden, "").expect("write");
+
+        let mut roots = vec![FolderRoot {
+            path: dir.path().to_path_buf(),
+            entries: Vec::new(),
+            expanded: true,
+        }];
+
+        apply_fs_event(&mut roots, &FsEvent::Created(hidden), true);
+        assert_eq!(roots[0].entries.len(), 1);
+        assert_eq!(roots[0].entries[0].name, ".hidden_file");
     }
 
     #[test]
@@ -411,6 +474,7 @@ mod tests {
         apply_fs_event(
             &mut roots,
             &FsEvent::Created(PathBuf::from("/project/file.rs")),
+            false,
         );
         assert_eq!(
             roots[0].entries.len(),
@@ -436,6 +500,7 @@ mod tests {
         apply_fs_event(
             &mut roots,
             &FsEvent::Removed(PathBuf::from("/project/gone.rs")),
+            false,
         );
         assert_eq!(roots[0].entries.len(), 1);
         assert_eq!(roots[0].entries[0].name, "keep.rs");
@@ -478,7 +543,7 @@ mod tests {
             expanded: true,
         }];
 
-        apply_fs_event(&mut roots, &FsEvent::Created(new_dir));
+        apply_fs_event(&mut roots, &FsEvent::Created(new_dir), false);
 
         assert_eq!(roots[0].entries.len(), 1);
         assert_eq!(roots[0].entries[0].name, "new_subdir");
@@ -497,6 +562,7 @@ mod tests {
         apply_fs_event(
             &mut roots,
             &FsEvent::Created(PathBuf::from("/other/file.rs")),
+            false,
         );
 
         assert!(
@@ -525,7 +591,7 @@ mod tests {
             expanded: true,
         }];
 
-        apply_fs_event(&mut roots, &FsEvent::Created(new_file.clone()));
+        apply_fs_event(&mut roots, &FsEvent::Created(new_file.clone()), false);
 
         assert_eq!(roots[0].entries[0].children.len(), 1);
         assert_eq!(roots[0].entries[0].children[0].name, "lib.rs");
@@ -554,6 +620,7 @@ mod tests {
         apply_fs_event(
             &mut roots,
             &FsEvent::Removed(PathBuf::from("/project/src/main.rs")),
+            false,
         );
 
         assert!(
@@ -619,8 +686,8 @@ mod tests {
         }];
 
         // Insert out of order
-        apply_fs_event(&mut roots, &FsEvent::Created(file_z));
-        apply_fs_event(&mut roots, &FsEvent::Created(file_m));
+        apply_fs_event(&mut roots, &FsEvent::Created(file_z), false);
+        apply_fs_event(&mut roots, &FsEvent::Created(file_m), false);
 
         assert_eq!(roots[0].entries.len(), 3);
         assert_eq!(roots[0].entries[0].name, "aaa.txt");
@@ -670,7 +737,7 @@ mod tests {
         std::fs::write(dir.path().join("file_a.txt"), "").expect("write");
         std::fs::create_dir(dir.path().join("dir_a")).expect("mkdir");
 
-        let entries = scan_directory(dir.path()).expect("scan");
+        let entries = scan_directory(dir.path(), false).expect("scan");
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].kind, EntryKind::Directory);
         assert_eq!(entries[0].name, "dir_a");
@@ -688,7 +755,7 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), "").expect("write");
         std::fs::create_dir(dir.path().join(".vscode")).expect("mkdir");
 
-        let entries = scan_directory(dir.path()).expect("scan");
+        let entries = scan_directory(dir.path(), false).expect("scan");
         assert!(entries.is_empty());
     }
 
@@ -723,7 +790,7 @@ mod tests {
             expanded: true,
         }];
 
-        apply_fs_event(&mut roots, &FsEvent::Created(file_b));
+        apply_fs_event(&mut roots, &FsEvent::Created(file_b), false);
         assert_eq!(roots[0].entries.len(), 3);
         assert_eq!(roots[0].entries[0].name, "aaa.txt");
         assert_eq!(roots[0].entries[1].name, "bbb.txt");
@@ -747,6 +814,7 @@ mod tests {
         apply_fs_event(
             &mut roots,
             &FsEvent::Removed(PathBuf::from("/project/only.rs")),
+            false,
         );
         assert!(roots[0].entries.is_empty());
     }
@@ -766,17 +834,17 @@ mod tests {
         }];
 
         // Create two files
-        apply_fs_event(&mut roots, &FsEvent::Created(file_a.clone()));
-        apply_fs_event(&mut roots, &FsEvent::Created(file_b.clone()));
+        apply_fs_event(&mut roots, &FsEvent::Created(file_a.clone()), false);
+        apply_fs_event(&mut roots, &FsEvent::Created(file_b.clone()), false);
         assert_eq!(roots[0].entries.len(), 2);
 
         // Remove one
-        apply_fs_event(&mut roots, &FsEvent::Removed(file_a));
+        apply_fs_event(&mut roots, &FsEvent::Removed(file_a), false);
         assert_eq!(roots[0].entries.len(), 1);
         assert_eq!(roots[0].entries[0].name, "b.txt");
 
         // Modified on existing is noop
-        apply_fs_event(&mut roots, &FsEvent::Modified(file_b));
+        apply_fs_event(&mut roots, &FsEvent::Modified(file_b), false);
         assert_eq!(roots[0].entries.len(), 1);
     }
 
@@ -805,5 +873,64 @@ mod tests {
         }];
         sort_entries(&mut entries);
         assert_eq!(entries[0].name, "only.txt");
+    }
+
+    #[test]
+    fn test_is_hidden_dot_prefix() {
+        let dir = TempDir::new().expect("create temp dir");
+        let hidden = dir.path().join(".hidden");
+        std::fs::write(&hidden, "").expect("write");
+        assert!(is_hidden(".hidden", &hidden));
+    }
+
+    #[test]
+    fn test_is_hidden_normal_file() {
+        let dir = TempDir::new().expect("create temp dir");
+        let visible = dir.path().join("visible.txt");
+        std::fs::write(&visible, "").expect("write");
+        assert!(!is_hidden("visible.txt", &visible));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_hidden_windows_attribute() {
+        let dir = TempDir::new().expect("create temp dir");
+        let path = dir.path().join("win_hidden.txt");
+        std::fs::write(&path, "").expect("write");
+
+        // Set FILE_ATTRIBUTE_HIDDEN via `attrib`
+        std::process::Command::new("attrib")
+            .args(["+h", &path.to_string_lossy()])
+            .status()
+            .expect("attrib +h");
+
+        assert!(
+            is_hidden("win_hidden.txt", &path),
+            "File with FILE_ATTRIBUTE_HIDDEN should be detected as hidden"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_scan_directory_skips_windows_hidden_attribute() {
+        let dir = TempDir::new().expect("create temp dir");
+        let hidden = dir.path().join("win_hidden.txt");
+        let visible = dir.path().join("visible.txt");
+        std::fs::write(&hidden, "").expect("write");
+        std::fs::write(&visible, "").expect("write");
+
+        // Set FILE_ATTRIBUTE_HIDDEN on the file
+        std::process::Command::new("attrib")
+            .args(["+h", &hidden.to_string_lossy()])
+            .status()
+            .expect("attrib +h");
+
+        let entries = scan_directory(dir.path(), false).expect("scan");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "visible.txt");
+
+        // With show_hidden=true, both should appear
+        let entries = scan_directory(dir.path(), true).expect("scan");
+        assert_eq!(entries.len(), 2);
     }
 }
