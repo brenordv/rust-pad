@@ -5,6 +5,9 @@
 ### Added
 - Added the ability to the **Workspace** sidebar to include hidden folders.
 
+### Fixed
+- Updated minimum window dimensions for the settings dialog to accommodate new content and stop it from wiggling around.
+
 ## [2.5.0]
 
 ### Added
