@@ -959,7 +959,7 @@ impl eframe::App for App {
         self.workspace_sidebar.rename_just_confirmed = false;
 
         self.handle_global_shortcuts(&ctx);
-        self.handle_dropped_files(&ctx);
+        self.handle_dropped_items(&ctx);
 
         // Update the OS window title to reflect the active document
         self.update_window_title(&ctx);
@@ -1303,6 +1303,17 @@ mod tests {
             workspace_store: None,
             cached_workspace_list: None,
         }
+    }
+
+    /// Helper: create a test App with a real WorkspaceStore backed by a temp directory.
+    /// Keep the returned `TempDir` alive for the lifetime of the test.
+    pub(crate) fn app_with_workspace() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db_path = dir.path().join("test-workspace.redb");
+        let store = rust_pad_config::WorkspaceStore::open(&db_path).expect("open workspace store");
+        let mut app = test_app();
+        app.workspace_store = Some(store);
+        (app, dir)
     }
 
     // -- Close tab logic --

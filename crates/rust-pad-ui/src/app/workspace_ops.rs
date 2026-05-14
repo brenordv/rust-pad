@@ -548,6 +548,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::app_with_workspace;
     use super::*;
 
     fn make_entry(name: &str) -> WorkspaceEntry {
@@ -753,17 +754,6 @@ mod tests {
     }
 
     // ── App-level integration tests ──────────────────────────────────
-
-    /// Creates a test App with a real WorkspaceStore backed by a temp directory.
-    /// Returns (app, temp_dir) — keep `_dir` alive for the lifetime of the test.
-    fn app_with_workspace() -> (super::super::App, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let db_path = dir.path().join("test-workspace.redb");
-        let store = WorkspaceStore::open(&db_path).expect("open workspace store");
-        let mut app = super::super::tests::test_app();
-        app.workspace_store = Some(store);
-        (app, dir)
-    }
 
     #[test]
     fn test_app_create_workspace() {
