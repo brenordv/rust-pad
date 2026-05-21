@@ -1036,3 +1036,189 @@ fn test_render_document_with_many_lines_for_gutter_width() {
 
     assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 1002);
 }
+
+// ── Tab / Shift+Tab on selection (Bug #2 & #3 regression) ────────────────
+
+#[test]
+fn tab_with_multiline_selection_indents_all_lines() {
+    let mut harness = create_harness();
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.indent_style = rust_pad_core::indent::IndentStyle::Spaces(2);
+    doc.insert_text("  {\n    \"id\": 3426410,\n    \"value\": 109,\n  },");
+    doc.history.force_group_break();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(3, 3);
+    harness.run();
+
+    harness.key_press(Key::Tab);
+    harness.run();
+
+    assert_eq!(
+        harness.state().tabs.active_doc().buffer.to_string(),
+        "    {\n      \"id\": 3426410,\n      \"value\": 109,\n    },",
+    );
+}
+
+#[test]
+fn shift_tab_with_multiline_selection_dedents_all_lines() {
+    // Canonical Bug #2 reproduction from phase-16-index.md.
+    use egui::{Event, Modifiers};
+    let mut harness = create_harness();
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.indent_style = rust_pad_core::indent::IndentStyle::Spaces(2);
+    doc.insert_text("  {\n    \"id\": 3426410,\n    \"value\": 109,\n  },");
+    doc.history.force_group_break();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(3, 3);
+    harness.run();
+
+    harness.input_mut().events.push(Event::Key {
+        key: Key::Tab,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    });
+    harness.run();
+
+    assert_eq!(
+        harness.state().tabs.active_doc().buffer.to_string(),
+        "{\n  \"id\": 3426410,\n  \"value\": 109,\n},",
+    );
+}
+
+#[test]
+fn tab_with_single_line_selection_preserves_text() {
+    // Bug #3: selecting text and pressing Tab must NOT erase the selection.
+    let mut harness = create_harness();
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.indent_style = rust_pad_core::indent::IndentStyle::Spaces(2);
+    doc.insert_text("hello world");
+    doc.history.force_group_break();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(0, 5);
+    harness.run();
+
+    harness.key_press(Key::Tab);
+    harness.run();
+
+    // Line is indented by 2 spaces, "hello" is intact (not erased).
+    assert_eq!(
+        harness.state().tabs.active_doc().buffer.to_string(),
+        "  hello world",
+    );
+}
+
+// ── Bug #3 follow-up: selection tracks the indented text ─────────────────
+
+#[test]
+fn tab_then_tab_keeps_multiline_selection_intact() {
+    // The user-reported "last line escapes the selection" reproduction.
+    let mut harness = create_harness();
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.indent_style = rust_pad_core::indent::IndentStyle::Spaces(4);
+    doc.insert_text("abc\ndef\nghi");
+    doc.history.force_group_break();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(2, 3);
+    harness.run();
+
+    harness.key_press(Key::Tab);
+    harness.run();
+    harness.key_press(Key::Tab);
+    harness.run();
+
+    assert_eq!(
+        harness.state().tabs.active_doc().buffer.to_string(),
+        "        abc\n        def\n        ghi",
+    );
+    let doc = harness.state().tabs.active_doc();
+    // The beginning stays pinned to col 0 so the first line's indent never
+    // escapes; the bottom endpoint tracks the end of "ghi".
+    assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+    assert_eq!(doc.cursor.position, Position::new(2, 11));
+}
+
+#[test]
+fn shift_tab_then_shift_tab_keeps_multiline_selection_intact() {
+    use egui::{Event, Modifiers};
+    let mut harness = create_harness();
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.indent_style = rust_pad_core::indent::IndentStyle::Spaces(4);
+    doc.insert_text("        abc\n        def\n        ghi");
+    doc.history.force_group_break();
+    doc.cursor.selection_anchor = Some(Position::new(0, 8));
+    doc.cursor.position = Position::new(2, 11);
+    harness.run();
+
+    for _ in 0..2 {
+        harness.input_mut().events.push(Event::Key {
+            key: Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        });
+        harness.run();
+    }
+
+    assert_eq!(
+        harness.state().tabs.active_doc().buffer.to_string(),
+        "abc\ndef\nghi",
+    );
+    let doc = harness.state().tabs.active_doc();
+    assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+    assert_eq!(doc.cursor.position, Position::new(2, 3));
+}
+
+#[test]
+fn tab_selection_cursor_pos_updates_visible_in_state() {
+    let mut harness = create_harness();
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.indent_style = rust_pad_core::indent::IndentStyle::Spaces(4);
+    doc.insert_text("abc\ndef");
+    doc.history.force_group_break();
+    doc.cursor.selection_anchor = Some(Position::new(0, 1));
+    doc.cursor.position = Position::new(1, 3);
+    harness.run();
+
+    harness.key_press(Key::Tab);
+    harness.run();
+
+    let doc = harness.state().tabs.active_doc();
+    // Multi-line selection: the top endpoint snaps to col 0.
+    assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+    assert_eq!(doc.cursor.position, Position::new(1, 7));
+}
+
+#[test]
+fn tab_multiline_keeps_first_line_indent_in_selection() {
+    // Report-3 reproduction at the widget boundary: a single Tab on a
+    // top→bottom multi-line selection keeps the first line's new indent inside
+    // the selection (the beginning does not escape).
+    let mut harness = create_harness();
+    let doc = harness.state_mut().tabs.active_doc_mut();
+    doc.indent_style = rust_pad_core::indent::IndentStyle::Spaces(4);
+    doc.insert_text("abc\ndef\nghi");
+    doc.history.force_group_break();
+    doc.cursor.selection_anchor = Some(Position::new(0, 0));
+    doc.cursor.position = Position::new(2, 3);
+    harness.run();
+
+    harness.key_press(Key::Tab);
+    harness.run();
+
+    assert_eq!(
+        harness.state().tabs.active_doc().buffer.to_string(),
+        "    abc\n    def\n    ghi",
+    );
+    let doc = harness.state().tabs.active_doc();
+    assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+    assert_eq!(doc.cursor.position, Position::new(2, 7));
+}

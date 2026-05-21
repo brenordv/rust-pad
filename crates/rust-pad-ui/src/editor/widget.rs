@@ -182,7 +182,7 @@ impl<'a> EditorWidget<'a> {
             wrap_map.as_ref(),
             pointer_on_scrollbar,
         );
-        self.handle_focus_and_keyboard(ui, &response);
+        self.handle_focus_and_keyboard(ui, &response, wrap_map.as_ref());
         self.follow_cursor(cursor_pos_before, &layout, wrap_map.as_ref());
 
         // Rebuild wrap map after input only if the buffer actually changed
@@ -518,7 +518,12 @@ impl<'a> EditorWidget<'a> {
         self.doc.cursor.move_to(drag_pos, &self.doc.buffer);
     }
 
-    fn handle_focus_and_keyboard(&mut self, ui: &mut Ui, response: &Response) {
+    fn handle_focus_and_keyboard(
+        &mut self,
+        ui: &mut Ui,
+        response: &Response,
+        wrap_map: Option<&WrapMap>,
+    ) {
         // Don't auto-grab focus when any dialog is open; focus transfers
         // to the editor via mouse click (handle_mouse_input calls
         // response.request_focus()).  In split view, only the focused
@@ -543,7 +548,7 @@ impl<'a> EditorWidget<'a> {
                     },
                 );
             });
-            self.handle_keyboard_input(ui);
+            self.handle_keyboard_input(ui, wrap_map);
         }
     }
 

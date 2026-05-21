@@ -511,7 +511,7 @@ fn test_ctrl_d_blocked_while_find_replace_open() {
     harness.key_press_modifiers(ctrl, Key::F);
     harness.run();
 
-    // Ctrl+D should NOT delete the line while dialog is open
+    // Ctrl+D should NOT trigger duplicate-line while dialog is open
     harness.key_press_modifiers(ctrl, Key::D);
     harness.run();
     assert_eq!(
@@ -521,7 +521,7 @@ fn test_ctrl_d_blocked_while_find_replace_open() {
 }
 
 #[test]
-fn test_ctrl_d_works_after_dialog_closed() {
+fn test_ctrl_d_duplicates_line_after_dialog_closed() {
     let mut harness = create_harness();
     harness
         .state_mut()
@@ -542,12 +542,12 @@ fn test_ctrl_d_works_after_dialog_closed() {
     harness.key_press(Key::Escape);
     harness.run();
 
-    // Now Ctrl+D should delete the line
+    // Now Ctrl+D should duplicate the current line (line2)
     harness.key_press_modifiers(ctrl, Key::D);
     harness.run();
     assert_eq!(
         harness.state().tabs.active_doc().buffer.to_string(),
-        "line1\nline3"
+        "line1\nline2\nline2\nline3"
     );
 }
 
@@ -1642,10 +1642,10 @@ fn test_close_tab_preserves_other_content() {
     );
 }
 
-// ── W. Ctrl+D delete line ──────────────────────────────────────────────────
+// ── W. Ctrl+D duplicate line ────────────────────────────────────────────────
 
 #[test]
-fn test_ctrl_d_deletes_current_line() {
+fn test_ctrl_d_duplicates_current_line() {
     let mut harness = create_harness();
     harness
         .state_mut()
@@ -1665,8 +1665,21 @@ fn test_ctrl_d_deletes_current_line() {
 
     assert_eq!(
         harness.state().tabs.active_doc().buffer.to_string(),
-        "line1\nline3"
+        "line1\nline2\nline2\nline3"
     );
+}
+
+#[test]
+fn test_ctrl_d_duplicate_on_empty_doc_inserts_blank() {
+    let mut harness = create_harness();
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    harness.key_press_modifiers(ctrl, Key::D);
+    harness.run();
+    // Duplicating line 0 (empty) on a single-line empty buffer produces "\n".
+    assert_eq!(harness.state().tabs.active_doc().buffer.to_string(), "\n");
 }
 
 // ── X. Ctrl+S Save ──────────────────────────────────────────────────────────

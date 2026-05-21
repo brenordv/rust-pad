@@ -21,12 +21,21 @@ use crate::history::{
     UndoManager,
 };
 use crate::indent::IndentStyle;
+use crate::line_ops;
 
 /// Converts a `Position` to a `CursorSnapshot` for history recording.
 fn snap(pos: Position) -> CursorSnapshot {
     CursorSnapshot {
         line: pos.line,
         col: pos.col,
+    }
+}
+
+/// Clamps `pos.col` to the char length of `pos.line` in the buffer.
+fn clamp_cursor_col(pos: &mut Position, buffer: &TextBuffer) {
+    let line_len = buffer.line_len_chars(pos.line).unwrap_or(0);
+    if pos.col > line_len {
+        pos.col = line_len;
     }
 }
 
@@ -608,6 +617,118 @@ impl Document {
         self.modified = true;
         self.scroll_to_cursor = true;
         self.bump_version();
+    }
+
+    /// Returns the line range `[start, end_exclusive)` covered by the primary
+    /// cursor's selection, or `None` if there is no non-empty selection.
+    ///
+    /// Returns `None` for an empty selection (`anchor == position`) so callers
+    /// can fall back to single-cursor-line behavior — see the Tab key handler
+    /// and the menu `Edit > Increase/Decrease Indent` fallback.
+    fn primary_selection_line_range(&self) -> Option<(usize, usize)> {
+        let sel = self.cursor.selection()?;
+        if sel.is_empty() {
+            return None;
+        }
+        Some((sel.start().line, sel.end().line + 1))
+    }
+
+    /// Indents or dedents every line covered by the primary cursor's
+    /// selection. Returns `true` when a selection was handled (so the caller
+    /// must not also insert a literal tab); `false` when there is no
+    /// selection and the caller should apply its no-selection fallback.
+    pub fn indent_or_dedent_selection(&mut self, indent: bool) -> bool {
+        let Some((start_line, end_line)) = self.primary_selection_line_range() else {
+            return false;
+        };
+        let snapshot = self.snapshot_for_undo();
+        let style = self.indent_style;
+
+        // Cursor lines whose cols we'll shift after the edit. Both are within
+        // [start_line, end_line) by construction of the range from the selection.
+        let anchor_line = self
+            .cursor
+            .selection_anchor
+            .map(|p| p.line)
+            .unwrap_or(self.cursor.position.line);
+        let position_line = self.cursor.position.line;
+
+        // For indent the delta is uniform: every line gains `indent_width` chars
+        // at its start. For dedent it is per-line, so read the removable count
+        // from the original buffer before mutating it.
+        let (anchor_delta, position_delta) = if indent {
+            let w = style.indent_text().chars().count() as isize;
+            (w, w)
+        } else {
+            let a =
+                -(line_ops::leading_indent_removable(&self.buffer, anchor_line, &style) as isize);
+            let p =
+                -(line_ops::leading_indent_removable(&self.buffer, position_line, &style) as isize);
+            (a, p)
+        };
+
+        let result = if indent {
+            line_ops::indent_lines(&mut self.buffer, start_line, end_line, &style)
+        } else {
+            line_ops::dedent_lines(&mut self.buffer, start_line, end_line, &style)
+        };
+
+        if result.is_ok() {
+            let multiline = self
+                .cursor
+                .selection_anchor
+                .map(|a| a.line != self.cursor.position.line)
+                .unwrap_or(false);
+
+            if multiline {
+                // The indentation is inserted/removed at the START of the first
+                // line, i.e. *before* the selection's top endpoint. Pinning the
+                // top endpoint to column 0 absorbs that growth/shrink into the
+                // selection so the beginning never escapes (Bug #3, report 3).
+                // The bottom endpoint keeps tracking its physical character via
+                // its per-line delta, which already makes the end correct.
+                let anchor_is_top = self
+                    .cursor
+                    .selection_anchor
+                    .map(|a| a.line < self.cursor.position.line)
+                    .unwrap_or(false);
+
+                if anchor_is_top {
+                    if let Some(ref mut anchor) = self.cursor.selection_anchor {
+                        anchor.col = 0;
+                    }
+                    self.cursor.position.col = self
+                        .cursor
+                        .position
+                        .col
+                        .saturating_add_signed(position_delta);
+                } else {
+                    self.cursor.position.col = 0;
+                    if let Some(ref mut anchor) = self.cursor.selection_anchor {
+                        anchor.col = anchor.col.saturating_add_signed(anchor_delta);
+                    }
+                }
+            } else {
+                // Single-line selection: keep tracking the exact sub-line
+                // characters on both endpoints. saturating_add_signed clamps at
+                // 0 when a dedent removes whitespace the cursor col sat inside.
+                if let Some(ref mut anchor) = self.cursor.selection_anchor {
+                    anchor.col = anchor.col.saturating_add_signed(anchor_delta);
+                }
+                self.cursor.position.col = self
+                    .cursor
+                    .position
+                    .col
+                    .saturating_add_signed(position_delta);
+            }
+
+            clamp_cursor_col(&mut self.cursor.position, &self.buffer);
+            if let Some(ref mut anchor) = self.cursor.selection_anchor {
+                clamp_cursor_col(anchor, &self.buffer);
+            }
+            self.record_undo_from_snapshot(snapshot);
+        }
+        true
     }
 
     /// Syncs the line_changes vector length with the buffer's line count.
@@ -1728,5 +1849,247 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── indent_or_dedent_selection (Bug #2/#3 regression) ─────────────
+
+    fn doc_with_text(text: &str) -> Document {
+        let mut doc = Document::new();
+        doc.insert_text(text);
+        doc.history.force_group_break();
+        doc.cursor.clear_selection();
+        doc
+    }
+
+    #[test]
+    fn indent_or_dedent_selection_no_selection_returns_false() {
+        let mut doc = doc_with_text("hello\nworld");
+        doc.cursor.position = Position::new(0, 3);
+        assert!(!doc.indent_or_dedent_selection(true));
+        // Buffer is unchanged — caller must apply its own fallback.
+        assert_eq!(doc.buffer.to_string(), "hello\nworld");
+    }
+
+    #[test]
+    fn indent_or_dedent_selection_empty_selection_returns_false() {
+        // anchor == position should be treated as "no selection".
+        let mut doc = doc_with_text("hello");
+        doc.cursor.position = Position::new(0, 3);
+        doc.cursor.selection_anchor = Some(Position::new(0, 3));
+        assert!(!doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "hello");
+    }
+
+    #[test]
+    fn indent_or_dedent_selection_single_line_indents() {
+        let mut doc = doc_with_text("aaa\nbbb\nccc");
+        doc.indent_style = IndentStyle::Spaces(2);
+        // Select part of line 0 — Bug #3: the selected text must NOT be erased.
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(0, 3);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "  aaa\nbbb\nccc");
+    }
+
+    #[test]
+    fn indent_or_dedent_selection_multiline_indents_all() {
+        let mut doc = doc_with_text("aaa\nbbb\nccc");
+        doc.indent_style = IndentStyle::Spaces(2);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(2, 3);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "  aaa\n  bbb\n  ccc");
+    }
+
+    #[test]
+    fn indent_or_dedent_selection_multiline_dedents_all() {
+        // Canonical Bug #2 reproduction (JSON block, 2-space indent).
+        let mut doc = doc_with_text("  {\n    \"id\": 3426410,\n    \"value\": 109,\n  },");
+        doc.indent_style = IndentStyle::Spaces(2);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(3, 3);
+        assert!(doc.indent_or_dedent_selection(false));
+        assert_eq!(
+            doc.buffer.to_string(),
+            "{\n  \"id\": 3426410,\n  \"value\": 109,\n},",
+        );
+    }
+
+    #[test]
+    fn indent_or_dedent_selection_records_undo() {
+        let mut doc = doc_with_text("aaa\nbbb");
+        doc.indent_style = IndentStyle::Spaces(2);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(1, 3);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "  aaa\n  bbb");
+
+        doc.undo();
+        assert_eq!(doc.buffer.to_string(), "aaa\nbbb");
+    }
+
+    // ── Bug #3 follow-up: selection tracks the indented text ──────────
+
+    #[test]
+    fn indent_selection_grows_with_text_single_line() {
+        let mut doc = doc_with_text("  abc");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 2));
+        doc.cursor.position = Position::new(0, 5);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "      abc");
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 6)));
+        assert_eq!(doc.cursor.position, Position::new(0, 9));
+    }
+
+    #[test]
+    fn indent_selection_grows_with_text_multiline() {
+        let mut doc = doc_with_text("abc\ndef\nghi");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(2, 3);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "    abc\n    def\n    ghi");
+        // Top endpoint is pinned to col 0 so the first line's new indent stays
+        // inside the selection (the beginning never escapes). The bottom
+        // endpoint shifts by +width to keep tracking its physical character.
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(doc.cursor.position, Position::new(2, 7));
+    }
+
+    #[test]
+    fn indent_selection_repeated_press_keeps_tracking_same_text() {
+        // The literal user-reported reproduction: repeatedly tabbing a block
+        // must keep the whole block selected across presses.
+        let mut doc = doc_with_text("abc\ndef\nghi");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(2, 3);
+        for _ in 0..3 {
+            assert!(doc.indent_or_dedent_selection(true));
+        }
+        assert_eq!(
+            doc.buffer.to_string(),
+            "            abc\n            def\n            ghi"
+        );
+        // The beginning stays pinned to col 0 every press, so all 12 inserted
+        // indent chars on the first line stay inside the selection. The bottom
+        // endpoint tracks the end of "ghi" (3 + 12 = 15).
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(doc.cursor.position, Position::new(2, 15));
+    }
+
+    #[test]
+    fn indent_multiline_pins_beginning_to_col_zero() {
+        // The literal report-3 reproduction: the beginning must not escape.
+        let mut doc = doc_with_text("abc\ndef\nghi");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(2, 3);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "    abc\n    def\n    ghi");
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(doc.cursor.position, Position::new(2, 7));
+        // The first line's freshly inserted indent (cols 0..4) is inside the
+        // selection, since the selection starts at (0, 0).
+        let sel = doc.cursor.selection().expect("selection present");
+        assert_eq!(sel.start(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn indent_multiline_reversed_drag_pins_top_endpoint() {
+        // Drag bottom→top: position is the top endpoint, anchor is the bottom.
+        let mut doc = doc_with_text("abc\ndef\nghi");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(2, 3));
+        doc.cursor.position = Position::new(0, 0);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "    abc\n    def\n    ghi");
+        // Top endpoint (position) is pinned to col 0; bottom (anchor) shifts.
+        assert_eq!(doc.cursor.position, Position::new(0, 0));
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(2, 7)));
+    }
+
+    #[test]
+    fn indent_multiline_top_mid_line_snaps_to_col_zero() {
+        // A mid-first-line start snaps to col 0 — conventional whole-line
+        // indent behaviour (chosen Option A). Documented so any future change
+        // is intentional.
+        let mut doc = doc_with_text("abcdef\nghi\njkl");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 2));
+        doc.cursor.position = Position::new(2, 3);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.buffer.to_string(), "    abcdef\n    ghi\n    jkl");
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(doc.cursor.position, Position::new(2, 7));
+    }
+
+    #[test]
+    fn dedent_multiline_reversed_drag_pins_top_endpoint() {
+        // Dedent symmetry for the reversed-drag case: position is the top.
+        let mut doc = doc_with_text("    a\n    b\n    c");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(2, 5));
+        doc.cursor.position = Position::new(0, 3);
+        assert!(doc.indent_or_dedent_selection(false));
+        assert_eq!(doc.buffer.to_string(), "a\nb\nc");
+        // Top endpoint (position) lands at col 0; bottom (anchor) shifts by
+        // -removed (5 - 4 = 1).
+        assert_eq!(doc.cursor.position, Position::new(0, 0));
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(2, 1)));
+    }
+
+    #[test]
+    fn dedent_selection_shrinks_with_text_uniform_leading_whitespace() {
+        let mut doc = doc_with_text("    a\n    b\n    c");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 2));
+        doc.cursor.position = Position::new(2, 5);
+        assert!(doc.indent_or_dedent_selection(false));
+        assert_eq!(doc.buffer.to_string(), "a\nb\nc");
+        // anchor col 2 - 4 saturates to 0; position col 5 - 4 = 1.
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(doc.cursor.position, Position::new(2, 1));
+    }
+
+    #[test]
+    fn dedent_selection_shrinks_with_text_mixed_leading_whitespace() {
+        // Line 1 (middle) has only 2 leading spaces, but anchor/position sit on
+        // lines 0 and 2, which both have 4 removable spaces.
+        let mut doc = doc_with_text("    a\n  b\n    c");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 4));
+        doc.cursor.position = Position::new(2, 5);
+        assert!(doc.indent_or_dedent_selection(false));
+        assert_eq!(doc.buffer.to_string(), "a\nb\nc");
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(doc.cursor.position, Position::new(2, 1));
+    }
+
+    #[test]
+    fn dedent_selection_clamps_anchor_or_position_at_zero() {
+        let mut doc = doc_with_text("    a\n    b\n    c");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 1));
+        doc.cursor.position = Position::new(2, 1);
+        assert!(doc.indent_or_dedent_selection(false));
+        assert_eq!(doc.buffer.to_string(), "a\nb\nc");
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(doc.cursor.position, Position::new(2, 0));
+    }
+
+    #[test]
+    fn indent_selection_records_undo_with_new_cursor_position() {
+        let mut doc = doc_with_text("abc\ndef");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(1, 3);
+        assert!(doc.indent_or_dedent_selection(true));
+        assert_eq!(doc.cursor.position, Position::new(1, 7));
+
+        doc.undo();
+        assert_eq!(doc.buffer.to_string(), "abc\ndef");
+        assert_eq!(doc.cursor.position, Position::new(1, 3));
     }
 }
