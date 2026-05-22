@@ -3092,6 +3092,18 @@ mod tests {
     }
 
     #[test]
+    fn trim_lines_records_one_undo_step() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("  a  \n  b  ");
+        app.tabs.active_doc_mut().history.force_group_break();
+        app.tabs.active_doc_mut().cursor.clear_selection();
+        app.trim_lines(TrimMode::Both);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb");
+        app.tabs.active_doc_mut().undo();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "  a  \n  b  ");
+    }
+
+    #[test]
     fn current_op_scope_returns_selection_when_secondary_has_selection() {
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("a\nb\nc");

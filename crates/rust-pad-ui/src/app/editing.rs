@@ -325,6 +325,34 @@ impl App {
 
     // ── Scoped operations ────────────────────────────────────────────
 
+    /// Runs a line operation over either the whole document or the current
+    /// selection range, recording a single undo step when `op` reports it
+    /// touched the buffer.
+    ///
+    /// `op` receives the buffer and the resolved `[start, end)` line range and
+    /// returns `true` when the edit should be committed (i.e. the underlying
+    /// `line_ops` call succeeded). When `clamp_after` is set and the scope is
+    /// `Selection`, cursors are clamped after a successful edit so they cannot
+    /// point past lines the operation removed — used by ops that can reduce the
+    /// line count (remove-duplicates, remove-empty, join).
+    fn run_scoped_line_op<F>(&mut self, scope: OperationScope, clamp_after: bool, op: F)
+    where
+        F: FnOnce(&mut TextBuffer, usize, usize) -> bool,
+    {
+        let doc = self.tabs.active_doc_mut();
+        let snapshot = doc.snapshot_for_undo();
+        let (start, end) = match scope {
+            OperationScope::Global => (0, doc.buffer.len_lines()),
+            OperationScope::Selection => selection_line_range(doc),
+        };
+        if op(&mut doc.buffer, start, end) {
+            if clamp_after && scope == OperationScope::Selection {
+                clamp_cursors(doc);
+            }
+            doc.record_undo_from_snapshot(snapshot);
+        }
+    }
+
     /// Converts case, scoped to either the whole document or the selection.
     pub(crate) fn convert_case_scoped(
         &mut self,
@@ -348,51 +376,27 @@ impl App {
 
     /// Sorts lines, scoped to either the whole document or the selection range.
     pub(crate) fn sort_lines_scoped(&mut self, order: SortOrder, scope: OperationScope) {
-        let doc = self.tabs.active_doc_mut();
-        let snapshot = doc.snapshot_for_undo();
-        let (start, end) = match scope {
-            OperationScope::Global => (0, doc.buffer.len_lines()),
-            OperationScope::Selection => selection_line_range(doc),
-        };
         let opts = SortOptions {
             order,
             ..Default::default()
         };
-        if line_ops::sort_lines(&mut doc.buffer, start, end, &opts).is_ok() {
-            doc.record_undo_from_snapshot(snapshot);
-        }
+        self.run_scoped_line_op(scope, false, |buffer, start, end| {
+            line_ops::sort_lines(buffer, start, end, &opts).is_ok()
+        });
     }
 
     /// Removes duplicate lines, scoped to either the whole document or the selection range.
     pub(crate) fn remove_duplicate_lines_scoped(&mut self, scope: OperationScope) {
-        let doc = self.tabs.active_doc_mut();
-        let snapshot = doc.snapshot_for_undo();
-        let (start, end) = match scope {
-            OperationScope::Global => (0, doc.buffer.len_lines()),
-            OperationScope::Selection => selection_line_range(doc),
-        };
-        if line_ops::remove_all_duplicates(&mut doc.buffer, start, end).is_ok() {
-            if scope == OperationScope::Selection {
-                clamp_cursors(doc);
-            }
-            doc.record_undo_from_snapshot(snapshot);
-        }
+        self.run_scoped_line_op(scope, true, |buffer, start, end| {
+            line_ops::remove_all_duplicates(buffer, start, end).is_ok()
+        });
     }
 
     /// Removes empty lines, scoped to either the whole document or the selection range.
     pub(crate) fn remove_empty_lines_scoped(&mut self, scope: OperationScope) {
-        let doc = self.tabs.active_doc_mut();
-        let snapshot = doc.snapshot_for_undo();
-        let (start, end) = match scope {
-            OperationScope::Global => (0, doc.buffer.len_lines()),
-            OperationScope::Selection => selection_line_range(doc),
-        };
-        if line_ops::remove_empty_lines(&mut doc.buffer, start, end).is_ok() {
-            if scope == OperationScope::Selection {
-                clamp_cursors(doc);
-            }
-            doc.record_undo_from_snapshot(snapshot);
-        }
+        self.run_scoped_line_op(scope, true, |buffer, start, end| {
+            line_ops::remove_empty_lines(buffer, start, end).is_ok()
+        });
     }
 
     /// Trims whitespace from each line, auto-scoped to the selection when one
@@ -405,15 +409,9 @@ impl App {
     /// Trims whitespace from each line, scoped to either the whole document
     /// or the selection range.
     pub(crate) fn trim_lines_scoped(&mut self, mode: TrimMode, scope: OperationScope) {
-        let doc = self.tabs.active_doc_mut();
-        let snapshot = doc.snapshot_for_undo();
-        let (start, end) = match scope {
-            OperationScope::Global => (0, doc.buffer.len_lines()),
-            OperationScope::Selection => selection_line_range(doc),
-        };
-        if line_ops::trim_lines(&mut doc.buffer, start, end, mode).is_ok() {
-            doc.record_undo_from_snapshot(snapshot);
-        }
+        self.run_scoped_line_op(scope, false, |buffer, start, end| {
+            line_ops::trim_lines(buffer, start, end, mode).is_ok()
+        });
     }
 
     /// Joins lines, auto-scoped to the selection when one exists, else the
@@ -426,18 +424,9 @@ impl App {
     /// Joins lines into one (space-separated), scoped to either the whole
     /// document or the selection range.
     pub(crate) fn join_lines_scoped(&mut self, scope: OperationScope) {
-        let doc = self.tabs.active_doc_mut();
-        let snapshot = doc.snapshot_for_undo();
-        let (start, end) = match scope {
-            OperationScope::Global => (0, doc.buffer.len_lines()),
-            OperationScope::Selection => selection_line_range(doc),
-        };
-        if line_ops::join_lines(&mut doc.buffer, start, end).is_ok() {
-            if scope == OperationScope::Selection {
-                clamp_cursors(doc);
-            }
-            doc.record_undo_from_snapshot(snapshot);
-        }
+        self.run_scoped_line_op(scope, true, |buffer, start, end| {
+            line_ops::join_lines(buffer, start, end).is_ok()
+        });
     }
 
     // ── New actions ──────────────────────────────────────────────────
