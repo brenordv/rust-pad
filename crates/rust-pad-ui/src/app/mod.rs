@@ -1225,7 +1225,7 @@ mod tests {
     use egui::Color32;
     use rust_pad_config::RecentFilesCleanup;
     use rust_pad_core::encoding::{LineEnding, TextEncoding};
-    use rust_pad_core::line_ops::{CaseConversion, SortOrder};
+    use rust_pad_core::line_ops::{CaseConversion, SortOrder, TrimMode};
 
     /// Helper: create an App for unit-testing (no rendering needed).
     pub(crate) fn test_app() -> App {
@@ -1617,25 +1617,6 @@ mod tests {
         app.tabs.active_doc_mut().modified = true;
         assert!(app.tabs.active_doc().modified);
         assert_eq!(app.tabs.active_doc().line_ending, LineEnding::Cr);
-    }
-
-    // -- Delete line (Ctrl+D) --
-
-    #[test]
-    fn test_ctrl_d_deletes_line() {
-        let mut app = test_app();
-        app.tabs.active_doc_mut().insert_text("line1\nline2\nline3");
-        app.tabs.active_doc_mut().cursor.position = Position::new(1, 0);
-        app.delete_current_line();
-        assert_eq!(app.tabs.active_doc().buffer.to_string(), "line1\nline3");
-    }
-
-    #[test]
-    fn test_ctrl_d_empty_doc() {
-        let mut app = test_app();
-        // Should not crash on empty document
-        app.delete_current_line();
-        assert_eq!(app.tabs.active_doc().buffer.to_string(), "");
     }
 
     // -- Multi-cursor: select next occurrence --
@@ -3019,6 +3000,167 @@ mod tests {
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("a\n\nb\n\nc");
         app.remove_empty_lines();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
+    }
+
+    // ── Main-menu line ops auto-scope (ADR-005) ─────────────────────
+
+    use super::editing::current_op_scope;
+
+    /// Selects `[from, to]` on the primary cursor of the active document.
+    fn select_lines(app: &mut App, from: Position, to: Position) {
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.move_to(from, &doc.buffer);
+        doc.cursor.start_selection();
+        doc.cursor.move_to(to, &doc.buffer);
+    }
+
+    #[test]
+    fn sort_lines_main_menu_no_selection_sorts_whole_doc() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("c\nb\na");
+        app.tabs.active_doc_mut().cursor.clear_selection();
+        app.sort_lines(SortOrder::Ascending);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
+    }
+
+    #[test]
+    fn sort_lines_main_menu_with_selection_sorts_only_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nz\ny\nx\nb");
+        select_lines(&mut app, Position::new(1, 0), Position::new(3, 1));
+        app.sort_lines(SortOrder::Ascending);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nx\ny\nz\nb");
+    }
+
+    #[test]
+    fn remove_duplicate_lines_main_menu_no_selection_globally() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\na\nc");
+        app.tabs.active_doc_mut().cursor.clear_selection();
+        app.remove_duplicate_lines();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
+    }
+
+    #[test]
+    fn remove_duplicate_lines_main_menu_with_selection_only_in_range() {
+        let mut app = test_app();
+        // Duplicates exist both inside (lines 1-3) and outside the selection.
+        app.tabs.active_doc_mut().insert_text("a\nx\nx\ny\na");
+        select_lines(&mut app, Position::new(1, 0), Position::new(3, 1));
+        app.remove_duplicate_lines();
+        // Only the in-range duplicate "x" removed; outer "a" duplicate stays.
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nx\ny\na");
+    }
+
+    #[test]
+    fn remove_empty_lines_main_menu_no_selection_globally() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\n\nb\n\nc");
+        app.tabs.active_doc_mut().cursor.clear_selection();
+        app.remove_empty_lines();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
+    }
+
+    #[test]
+    fn remove_empty_lines_main_menu_with_selection_only_in_range() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("\na\n\nb\n");
+        select_lines(&mut app, Position::new(1, 0), Position::new(3, 1));
+        app.remove_empty_lines();
+        // Empty lines outside the selection (0 and 4) remain.
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "\na\nb\n");
+    }
+
+    #[test]
+    fn trim_lines_main_menu_no_selection_globally() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("  a  \n  b  ");
+        app.tabs.active_doc_mut().cursor.clear_selection();
+        app.trim_lines(TrimMode::Both);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb");
+    }
+
+    #[test]
+    fn trim_lines_main_menu_with_selection_only_in_range() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("  a  \n  b  \n  c  ");
+        select_lines(&mut app, Position::new(1, 0), Position::new(1, 3));
+        app.trim_lines(TrimMode::Both);
+        // Only line 1 trimmed; lines 0 and 2 keep their whitespace.
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "  a  \nb\n  c  ");
+    }
+
+    #[test]
+    fn trim_lines_records_one_undo_step() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("  a  \n  b  ");
+        app.tabs.active_doc_mut().history.force_group_break();
+        app.tabs.active_doc_mut().cursor.clear_selection();
+        app.trim_lines(TrimMode::Both);
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb");
+        app.tabs.active_doc_mut().undo();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "  a  \n  b  ");
+    }
+
+    #[test]
+    fn current_op_scope_returns_selection_when_secondary_has_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.clear_selection();
+        let mut sc = rust_pad_core::cursor::Cursor::new();
+        sc.position = Position::new(2, 1);
+        sc.selection_anchor = Some(Position::new(2, 0));
+        doc.secondary_cursors.push(sc);
+        assert_eq!(
+            current_op_scope(app.tabs.active_doc()),
+            OperationScope::Selection
+        );
+    }
+
+    #[test]
+    fn current_op_scope_returns_global_when_anchor_equals_position() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc");
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.position = Position::new(1, 0);
+        doc.cursor.selection_anchor = Some(Position::new(1, 0));
+        assert_eq!(
+            current_op_scope(app.tabs.active_doc()),
+            OperationScope::Global
+        );
+    }
+
+    // ── Join Lines (ADR-006) ────────────────────────────────────────
+
+    #[test]
+    fn join_lines_main_menu_no_selection_joins_whole_doc() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc");
+        app.tabs.active_doc_mut().cursor.clear_selection();
+        app.join_lines();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a b c");
+    }
+
+    #[test]
+    fn join_lines_main_menu_with_selection_joins_only_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc\nd");
+        select_lines(&mut app, Position::new(1, 0), Position::new(2, 1));
+        app.join_lines();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb c\nd");
+    }
+
+    #[test]
+    fn join_lines_records_one_undo_step() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("a\nb\nc");
+        app.tabs.active_doc_mut().history.force_group_break();
+        app.tabs.active_doc_mut().cursor.clear_selection();
+        app.join_lines();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "a b c");
+        app.tabs.active_doc_mut().undo();
         assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
     }
 

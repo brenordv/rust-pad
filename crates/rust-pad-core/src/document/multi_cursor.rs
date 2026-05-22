@@ -3,9 +3,15 @@
 //! Provides text insertion, deletion, and selection operations that work
 //! across multiple cursor positions simultaneously.
 
-use crate::cursor::{char_to_pos, pos_to_char};
+use crate::cursor::char_to_pos;
 
 use super::Document;
+
+/// A selection range captured against the current buffer.
+///
+/// `(start_char_idx, end_char_idx, source_index, is_primary)`. When the cursor
+/// has no selection, `start == end == cursor.position` as char idx.
+type SelectionRange = (usize, usize, usize, bool);
 
 impl Document {
     /// Collects char indices for the primary and all secondary cursors.
@@ -24,20 +30,28 @@ impl Document {
         indices
     }
 
-    /// Deletes selections at the given cursor positions (must be sorted descending).
-    fn delete_selections_at_cursors(&mut self, indices: &[(usize, usize, bool)]) {
-        for &(_, idx, is_primary) in indices {
-            let cursor = if is_primary {
-                &self.cursor
-            } else {
-                &self.secondary_cursors[idx]
+    /// Captures `(start, end, src_idx, is_primary)` for every cursor against
+    /// the current buffer. Cursors without a selection contribute a zero-width
+    /// range `start == end` at their position.
+    fn collect_selection_ranges(&self) -> Vec<SelectionRange> {
+        let mut ranges = Vec::with_capacity(1 + self.secondary_cursors.len());
+
+        let primary_idx = self.cursor.to_char_index(&self.buffer).unwrap_or(0);
+        let (p_start, p_end) = match self.cursor.selection_char_range(&self.buffer) {
+            Ok(Some((s, e))) => (s, e),
+            _ => (primary_idx, primary_idx),
+        };
+        ranges.push((p_start, p_end, 0, true));
+
+        for (i, sc) in self.secondary_cursors.iter().enumerate() {
+            let sc_idx = sc.to_char_index(&self.buffer).unwrap_or(0);
+            let (s, e) = match sc.selection_char_range(&self.buffer) {
+                Ok(Some((s, e))) => (s, e),
+                _ => (sc_idx, sc_idx),
             };
-            if let Ok(Some((start, end))) = cursor.selection_char_range(&self.buffer) {
-                if start != end {
-                    let _ = self.buffer.remove(start, end);
-                }
-            }
+            ranges.push((s, e, i, false));
         }
+        ranges
     }
 
     /// Updates a single cursor's position (primary or secondary).
@@ -60,28 +74,6 @@ impl Document {
         cursor.desired_col = None;
     }
 
-    /// Collects cursor positions using the minimum of anchor and position.
-    ///
-    /// Used after selection deletion to find where inserts should happen.
-    fn collect_min_selection_positions(&self) -> Vec<(usize, usize, bool)> {
-        let mut indices = Vec::with_capacity(1 + self.secondary_cursors.len());
-        let primary_pos = self
-            .cursor
-            .selection_anchor
-            .unwrap_or(self.cursor.position)
-            .min(self.cursor.position);
-        if let Ok(idx) = pos_to_char(&self.buffer, primary_pos) {
-            indices.push((idx, 0, true));
-        }
-        for (i, sc) in self.secondary_cursors.iter().enumerate() {
-            let pos = sc.selection_anchor.unwrap_or(sc.position).min(sc.position);
-            if let Ok(idx) = pos_to_char(&self.buffer, pos) {
-                indices.push((idx, i, false));
-            }
-        }
-        indices
-    }
-
     /// Finalizes a multi-cursor edit: merges overlapping cursors, syncs changes.
     fn finalize_multi_edit(&mut self, scroll_to_cursor: bool) {
         self.merge_overlapping_cursors();
@@ -100,31 +92,29 @@ impl Document {
             return;
         }
 
-        let mut cursor_indices = self.collect_cursor_indices();
-        cursor_indices.sort_by(|a, b| b.0.cmp(&a.0));
-
+        // Capture ranges against the pre-mutation buffer. Any later math is
+        // derived purely from these char indices, never from stale `Position`s.
+        let mut ranges = self.collect_selection_ranges();
         let insert_len = text.chars().count();
 
-        // Delete selections first (in reverse order), then insert
-        self.delete_selections_at_cursors(&cursor_indices);
-
-        // Recalculate positions after deletions and insert in reverse order
-        let mut cursor_indices2 = self.collect_min_selection_positions();
-        cursor_indices2.sort_by(|a, b| b.0.cmp(&a.0));
-
-        for &(char_idx, _, _) in &cursor_indices2 {
-            let _ = self.buffer.insert(char_idx, text);
+        // Descending pass: delete each selection, then insert. Lower-index
+        // positions stay valid because we only mutate from the end backwards.
+        ranges.sort_by(|a, b| b.0.cmp(&a.0));
+        for &(start, end, _, _) in &ranges {
+            if end > start {
+                let _ = self.buffer.remove(start, end);
+            }
+            let _ = self.buffer.insert(start, text);
         }
 
-        // Sort ascending, track cumulative offset to update each cursor
-        cursor_indices2.sort_by_key(|&(idx, _, _)| idx);
-
-        let mut offset = 0usize;
-        for &(original_idx, src_idx, is_primary) in &cursor_indices2 {
-            let new_char_idx = original_idx + offset + insert_len;
+        // Ascending pass: each cursor lands `insert_len` past its (offset) start.
+        ranges.sort_by_key(|&(start, _, _, _)| start);
+        let mut offset: isize = 0;
+        for &(start, end, src_idx, is_primary) in &ranges {
+            let new_char_idx = (start as isize + offset + insert_len as isize).max(0) as usize;
             let new_pos = char_to_pos(&self.buffer, new_char_idx);
             self.set_cursor_position(src_idx, is_primary, new_pos, true);
-            offset += insert_len;
+            offset += insert_len as isize - (end as isize - start as isize);
         }
 
         self.finalize_multi_edit(true);
@@ -148,61 +138,35 @@ impl Document {
             return;
         }
 
-        // Build (char_idx, src_idx, is_primary) sorted ascending by document position
-        let mut cursor_info = self.collect_cursor_indices();
-        cursor_info.sort_by_key(|&(idx, _, _)| idx);
-
-        // Map each sorted position to its text in document order
-        let text_assignments: Vec<(usize, &str, usize, bool)> = cursor_info
-            .iter()
-            .enumerate()
-            .map(|(text_idx, &(char_idx, src_idx, is_primary))| {
-                (char_idx, texts[text_idx], src_idx, is_primary)
+        // Pair each cursor's selection range with its assigned text. The text
+        // assignment follows `texts` order: index 0 → primary, then secondaries.
+        let base_ranges = self.collect_selection_ranges();
+        let mut ranges: Vec<(usize, usize, &str, usize, bool)> = base_ranges
+            .into_iter()
+            .map(|(s, e, src_idx, is_primary)| {
+                let text_idx = if is_primary { 0 } else { src_idx + 1 };
+                (s, e, texts[text_idx], src_idx, is_primary)
             })
             .collect();
 
-        // Delete selections first (reverse document order)
-        let mut desc = self.collect_cursor_indices();
-        desc.sort_by(|a, b| b.0.cmp(&a.0));
-        self.delete_selections_at_cursors(&desc);
-
-        // Recalculate positions after deletions, preserving text assignment order
-        let positions_in_order: Vec<(usize, bool)> = text_assignments
-            .iter()
-            .map(|&(_, _, src_idx, is_primary)| (src_idx, is_primary))
-            .collect();
-
-        let mut assignments2: Vec<(usize, &str, usize, bool)> = Vec::new();
-        for (text_idx, &(src_idx, is_primary)) in positions_in_order.iter().enumerate() {
-            let pos = if is_primary {
-                self.cursor
-                    .selection_anchor
-                    .unwrap_or(self.cursor.position)
-                    .min(self.cursor.position)
-            } else {
-                let sc = &self.secondary_cursors[src_idx];
-                sc.selection_anchor.unwrap_or(sc.position).min(sc.position)
-            };
-            if let Ok(idx) = pos_to_char(&self.buffer, pos) {
-                assignments2.push((idx, texts[text_idx], src_idx, is_primary));
+        // Descending pass: delete + insert each per-cursor text.
+        ranges.sort_by(|a, b| b.0.cmp(&a.0));
+        for &(start, end, text, _, _) in &ranges {
+            if end > start {
+                let _ = self.buffer.remove(start, end);
             }
+            let _ = self.buffer.insert(start, text);
         }
 
-        // Insert in reverse document order so earlier positions stay valid
-        assignments2.sort_by(|a, b| b.0.cmp(&a.0));
-        for &(char_idx, text, _, _) in &assignments2 {
-            let _ = self.buffer.insert(char_idx, text);
-        }
-
-        // Update cursor positions ascending with cumulative offset
-        assignments2.sort_by_key(|&(idx, _, _, _)| idx);
-        let mut offset = 0usize;
-        for &(original_idx, text, src_idx, is_primary) in &assignments2 {
+        // Ascending pass: place each cursor past its inserted text.
+        ranges.sort_by_key(|&(start, _, _, _, _)| start);
+        let mut offset: isize = 0;
+        for &(start, end, text, src_idx, is_primary) in &ranges {
             let insert_len = text.chars().count();
-            let new_char_idx = original_idx + offset + insert_len;
+            let new_char_idx = (start as isize + offset + insert_len as isize).max(0) as usize;
             let new_pos = char_to_pos(&self.buffer, new_char_idx);
             self.set_cursor_position(src_idx, is_primary, new_pos, true);
-            offset += insert_len;
+            offset += insert_len as isize - (end as isize - start as isize);
         }
 
         self.finalize_multi_edit(true);
@@ -497,6 +461,90 @@ mod tests {
 
         doc.insert_text_per_cursor(&["X", "Y"]);
         assert_eq!(doc.buffer.to_string(), "X Y");
+    }
+
+    // ── same-line multi-cursor selection replace (Bug #1 regression) ─
+
+    /// Helper: adds a secondary cursor with a selection spanning [anchor_col, head_col].
+    fn add_cursor_with_selection(
+        doc: &mut Document,
+        line: usize,
+        anchor_col: usize,
+        head_col: usize,
+    ) {
+        let mut sc = Cursor::new();
+        sc.selection_anchor = Some(Position::new(line, anchor_col));
+        sc.position = Position::new(line, head_col);
+        doc.secondary_cursors.push(sc);
+    }
+
+    #[test]
+    fn insert_multi_same_line_replaces_all_selections() {
+        // The exact bug report: four `photo` selections on one line,
+        // each replaced with `video`. Same length keeps offsets clean.
+        let mut doc = doc_with(
+            "- Sub categories: photo-of-food, photo-of-animals, photo-of-people, photo-of-places",
+        );
+        // Primary selects the first "photo" at columns 18..23.
+        doc.cursor.selection_anchor = Some(Position::new(0, 18));
+        doc.cursor.position = Position::new(0, 23);
+        add_cursor_with_selection(&mut doc, 0, 33, 38);
+        add_cursor_with_selection(&mut doc, 0, 51, 56);
+        add_cursor_with_selection(&mut doc, 0, 68, 73);
+
+        doc.insert_text_multi("video");
+        assert_eq!(
+            doc.buffer.to_string(),
+            "- Sub categories: video-of-food, video-of-animals, video-of-people, video-of-places",
+        );
+    }
+
+    #[test]
+    fn insert_multi_same_line_with_grow_text() {
+        // Each selection replaces 1 char with 3 chars (net growth per cursor).
+        // Verifies the ascending-pass running offset stays correct when
+        // insert_len > deleted_len.
+        let mut doc = doc_with("aa..aa..aa");
+        // Three single-char "a" selections in document order.
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(0, 1);
+        add_cursor_with_selection(&mut doc, 0, 4, 5);
+        add_cursor_with_selection(&mut doc, 0, 8, 9);
+
+        doc.insert_text_multi("XYZ");
+        // Each "a" → "XYZ"; the second `a` of each pair is untouched.
+        assert_eq!(doc.buffer.to_string(), "XYZa..XYZa..XYZa");
+    }
+
+    #[test]
+    fn insert_multi_same_line_with_shrink_text() {
+        // Each selection replaces 4 chars with 1 char (net shrink per cursor).
+        // Verifies the ascending-pass running offset stays correct when
+        // insert_len < deleted_len.
+        let mut doc = doc_with("WORD-WORD-WORD");
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(0, 4);
+        add_cursor_with_selection(&mut doc, 0, 5, 9);
+        add_cursor_with_selection(&mut doc, 0, 10, 14);
+
+        doc.insert_text_multi("x");
+        assert_eq!(doc.buffer.to_string(), "x-x-x");
+    }
+
+    #[test]
+    fn per_cursor_same_line_replaces_all_selections() {
+        // Same shape as the photo→video bug but routed through
+        // insert_text_per_cursor (the code path used by Enter for auto-indent
+        // and by multi-cursor paste).
+        let mut doc = doc_with("aa.bb.cc.dd");
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(0, 2);
+        add_cursor_with_selection(&mut doc, 0, 3, 5);
+        add_cursor_with_selection(&mut doc, 0, 6, 8);
+        add_cursor_with_selection(&mut doc, 0, 9, 11);
+
+        doc.insert_text_per_cursor(&["W", "X", "Y", "Z"]);
+        assert_eq!(doc.buffer.to_string(), "W.X.Y.Z");
     }
 
     // ── backspace_multi ───────────────────────────────────────────

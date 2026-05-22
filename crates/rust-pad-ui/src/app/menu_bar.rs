@@ -4,7 +4,7 @@
 
 use eframe::egui;
 use rust_pad_core::encoding::{LineEnding, TextEncoding};
-use rust_pad_core::line_ops::{CaseConversion, SortOrder};
+use rust_pad_core::line_ops::{CaseConversion, SortOrder, TrimMode};
 
 use super::context_menu::OperationScope;
 use super::{App, ThemeMode};
@@ -253,7 +253,10 @@ impl App {
     fn show_line_operations_submenu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Line Operations", |ui| {
             ui.set_min_width(220.0);
-            if ui.button("Duplicate Line").clicked() {
+            if ui
+                .add(egui::Button::new("Duplicate Line").shortcut_text("Ctrl+D"))
+                .clicked()
+            {
                 self.duplicate_current_line();
                 ui.close();
             }
@@ -289,6 +292,25 @@ impl App {
                 self.remove_empty_lines();
                 ui.close();
             }
+            if ui.button("Join Lines").clicked() {
+                self.join_lines();
+                ui.close();
+            }
+            ui.separator();
+            ui.menu_button("Trim Whitespace", |ui| {
+                if ui.button("Trailing").clicked() {
+                    self.trim_lines(TrimMode::Trailing);
+                    ui.close();
+                }
+                if ui.button("Leading").clicked() {
+                    self.trim_lines(TrimMode::Leading);
+                    ui.close();
+                }
+                if ui.button("Leading and Trailing").clicked() {
+                    self.trim_lines(TrimMode::Both);
+                    ui.close();
+                }
+            });
         });
     }
 

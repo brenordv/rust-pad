@@ -291,7 +291,8 @@ impl App {
         true
     }
 
-    /// Edit shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+X, Ctrl+C, Ctrl+V, Ctrl+A, Ctrl+D).
+    /// Edit shortcuts (Ctrl+Z, Ctrl+Y, Ctrl+X, Ctrl+C, Ctrl+V, Ctrl+A,
+    /// Ctrl+D = Duplicate Line).
     /// Returns `true` if the key was consumed.
     fn handle_edit_shortcut(&mut self, key: egui::Key, ctrl: bool) -> bool {
         if !ctrl {
@@ -308,7 +309,7 @@ impl App {
                 doc.cursor.select_all(&doc.buffer);
                 doc.clear_secondary_cursors();
             }
-            egui::Key::D => self.delete_current_line(),
+            egui::Key::D => self.duplicate_current_line(),
             _ => return false,
         }
         true

@@ -6,7 +6,7 @@
 use rust_pad_core::buffer::TextBuffer;
 use rust_pad_core::cursor::{char_to_pos, pos_to_char, Cursor, Position};
 use rust_pad_core::document::Document;
-use rust_pad_core::line_ops::{self, CaseConversion, SortOptions, SortOrder};
+use rust_pad_core::line_ops::{self, CaseConversion, SortOptions, SortOrder, TrimMode};
 
 use super::context_menu::OperationScope;
 use super::App;
@@ -141,11 +141,6 @@ impl App {
             doc.cursor.position.line += 1;
             doc.record_undo_from_snapshot(snapshot);
         }
-    }
-
-    /// Deletes the current line (Ctrl+D).
-    pub(crate) fn delete_current_line(&mut self) {
-        self.tabs.active_doc_mut().delete_line();
     }
 
     /// Selects the next occurrence of the word under cursor (Alt+Shift+.).
@@ -307,22 +302,56 @@ impl App {
         new_cursor
     }
 
-    /// Sorts all lines in the document in the given order.
+    /// Sorts lines, auto-scoped to the selection when one exists, else the
+    /// whole document.
     pub(crate) fn sort_lines(&mut self, order: SortOrder) {
-        self.sort_lines_scoped(order, OperationScope::Global);
+        let scope = current_op_scope(self.tabs.active_doc());
+        self.sort_lines_scoped(order, scope);
     }
 
-    /// Removes duplicate lines from the document.
+    /// Removes duplicate lines, auto-scoped to the selection when one exists,
+    /// else the whole document.
     pub(crate) fn remove_duplicate_lines(&mut self) {
-        self.remove_duplicate_lines_scoped(OperationScope::Global);
+        let scope = current_op_scope(self.tabs.active_doc());
+        self.remove_duplicate_lines_scoped(scope);
     }
 
-    /// Removes empty lines from the document.
+    /// Removes empty lines, auto-scoped to the selection when one exists, else
+    /// the whole document.
     pub(crate) fn remove_empty_lines(&mut self) {
-        self.remove_empty_lines_scoped(OperationScope::Global);
+        let scope = current_op_scope(self.tabs.active_doc());
+        self.remove_empty_lines_scoped(scope);
     }
 
     // ── Scoped operations ────────────────────────────────────────────
+
+    /// Runs a line operation over either the whole document or the current
+    /// selection range, recording a single undo step when `op` reports it
+    /// touched the buffer.
+    ///
+    /// `op` receives the buffer and the resolved `[start, end)` line range and
+    /// returns `true` when the edit should be committed (i.e. the underlying
+    /// `line_ops` call succeeded). When `clamp_after` is set and the scope is
+    /// `Selection`, cursors are clamped after a successful edit so they cannot
+    /// point past lines the operation removed — used by ops that can reduce the
+    /// line count (remove-duplicates, remove-empty, join).
+    fn run_scoped_line_op<F>(&mut self, scope: OperationScope, clamp_after: bool, op: F)
+    where
+        F: FnOnce(&mut TextBuffer, usize, usize) -> bool,
+    {
+        let doc = self.tabs.active_doc_mut();
+        let snapshot = doc.snapshot_for_undo();
+        let (start, end) = match scope {
+            OperationScope::Global => (0, doc.buffer.len_lines()),
+            OperationScope::Selection => selection_line_range(doc),
+        };
+        if op(&mut doc.buffer, start, end) {
+            if clamp_after && scope == OperationScope::Selection {
+                clamp_cursors(doc);
+            }
+            doc.record_undo_from_snapshot(snapshot);
+        }
+    }
 
     /// Converts case, scoped to either the whole document or the selection.
     pub(crate) fn convert_case_scoped(
@@ -347,51 +376,57 @@ impl App {
 
     /// Sorts lines, scoped to either the whole document or the selection range.
     pub(crate) fn sort_lines_scoped(&mut self, order: SortOrder, scope: OperationScope) {
-        let doc = self.tabs.active_doc_mut();
-        let snapshot = doc.snapshot_for_undo();
-        let (start, end) = match scope {
-            OperationScope::Global => (0, doc.buffer.len_lines()),
-            OperationScope::Selection => selection_line_range(doc),
-        };
         let opts = SortOptions {
             order,
             ..Default::default()
         };
-        if line_ops::sort_lines(&mut doc.buffer, start, end, &opts).is_ok() {
-            doc.record_undo_from_snapshot(snapshot);
-        }
+        self.run_scoped_line_op(scope, false, |buffer, start, end| {
+            line_ops::sort_lines(buffer, start, end, &opts).is_ok()
+        });
     }
 
     /// Removes duplicate lines, scoped to either the whole document or the selection range.
     pub(crate) fn remove_duplicate_lines_scoped(&mut self, scope: OperationScope) {
-        let doc = self.tabs.active_doc_mut();
-        let snapshot = doc.snapshot_for_undo();
-        let (start, end) = match scope {
-            OperationScope::Global => (0, doc.buffer.len_lines()),
-            OperationScope::Selection => selection_line_range(doc),
-        };
-        if line_ops::remove_all_duplicates(&mut doc.buffer, start, end).is_ok() {
-            if scope == OperationScope::Selection {
-                clamp_cursors(doc);
-            }
-            doc.record_undo_from_snapshot(snapshot);
-        }
+        self.run_scoped_line_op(scope, true, |buffer, start, end| {
+            line_ops::remove_all_duplicates(buffer, start, end).is_ok()
+        });
     }
 
     /// Removes empty lines, scoped to either the whole document or the selection range.
     pub(crate) fn remove_empty_lines_scoped(&mut self, scope: OperationScope) {
-        let doc = self.tabs.active_doc_mut();
-        let snapshot = doc.snapshot_for_undo();
-        let (start, end) = match scope {
-            OperationScope::Global => (0, doc.buffer.len_lines()),
-            OperationScope::Selection => selection_line_range(doc),
-        };
-        if line_ops::remove_empty_lines(&mut doc.buffer, start, end).is_ok() {
-            if scope == OperationScope::Selection {
-                clamp_cursors(doc);
-            }
-            doc.record_undo_from_snapshot(snapshot);
-        }
+        self.run_scoped_line_op(scope, true, |buffer, start, end| {
+            line_ops::remove_empty_lines(buffer, start, end).is_ok()
+        });
+    }
+
+    /// Trims whitespace from each line, auto-scoped to the selection when one
+    /// exists, else the whole document.
+    pub(crate) fn trim_lines(&mut self, mode: TrimMode) {
+        let scope = current_op_scope(self.tabs.active_doc());
+        self.trim_lines_scoped(mode, scope);
+    }
+
+    /// Trims whitespace from each line, scoped to either the whole document
+    /// or the selection range.
+    pub(crate) fn trim_lines_scoped(&mut self, mode: TrimMode, scope: OperationScope) {
+        self.run_scoped_line_op(scope, false, |buffer, start, end| {
+            line_ops::trim_lines(buffer, start, end, mode).is_ok()
+        });
+    }
+
+    /// Joins lines, auto-scoped to the selection when one exists, else the
+    /// whole document.
+    pub(crate) fn join_lines(&mut self) {
+        let scope = current_op_scope(self.tabs.active_doc());
+        self.join_lines_scoped(scope);
+    }
+
+    /// Joins lines into one (space-separated), scoped to either the whole
+    /// document or the selection range.
+    pub(crate) fn join_lines_scoped(&mut self, scope: OperationScope) {
+        self.run_scoped_line_op(scope, true, |buffer, start, end| {
+            line_ops::join_lines(buffer, start, end).is_ok()
+        });
     }
 
     // ── New actions ──────────────────────────────────────────────────
@@ -470,23 +505,24 @@ impl App {
     }
 
     /// Indents or dedents the current selection or line.
+    ///
+    /// Selection-aware path delegates to [`Document::indent_or_dedent_selection`]
+    /// so the editor's Tab key and this menu entry share the same logic.
+    /// No-selection fallback indents/dedents the cursor's current line —
+    /// preserves the menu-entry semantics from before the Tab-key rewire.
     pub(crate) fn indent_selection(&mut self, indent: bool) {
         let doc = self.tabs.active_doc_mut();
+        if doc.indent_or_dedent_selection(indent) {
+            return;
+        }
+        let line = doc.cursor.position.line;
         let snapshot = doc.snapshot_for_undo();
-        let sel = doc.cursor.selection();
-        let (start_line, end_line) = if let Some(sel) = sel {
-            (sel.start().line, sel.end().line + 1)
-        } else {
-            (doc.cursor.position.line, doc.cursor.position.line + 1)
-        };
-
         let style = doc.indent_style;
         let result = if indent {
-            line_ops::indent_lines(&mut doc.buffer, start_line, end_line, &style)
+            line_ops::indent_lines(&mut doc.buffer, line, line + 1, &style)
         } else {
-            line_ops::dedent_lines(&mut doc.buffer, start_line, end_line, &style)
+            line_ops::dedent_lines(&mut doc.buffer, line, line + 1, &style)
         };
-
         if result.is_ok() {
             doc.record_undo_from_snapshot(snapshot);
         }
@@ -518,6 +554,25 @@ pub(crate) fn selection_line_range(doc: &Document) -> (usize, usize) {
     }
 
     (min_line, max_line + 1)
+}
+
+/// Returns the scope a top-level line operation should use, based on whether
+/// any cursor (primary or secondary) currently holds a non-empty selection.
+pub(crate) fn current_op_scope(doc: &Document) -> OperationScope {
+    let primary_has_sel = doc
+        .cursor
+        .selection()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let secondary_has_sel = doc
+        .secondary_cursors
+        .iter()
+        .any(|c| c.selection().map(|s| !s.is_empty()).unwrap_or(false));
+    if primary_has_sel || secondary_has_sel {
+        OperationScope::Selection
+    } else {
+        OperationScope::Global
+    }
 }
 
 /// Clamps all cursor positions to be within buffer bounds.

@@ -36,6 +36,17 @@ pub enum CaseConversion {
     TitleCase,
 }
 
+/// Whitespace-trim mode for line operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimMode {
+    /// Trim trailing whitespace only.
+    Trailing,
+    /// Trim leading whitespace only.
+    Leading,
+    /// Trim both leading and trailing whitespace.
+    Both,
+}
+
 /// Reads lines from the buffer in the given range, stripping trailing newlines.
 fn read_lines_trimmed(
     buffer: &TextBuffer,
@@ -358,6 +369,32 @@ pub fn indent_lines(
     Ok(())
 }
 
+/// Returns the number of leading-whitespace chars that [`dedent_lines`] would
+/// remove from `line_idx` under `style`. Reads the buffer without mutating it.
+///
+/// Returns `0` when the line index is out of bounds.
+pub fn leading_indent_removable(
+    buffer: &TextBuffer,
+    line_idx: usize,
+    style: &IndentStyle,
+) -> usize {
+    let Ok(line) = buffer.line(line_idx) else {
+        return 0;
+    };
+    let line_str = line.to_string();
+    match style {
+        IndentStyle::Tabs => {
+            if line_str.starts_with('\t') {
+                1
+            } else {
+                // Fall back: remove up to 4 leading spaces for mixed content
+                line_str.chars().take_while(|c| *c == ' ').count().min(4)
+            }
+        }
+        IndentStyle::Spaces(n) => line_str.chars().take_while(|c| *c == ' ').count().min(*n),
+    }
+}
+
 /// Dedents lines in the given range using the specified indent style.
 pub fn dedent_lines(
     buffer: &mut TextBuffer,
@@ -367,24 +404,94 @@ pub fn dedent_lines(
 ) -> Result<()> {
     // Process from last to first to maintain char positions
     for line_idx in (start_line..end_line.min(buffer.len_lines())).rev() {
-        let line = buffer.line(line_idx)?.to_string();
-        let to_remove = match style {
-            IndentStyle::Tabs => {
-                if line.starts_with('\t') {
-                    1
-                } else {
-                    // Fall back: remove up to 4 leading spaces for mixed content
-                    line.chars().take_while(|c| *c == ' ').count().min(4)
-                }
-            }
-            IndentStyle::Spaces(n) => line.chars().take_while(|c| *c == ' ').count().min(*n),
-        };
+        let to_remove = leading_indent_removable(buffer, line_idx, style);
         if to_remove > 0 {
             let line_start = buffer.line_to_char(line_idx)?;
             buffer.remove(line_start, line_start + to_remove)?;
         }
     }
     Ok(())
+}
+
+/// Trims whitespace from each line in `[start_line, end_line)` according to
+/// `mode`. Returns the number of lines that changed.
+///
+/// Returns `Ok(0)` (and leaves the buffer untouched) when the range is empty
+/// or out of bounds.
+pub fn trim_lines(
+    buffer: &mut TextBuffer,
+    start_line: usize,
+    end_line: usize,
+    mode: TrimMode,
+) -> Result<usize> {
+    if start_line >= end_line || end_line > buffer.len_lines() {
+        return Ok(0);
+    }
+
+    let lines = read_lines_trimmed(buffer, start_line, end_line)?;
+    let trimmed: Vec<&str> = lines
+        .iter()
+        .map(|l| match mode {
+            TrimMode::Trailing => l.trim_end(),
+            TrimMode::Leading => l.trim_start(),
+            TrimMode::Both => l.trim(),
+        })
+        .collect();
+
+    let changed = trimmed
+        .iter()
+        .zip(lines.iter())
+        .filter(|(t, original)| **t != original.as_str())
+        .count();
+
+    if changed == 0 {
+        return Ok(0);
+    }
+
+    write_lines_back(buffer, start_line, end_line, &trimmed)?;
+    Ok(changed)
+}
+
+/// Joins lines in `[start_line, end_line)` into a single line with exactly one
+/// space between each pair of joined lines.
+///
+/// Trailing whitespace of every-line-except-last and leading whitespace of
+/// every-line-except-first are stripped before joining, so each junction has
+/// exactly one ASCII space. The leading whitespace of the first line and the
+/// trailing whitespace of the last line are preserved verbatim.
+///
+/// Returns the number of newlines collapsed (`end_line - start_line - 1` when
+/// the operation runs, `0` when the range covers fewer than 2 lines or is out
+/// of bounds).
+///
+/// # Errors
+///
+/// Propagates buffer access errors from the underlying read/write helpers.
+pub fn join_lines(buffer: &mut TextBuffer, start_line: usize, end_line: usize) -> Result<usize> {
+    if end_line > buffer.len_lines() || end_line.saturating_sub(start_line) < 2 {
+        return Ok(0);
+    }
+
+    let lines = read_lines_trimmed(buffer, start_line, end_line)?;
+    let last_idx = lines.len() - 1;
+
+    let mut joined =
+        String::with_capacity(lines.iter().map(String::len).sum::<usize>() + lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let slice = match (i == 0, i == last_idx) {
+            (true, true) => line.as_str(), // single line — unreachable due to len check
+            (true, false) => line.trim_end(), // first: keep leading, drop trailing
+            (false, true) => line.trim_start(), // last: keep trailing, drop leading
+            (false, false) => line.trim(), // middle: drop both
+        };
+        if i > 0 {
+            joined.push(' ');
+        }
+        joined.push_str(slice);
+    }
+
+    write_lines_back(buffer, start_line, end_line, &[joined.as_str()])?;
+    Ok(last_idx)
 }
 
 #[cfg(test)]
@@ -824,10 +931,217 @@ mod tests {
     }
 
     #[test]
+    fn leading_indent_removable_spaces_tabs_mixed() {
+        // Spaces style: removable is min(leading spaces, width).
+        let buf = TextBuffer::from("      a\n  b\nc");
+        assert_eq!(
+            leading_indent_removable(&buf, 0, &IndentStyle::Spaces(4)),
+            4
+        );
+        assert_eq!(
+            leading_indent_removable(&buf, 1, &IndentStyle::Spaces(4)),
+            2
+        );
+        assert_eq!(
+            leading_indent_removable(&buf, 2, &IndentStyle::Spaces(4)),
+            0
+        );
+
+        // Tabs style: a leading tab counts as 1; otherwise up to 4 spaces.
+        let buf = TextBuffer::from("\ta\n      b\nc");
+        assert_eq!(leading_indent_removable(&buf, 0, &IndentStyle::Tabs), 1);
+        assert_eq!(leading_indent_removable(&buf, 1, &IndentStyle::Tabs), 4);
+        assert_eq!(leading_indent_removable(&buf, 2, &IndentStyle::Tabs), 0);
+
+        // Out of bounds is 0.
+        assert_eq!(leading_indent_removable(&buf, 99, &IndentStyle::Tabs), 0);
+    }
+
+    #[test]
     fn test_dedent_no_indent_noop() {
         let style = IndentStyle::Spaces(4);
         let mut buf = TextBuffer::from("abc\ndef");
         dedent_lines(&mut buf, 0, 2, &style).unwrap();
         assert_eq!(buf.to_string(), "abc\ndef");
+    }
+
+    // ── trim_lines ───────────────────────────────────────────────────
+
+    #[test]
+    fn trim_lines_trailing_strips_only_end() {
+        let mut buf = TextBuffer::from("hello   ");
+        let changed = trim_lines(&mut buf, 0, 1, TrimMode::Trailing).unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(buf.to_string(), "hello");
+    }
+
+    #[test]
+    fn trim_lines_leading_strips_only_start() {
+        let mut buf = TextBuffer::from("   hello");
+        let changed = trim_lines(&mut buf, 0, 1, TrimMode::Leading).unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(buf.to_string(), "hello");
+    }
+
+    #[test]
+    fn trim_lines_both_strips_both_ends() {
+        let mut buf = TextBuffer::from("   hello   ");
+        let changed = trim_lines(&mut buf, 0, 1, TrimMode::Both).unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(buf.to_string(), "hello");
+    }
+
+    #[test]
+    fn trim_lines_preserves_inner_whitespace() {
+        let mut buf = TextBuffer::from("  a  b  ");
+        trim_lines(&mut buf, 0, 1, TrimMode::Both).unwrap();
+        assert_eq!(buf.to_string(), "a  b");
+    }
+
+    #[test]
+    fn trim_lines_multiline_processes_each_line() {
+        let mut buf = TextBuffer::from("  one  \n  two  \n  three  ");
+        let changed = trim_lines(&mut buf, 0, 3, TrimMode::Both).unwrap();
+        assert_eq!(changed, 3);
+        assert_eq!(buf.to_string(), "one\ntwo\nthree");
+
+        let mut buf = TextBuffer::from("  one  \n  two  \n  three  ");
+        trim_lines(&mut buf, 0, 3, TrimMode::Trailing).unwrap();
+        assert_eq!(buf.to_string(), "  one\n  two\n  three");
+
+        let mut buf = TextBuffer::from("  one  \n  two  \n  three  ");
+        trim_lines(&mut buf, 0, 3, TrimMode::Leading).unwrap();
+        assert_eq!(buf.to_string(), "one  \ntwo  \nthree  ");
+    }
+
+    #[test]
+    fn trim_lines_no_change_returns_zero() {
+        let mut buf = TextBuffer::from("clean\nlines");
+        let changed = trim_lines(&mut buf, 0, 2, TrimMode::Both).unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(buf.to_string(), "clean\nlines");
+    }
+
+    #[test]
+    fn trim_lines_partial_range_only_touches_range() {
+        let mut buf = TextBuffer::from("  a  \n  b  \n  c  \n  d  ");
+        trim_lines(&mut buf, 1, 3, TrimMode::Both).unwrap();
+        assert_eq!(buf.to_string(), "  a  \nb\nc\n  d  ");
+    }
+
+    #[test]
+    fn trim_lines_empty_lines_remain_empty() {
+        let mut buf = TextBuffer::from("\n\n");
+        let changed = trim_lines(&mut buf, 0, 3, TrimMode::Both).unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(buf.to_string(), "\n\n");
+    }
+
+    #[test]
+    fn trim_lines_tabs_treated_as_whitespace() {
+        let mut buf = TextBuffer::from("\t\thello\t");
+        trim_lines(&mut buf, 0, 1, TrimMode::Trailing).unwrap();
+        assert_eq!(buf.to_string(), "\t\thello");
+
+        let mut buf = TextBuffer::from("\t\thello\t");
+        trim_lines(&mut buf, 0, 1, TrimMode::Leading).unwrap();
+        assert_eq!(buf.to_string(), "hello\t");
+
+        let mut buf = TextBuffer::from("\t\thello\t");
+        trim_lines(&mut buf, 0, 1, TrimMode::Both).unwrap();
+        assert_eq!(buf.to_string(), "hello");
+    }
+
+    #[test]
+    fn trim_lines_out_of_bounds_is_noop() {
+        let mut buf = TextBuffer::from("  a  ");
+        let changed = trim_lines(&mut buf, 0, 0, TrimMode::Both).unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(buf.to_string(), "  a  ");
+
+        let changed = trim_lines(&mut buf, 5, 10, TrimMode::Both).unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(buf.to_string(), "  a  ");
+    }
+
+    // ── join_lines ───────────────────────────────────────────────────
+
+    #[test]
+    fn join_lines_two_lines_inserts_single_space() {
+        let mut buf = TextBuffer::from("hello\nworld");
+        assert_eq!(join_lines(&mut buf, 0, 2).unwrap(), 1);
+        assert_eq!(buf.to_string(), "hello world");
+    }
+
+    #[test]
+    fn join_lines_three_lines_inserts_two_spaces() {
+        let mut buf = TextBuffer::from("a\nb\nc");
+        assert_eq!(join_lines(&mut buf, 0, 3).unwrap(), 2);
+        assert_eq!(buf.to_string(), "a b c");
+    }
+
+    #[test]
+    fn join_lines_trims_inner_whitespace_to_single_space() {
+        let mut buf = TextBuffer::from("hello   \n   world");
+        join_lines(&mut buf, 0, 2).unwrap();
+        assert_eq!(buf.to_string(), "hello world");
+    }
+
+    #[test]
+    fn join_lines_preserves_leading_of_first_line() {
+        let mut buf = TextBuffer::from("    hello\nworld");
+        join_lines(&mut buf, 0, 2).unwrap();
+        assert_eq!(buf.to_string(), "    hello world");
+    }
+
+    #[test]
+    fn join_lines_preserves_trailing_of_last_line() {
+        let mut buf = TextBuffer::from("hello\nworld    ");
+        join_lines(&mut buf, 0, 2).unwrap();
+        assert_eq!(buf.to_string(), "hello world    ");
+    }
+
+    #[test]
+    fn join_lines_middle_line_trimmed_both_sides() {
+        let mut buf = TextBuffer::from("a\n   b   \nc");
+        join_lines(&mut buf, 0, 3).unwrap();
+        assert_eq!(buf.to_string(), "a b c");
+    }
+
+    #[test]
+    fn join_lines_partial_range_only_joins_range() {
+        let mut buf = TextBuffer::from("a\nb\nc\nd");
+        assert_eq!(join_lines(&mut buf, 1, 3).unwrap(), 1);
+        assert_eq!(buf.to_string(), "a\nb c\nd");
+    }
+
+    #[test]
+    fn join_lines_single_line_range_is_noop() {
+        let mut buf = TextBuffer::from("abc");
+        assert_eq!(join_lines(&mut buf, 0, 1).unwrap(), 0);
+        assert_eq!(buf.to_string(), "abc");
+    }
+
+    #[test]
+    fn join_lines_zero_line_range_is_noop() {
+        let mut buf = TextBuffer::from("");
+        assert_eq!(join_lines(&mut buf, 0, 0).unwrap(), 0);
+        assert_eq!(buf.to_string(), "");
+    }
+
+    #[test]
+    fn join_lines_out_of_bounds_is_noop() {
+        let mut buf = TextBuffer::from("abc");
+        assert_eq!(join_lines(&mut buf, 0, 10).unwrap(), 0);
+        assert_eq!(buf.to_string(), "abc");
+    }
+
+    #[test]
+    fn join_lines_empty_lines_collapse_to_single_space() {
+        // lines = ["a", "", "b"]; the empty middle line preserves both
+        // junctions, yielding two spaces. Documents the chosen behavior.
+        let mut buf = TextBuffer::from("a\n\nb");
+        join_lines(&mut buf, 0, 3).unwrap();
+        assert_eq!(buf.to_string(), "a  b");
     }
 }

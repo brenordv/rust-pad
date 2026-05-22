@@ -6,7 +6,7 @@
 //! to either the entire document or the current selection.
 
 use eframe::egui;
-use rust_pad_core::line_ops::{CaseConversion, SortOrder};
+use rust_pad_core::line_ops::{CaseConversion, SortOrder, TrimMode};
 
 use super::App;
 
@@ -135,6 +135,25 @@ impl App {
                 self.remove_empty_lines_scoped(scope);
                 ui.close();
             }
+            if ui.button("Join Lines").clicked() {
+                self.join_lines_scoped(scope);
+                ui.close();
+            }
+            ui.separator();
+            ui.menu_button("Trim Whitespace", |ui| {
+                if ui.button("Trailing").clicked() {
+                    self.trim_lines_scoped(TrimMode::Trailing, scope);
+                    ui.close();
+                }
+                if ui.button("Leading").clicked() {
+                    self.trim_lines_scoped(TrimMode::Leading, scope);
+                    ui.close();
+                }
+                if ui.button("Leading and Trailing").clicked() {
+                    self.trim_lines_scoped(TrimMode::Both, scope);
+                    ui.close();
+                }
+            });
         });
     }
 }

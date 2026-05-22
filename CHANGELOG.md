@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.8.0]
+
+### Added
+- New **Trim Whitespace** line operations (Edit menu): trim trailing whitespace, leading whitespace, or both from every line in the selection (or the current line when there is no selection).
+- New **Join Lines** operation (Edit menu): collapses the selected lines into a single line, with exactly one space at each junction (trailing/leading whitespace at the joins is stripped, while the leading whitespace of the first line and trailing whitespace of the last line are preserved).
+
+### Fixed
+- Fixed multi-cursor same-line replacement breaking the line. Selecting several instances of a word on one line (Alt+Shift+.) and typing a replacement scrambled the text because the per-cursor edits shifted each other's character offsets. Edits are now applied so earlier replacements no longer corrupt the positions of later ones.
+- Fixed Tab / Shift+Tab on a multi-line selection only changing the line containing the cursor. Indent/dedent now applies to every line covered by the selection.
+- Fixed pressing Tab with an active selection deleting the selected text instead of indenting it. A selection is now indented (or dedented with Shift+Tab) line-by-line, preserving its contents.
+- Fixed the beginning of a multi-line selection escaping when indenting/dedenting. The selection's top endpoint is now pinned to the start of the first line so its growing/shrinking indentation stays inside the selection across repeated presses; the bottom endpoint keeps tracking its text.
+- Fixed arrow Up/Down skipping whole logical lines when word-wrap is on. Vertical navigation now moves one *visual* (wrapped) line at a time, treating soft-wrapped segments like hard line breaks, with a sticky column that survives passing through shorter segments. Behavior is unchanged when word-wrap is off.
+
 ## [2.7.0]
 
 ### Added
