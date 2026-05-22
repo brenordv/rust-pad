@@ -41,7 +41,7 @@ stable, and fast as possible.
 ### Editing
 - **Multi-tab interface** with session restore (reopen files from last session) and horizontal tab scrolling when tabs overflow
 - **Syntax highlighting** powered by syntect (78+ languages)
-- **Find/Replace** with regex support and search across all open tabs
+- **Find/Replace** with regex support and search across all open tabs. Non-modal (keeps editing enabled, dims when it loses focus), auto-focuses the find field on open, pre-fills it with the current single-line selection, scrolls the viewport to the active match, and offers a session search-history dropdown
 - **Multi-cursor editing**: `Ctrl+Click` to add cursors, `Alt+Shift+Arrow` to add the cursors above/below (with shrink support), `Alt+Shift+Period` to select next occurrence
 - **Undo/Redo** with persistent history (survives application restart)
 - **Auto-indent**: pressing Enter inherits the leading whitespace from the current line
@@ -64,7 +64,9 @@ stable, and fast as possible.
 - Remove empty lines
 - Move line up/down (Alt+Up / Alt+Down)
 - Duplicate line
-- Increase/Decrease indent (Tab / Shift+Tab)
+- Increase/Decrease indent (Tab / Shift+Tab) — applies to every line covered by a multi-line selection, preserving the selection
+- **Join Lines**: collapse the selected lines into one, with exactly one space at each junction (whitespace at the joins is stripped)
+- **Trim Whitespace**: trim trailing, leading, or both from every line in the selection (or the current line when there is no selection)
 
 ### Selection
 - **Invert Selection**: toggles selection (no selection -> select all, full selection -> clear, partial -> invert to unselected regions)
@@ -74,29 +76,44 @@ stable, and fast as possible.
 - lowercase
 - Title Case
 
+### Workspace Sidebar
+- **Named workspaces** (`Ctrl+B` to toggle the sidebar): group project folders into named workspaces that persist across restarts in a dedicated database (`rust-pad-workspaces.redb`). Create, rename, switch, and delete workspaces
+- **Folder management**: add folders via the menu or sidebar toolbar; duplicate and overlapping (parent/child) folders are rejected with a message. Remove folders without deleting them from disk
+- **File tree**: collapsible, lazy-loaded folder tree (directories before files, sorted case-insensitively, large directories capped at 10,000 entries). Optionally include hidden folders
+- **File operations from the sidebar**: double-click to open; right-click for New File, New Folder, Rename, and Delete (send to trash), with inline naming fields
+- **Drag-and-drop folders**: drop folders onto the window to add them to the active workspace (a workspace is created automatically if none exists)
+- **Real-time monitoring**: workspace directories are watched (via `notify`, 500ms debounce) and the tree updates incrementally without full re-scans
+- **Inaccessible folders** (unmounted drives, deleted directories) are shown with a warning icon and "(unavailable)" label instead of crashing
+
+### Diagnostics
+- **Problems panel** (Help → Problems): lists application errors and warnings (newest first) in a crash-safe database (`rust-pad-problems.redb`) that survives unexpected termination. Mark entries read, copy a message, or clear the log. The Help menu shows a `⚠` indicator and unread count when there are unread entries. Captured failures include file open, auto-save, live reload, print/export, encoding, reload-from-disk, recovery, database open, session restore, and CLI open. Uncaught panics are also recorded via a custom panic hook so crash info survives a restart
+
 ### File Handling
 - **Recent files**: quick reopen from the File > Open Recent submenu (configurable max count and cleanup strategy)
 - **Live file monitoring** (`tail -f mode`): auto-refresh when file changes on disk
+- **External change detection**: for any open document (not just live-monitored ones), a modification on disk prompts a dialog to reload or keep your version
 - **Auto-save** for file-backed documents (configurable interval)
 - **Async file I/O**: file dialogs, reads, and writes run on background threads with a status bar spinner, keeping the UI responsive
 - **File size validation**: configurable size limit (default 512 MB) prevents out-of-memory crashes from opening very large files. Applied to all open paths (dialogs, recent files, CLI, session restore, live monitoring)
 - **UTF-16 odd-byte validation**: truncated or malformed UTF-16 files are rejected with a clear error instead of silently dropping the last byte
 - **Encoding support**: UTF-8, UTF-8 with BOM, UTF-16 LE, UTF-16 BE, ASCII
 - **Line ending conversion**: LF (Unix), CRLF (Windows), CR (classic Mac)
+- **Default line ending** for new documents: System (OS default), Unix (LF), or Windows (CRLF), set in Settings → Editor. Files opened from disk keep their detected line ending
 - **Indent style**: spaces (2/4/8) or tabs, with auto-detection
 - **Reload from Disk**: discard unsaved changes and reload the file from its on-disk state (with confirmation when modified)
 - **Save a Copy As...**: save the current document to a different path without changing the active file's path or modified state
 - **Print** (`Ctrl+P`): renders the active document to a temporary PDF and opens it in the system's default PDF viewer for printing
 - **Export as PDF...**: writes the rendered PDF to a user-chosen path. A4 portrait, monospace (DejaVu Sans Mono, bundled), header with filename + path + timestamp, footer with `Page N of M`, optional line-number gutter. Runs on a dedicated background worker thread; the menu entries gate on in-flight state to prevent duplicate jobs. Stale temp PDFs older than 24 hours are cleaned up on startup
+- **Drag and drop to open**: drop one or more files onto the editor window to open them (a translucent "Drop file(s) to open" overlay appears while hovering; duplicates switch to the existing tab)
 - **Move to Recycle Bin** support via the `trash` crate
 
 ### View
 - **Customizable themes**: Dark, Light, and custom themes via JSON
-- **Settings dialog** with five tabs: General, Editor, File Dialogs, Auto-Save, History
+- **Settings dialog** with six tabs: General, Editor, File Dialogs, Auto-Save, History, Workspace
 - **Status bar** displaying: cursor position, encoding, line ending, indent style, character count, file size, zoom level, last saved time, and PDF generation indicator
 - **Split view**: divide the editor into two panes with a draggable divider, vertically (`Ctrl+Alt+V`) or horizontally (`Ctrl+Alt+H`). Each pane has its own tab strip and active tab. Double-click the divider to reset to 50/50. A 1px accent border highlights the focused pane. Layout (orientation, divider ratio, per-pane tab assignment, focused pane) is persisted across restarts. Use **View → Remove Split** to collapse back to a single pane
 - **Synchronized scrolling** (`Ctrl+Alt+S`): mirror user-initiated scroll deltas between panes for side-by-side diffing. Programmatic jumps (Go to Line, Find/Replace, bookmarks) do not propagate. Configurable horizontal sync. Gated on split view being active
-- **Word wrap** toggle
+- **Word wrap** toggle. With wrap on, arrow Up/Down moves one *visual* (wrapped) line at a time with a sticky column, rather than skipping whole logical lines
 - **Special character visualization** (whitespace, line endings)
 - **Line number gutter** with change tracking (orange = unsaved changes, green = saved changes) and bookmark indicators
 - **Zoom**: in (`Ctrl++`), out (`Ctrl+-`), reset (`Ctrl+0`): range 50% to 1500%
@@ -128,17 +145,17 @@ stable, and fast as possible.
 
 ### Editing
 
-| Shortcut  | Action              |
-|-----------|---------------------|
-| Ctrl+Z    | Undo                |
-| Ctrl+Y    | Redo                |
-| Ctrl+X    | Cut                 |
-| Ctrl+C    | Copy                |
-| Ctrl+V    | Paste               |
-| Ctrl+A    | Select all          |
-| Ctrl+D    | Delete current line |
-| Tab       | Increase indent     |
-| Shift+Tab | Decrease indent     |
+| Shortcut  | Action                 |
+|-----------|------------------------|
+| Ctrl+Z    | Undo                   |
+| Ctrl+Y    | Redo                   |
+| Ctrl+X    | Cut                    |
+| Ctrl+C    | Copy                   |
+| Ctrl+V    | Paste                  |
+| Ctrl+A    | Select all             |
+| Ctrl+D    | Duplicate current line |
+| Tab       | Increase indent        |
+| Shift+Tab | Decrease indent        |
 
 ### Navigation & Search
 
@@ -175,6 +192,12 @@ stable, and fast as possible.
 | Ctrl+Tab       | Next tab     |
 | Ctrl+Shift+Tab | Previous tab |
 
+### Workspace
+
+| Shortcut | Action                    |
+|----------|---------------------------|
+| Ctrl+B   | Toggle workspace sidebar  |
+
 ### View
 
 | Shortcut   | Action                  |
@@ -203,7 +226,7 @@ rust-pad stores its configuration in a `rust-pad.json` file in the platform-stan
 | macOS    | `~/Library/Application Support/rust-pad/` |
 | Linux    | `~/.config/rust-pad/`                     |
 
-Data files (`history.redb`, `rust-pad-session.redb`) are stored in the platform-standard data directory (same as config on Windows/macOS; `~/.local/share/rust-pad/` on Linux).
+Data files (`history.redb`, `rust-pad-session.redb`, `rust-pad-workspaces.redb`, `rust-pad-problems.redb`) are stored in the platform-standard data directory (same as config on Windows/macOS; `~/.local/share/rust-pad/` on Linux).
 
 When running with `--portable`, all files are stored next to the executable instead. See the [Environment Variables](#environment-variables) section below for variables that override these locations.
 
@@ -226,6 +249,7 @@ The config file is created automatically on the first launch with default values
 | `current_theme`           | string | `"System"`                    | Active theme name. `"System"` follows OS dark/light preference. Can be `"Dark"`, `"Light"`, or any custom theme name. |
 | `current_zoom_level`      | float  | `1.0`                         | Current zoom multiplier (0.5 to `max_zoom_level`).                                                                    |
 | `default_extension`       | string | `""`                          | Default file extension for new untitled tabs (e.g. `"txt"`, `"md"`). Empty means none.                                |
+| `default_line_ending`     | string | `"system"`                    | Line ending for new documents: `"system"` (OS default), `"lf"` (Unix), or `"crlf"` (Windows). Loaded files keep their detected ending. |
 | `default_work_folder`     | string | `""`                          | Default starting folder for file dialogs. Empty uses the user's home directory.                                       |
 | `font_size`               | float  | `16.0`                        | Base font size in points (6.0 to 72.0).                                                                               |
 | `last_used_folder`        | string | `""`                          | Persisted last folder from open/save dialogs (managed automatically).                                                 |
@@ -240,12 +264,15 @@ The config file is created automatically on the first launch with default values
 | `restore_open_files`      | bool   | `true`                        | Reopen files from the previous session on startup.                                                                    |
 | `session_content_max_kb`  | int    | `10240`                       | Maximum KB of unsaved content to persist per tab (0 = unlimited). Tabs exceeding this are restored empty.             |
 | `show_full_path_in_title` | bool   | `true`                        | Show the full file path in the window title bar.                                                                      |
+| `show_hidden_files`       | bool   | `false`                       | Show hidden files/folders (names starting with `.`) in the workspace tree.                                           |
 | `show_line_numbers`       | bool   | `true`                        | Display the line number gutter.                                                                                       |
 | `show_special_chars`      | bool   | `false`                       | Show whitespace and line-ending markers.                                                                              |
 | `sync_scroll_enabled`     | bool   | `false`                       | Mirror user-initiated scroll deltas between split-view panes.                                                         |
 | `sync_scroll_horizontal`  | bool   | `true`                        | Mirror horizontal scrolling in addition to vertical when synchronized scrolling is enabled.                           |
 | `themes`                  | array  | (built-in Dark, Light, Wacky) | Array of theme definitions. See below.                                                                                |
 | `word_wrap`               | bool   | `false`                       | Whether long lines wrap at the view edge.                                                                             |
+| `workspace_sidebar_visible` | bool | `false`                       | Whether the workspace sidebar is shown on startup (restored from the last session).                                  |
+| `workspace_sidebar_width` | float  | `250.0`                       | Workspace sidebar width in pixels (resizable 150–500).                                                                |
 
 ### Custom Themes
 
@@ -297,8 +324,8 @@ Example custom theme entry:
     "scrollbar_thumb_idle": "#505050",
     "scrollbar_track_color": "#232323",
     "selection_color": "#326EC864",
-    "special_char_color": "#646464B4"
-    "text_color": "#D4D4D4",
+    "special_char_color": "#646464B4",
+    "text_color": "#D4D4D4"
   }
 }
 ```
