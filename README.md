@@ -40,7 +40,6 @@ stable, and fast as possible.
 
 ### Editing
 - **Multi-tab interface** with session restore (reopen files from last session) and horizontal tab scrolling when tabs overflow
-- **Syntax highlighting** powered by syntect (78+ languages)
 - **Find/Replace** with regex support and search across all open tabs. Non-modal (keeps editing enabled, dims when it loses focus), auto-focuses the find field on open, pre-fills it with the current single-line selection, scrolls the viewport to the active match, and offers a session search-history dropdown
 - **Multi-cursor editing**: `Ctrl+Click` to add cursors, `Alt+Shift+Arrow` to add the cursors above/below (with shrink support), `Alt+Shift+Period` to select next occurrence
 - **Undo/Redo** with persistent history (survives application restart)
@@ -396,6 +395,7 @@ The following features are planned for future releases, inspired by Notepad++ fu
 - [ ] Column editor (insert text/numbers into column selections)
 - [ ] Smart backspace (remove full indent level)
 - [ ] Edge/ruler line at a configurable column
+- [ ] Syntax highlighting
 
 ### View
 - [ ] Document map (minimap overview of the file)
