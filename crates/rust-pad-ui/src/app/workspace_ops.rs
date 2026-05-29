@@ -107,6 +107,87 @@ fn scan_dir_safe(folder_path: &Path, show_hidden: bool) -> Vec<TreeEntry> {
     }
 }
 
+/// Returns true if `name` is a simple, single-segment file or folder name
+/// safe to pass to `parent.join(name)` without enabling path traversal.
+///
+/// Rejects: empty input, the special `.` / `..` segments, path separators
+/// (`/` and `\`), embedded NUL, absolute Unix paths, and Windows drive
+/// prefixes (`X:` form). Control characters (< 0x20) are also rejected
+/// to keep workspace tree labels well-formed.
+pub(crate) fn is_valid_simple_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    if name.starts_with('/') {
+        return false;
+    }
+    // Windows drive prefix like "C:" or "C:\\..."
+    let mut chars = name.chars();
+    if let (Some(first), Some(second)) = (chars.next(), chars.next()) {
+        if first.is_ascii_alphabetic() && second == ':' {
+            return false;
+        }
+    }
+    for c in name.chars() {
+        if c == '/' || c == '\\' || c == '\0' || (c as u32) < 0x20 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Maximum depth walked when checking for a symlink loop.
+const SYMLINK_LOOP_DEPTH: usize = 64;
+
+/// Maximum filesystem events applied to the sidebar tree per frame.
+///
+/// Bounds work per tick so a watcher event storm cannot starve the UI.
+/// Surplus events stay queued and are drained on subsequent ticks.
+const MAX_WATCHER_EVENTS_PER_TICK: usize = 1000;
+
+/// Minimum interval between overflow warnings in the log.
+const WATCHER_OVERFLOW_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Detects whether `folder_path` contains a symlink loop within the first
+/// `SYMLINK_LOOP_DEPTH` directories reached by a depth-first walk.
+///
+/// Returns true if the same canonical path is observed twice during the walk
+/// — the classic signature of a symlink cycle. Best-effort: a return value
+/// of `false` does not guarantee the absence of a loop deeper in the tree,
+/// but catches the foot-gun configurations users are likely to create.
+fn has_symlink_loop(folder_path: &Path) -> bool {
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(folder_path.to_path_buf(), 0)];
+
+    while let Some((path, depth)) = stack.pop() {
+        if depth > SYMLINK_LOOP_DEPTH {
+            continue;
+        }
+        let canon = match std::fs::canonicalize(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !seen.insert(canon.clone()) {
+            return true;
+        }
+        let read_dir = match std::fs::read_dir(&path) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in read_dir.flatten() {
+            let entry_path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() || file_type.is_symlink() {
+                stack.push((entry_path, depth + 1));
+            }
+        }
+    }
+    false
+}
+
 impl App {
     /// Returns the cached workspace list, refreshing it from the DB if stale.
     pub(crate) fn get_cached_workspace_list(&mut self) -> &Vec<(String, String)> {
@@ -288,12 +369,22 @@ impl App {
             return;
         };
 
-        if self.is_duplicate_or_nested_folder(folder_path) {
+        if self.is_duplicate_folder(folder_path) {
             let msg = format!(
-                "Folder '{}' was not added: it duplicates or overlaps with an existing workspace folder.",
+                "Folder '{}' was not added: it is already in the workspace.",
                 folder_path.display()
             );
             tracing::info!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
+
+        if has_symlink_loop(folder_path) {
+            let msg = format!(
+                "Folder '{}' was not added: symlink loop detected.",
+                folder_path.display()
+            );
+            tracing::warn!("{msg}");
             crate::problem_log::log_problem(&msg);
             return;
         }
@@ -321,13 +412,16 @@ impl App {
         });
     }
 
-    /// Checks if a folder path duplicates or overlaps with existing workspace folders.
-    fn is_duplicate_or_nested_folder(&self, folder_path: &Path) -> bool {
-        self.workspace_sidebar.tree.iter().any(|r| {
-            r.path == folder_path
-                || folder_path.starts_with(&r.path)
-                || r.path.starts_with(folder_path)
-        })
+    /// Checks if a folder path exactly matches an existing workspace root.
+    ///
+    /// Overlapping roots (nested or parent of an existing root) are allowed —
+    /// the watcher deduplicates events and the tree displays each root
+    /// independently. Only exact path equality is rejected.
+    fn is_duplicate_folder(&self, folder_path: &Path) -> bool {
+        self.workspace_sidebar
+            .tree
+            .iter()
+            .any(|r| r.path == folder_path)
     }
 
     /// Removes a folder from the active workspace (not from disk).
@@ -394,6 +488,13 @@ impl App {
 
     /// Creates a new empty file with the given name in the specified directory.
     pub(crate) fn create_new_file_in_workspace(&mut self, parent: &Path, name: &str) {
+        if !is_valid_simple_name(name) {
+            let msg =
+                format!("Name '{name}' rejected: contains invalid characters or path separators");
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
         let path = parent.join(name);
         if path.exists() {
             let msg = format!("'{}' already exists in '{}'", name, parent.display());
@@ -412,6 +513,13 @@ impl App {
 
     /// Creates a new subdirectory with the given name in the specified directory.
     pub(crate) fn create_new_folder_in_workspace(&mut self, parent: &Path, name: &str) {
+        if !is_valid_simple_name(name) {
+            let msg =
+                format!("Name '{name}' rejected: contains invalid characters or path separators");
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
         let path = parent.join(name);
         if path.exists() {
             let msg = format!("'{}' already exists in '{}'", name, parent.display());
@@ -430,6 +538,14 @@ impl App {
 
     /// Renames a file or folder in the workspace.
     pub(crate) fn rename_entry_in_workspace(&mut self, old_path: &Path, new_name: &str) {
+        if !is_valid_simple_name(new_name) {
+            let msg = format!(
+                "Name '{new_name}' rejected: contains invalid characters or path separators"
+            );
+            tracing::warn!("{msg}");
+            crate::problem_log::log_problem(&msg);
+            return;
+        }
         let Some(parent) = old_path.parent() else {
             return;
         };
@@ -503,18 +619,45 @@ impl App {
             SidebarAction::ToggleHiddenFiles => {
                 self.toggle_hidden_files();
             }
+            SidebarAction::ExpandAll => {
+                self.workspace_sidebar.pending_bulk_collapse = Some(true);
+            }
+            SidebarAction::CollapseAll => {
+                self.workspace_sidebar.pending_bulk_collapse = Some(false);
+            }
             SidebarAction::None => {}
         }
     }
 
     /// Polls filesystem events and applies them to the sidebar tree.
+    ///
+    /// Caps work to [`MAX_WATCHER_EVENTS_PER_TICK`] events per call to keep
+    /// the UI responsive during event storms (overlapping watchers,
+    /// large refactors). Excess events stay queued for the next tick.
     pub(crate) fn tick_workspace_watcher(&mut self) {
-        let events = self
+        let mut events = self
             .workspace_sidebar
             .watcher
             .as_ref()
             .map(|w| w.poll_events())
             .unwrap_or_default();
+
+        let overflowed = events.len() > MAX_WATCHER_EVENTS_PER_TICK;
+        if overflowed {
+            let dropped = events.len() - MAX_WATCHER_EVENTS_PER_TICK;
+            events.truncate(MAX_WATCHER_EVENTS_PER_TICK);
+            let now = std::time::Instant::now();
+            let should_log = self
+                .last_watcher_overflow_log
+                .is_none_or(|t| now.duration_since(t) > WATCHER_OVERFLOW_LOG_INTERVAL);
+            if should_log {
+                tracing::warn!(
+                    "Watcher tick overflowed: {dropped} events dropped (cap={MAX_WATCHER_EVENTS_PER_TICK})"
+                );
+                self.last_watcher_overflow_log = Some(now);
+            }
+        }
+
         for event in &events {
             self.notify_tree(event);
         }
@@ -957,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn test_app_add_nested_folder_rejected() {
+    fn test_app_add_nested_folder_allowed() {
         let (mut app, _dir) = app_with_workspace();
         let parent = tempfile::tempdir().unwrap();
         let child = parent.path().join("child");
@@ -967,13 +1110,13 @@ mod tests {
         app.add_folder_path_to_workspace(parent.path());
         assert_eq!(app.workspace_sidebar.tree.len(), 1);
 
-        // Adding a subfolder of an existing root should be rejected
+        // Overlapping (nested) folders are allowed — only exact match is rejected.
         app.add_folder_path_to_workspace(&child);
-        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+        assert_eq!(app.workspace_sidebar.tree.len(), 2);
     }
 
     #[test]
-    fn test_app_add_parent_folder_of_existing_rejected() {
+    fn test_app_add_parent_folder_of_existing_allowed() {
         let (mut app, _dir) = app_with_workspace();
         let parent = tempfile::tempdir().unwrap();
         let child = parent.path().join("child");
@@ -983,9 +1126,9 @@ mod tests {
         app.add_folder_path_to_workspace(&child);
         assert_eq!(app.workspace_sidebar.tree.len(), 1);
 
-        // Adding a parent of an existing root should be rejected
+        // Adding a parent that overlaps with an existing root is allowed.
         app.add_folder_path_to_workspace(parent.path());
-        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+        assert_eq!(app.workspace_sidebar.tree.len(), 2);
     }
 
     #[test]
@@ -1308,6 +1451,83 @@ mod tests {
     }
 
     #[test]
+    fn test_is_valid_simple_name_accepts_normal_names() {
+        assert!(is_valid_simple_name("file.txt"));
+        assert!(is_valid_simple_name("README"));
+        assert!(is_valid_simple_name("my_folder"));
+        assert!(is_valid_simple_name(".gitignore"));
+        assert!(is_valid_simple_name("a"));
+    }
+
+    #[test]
+    fn test_is_valid_simple_name_rejects_traversal() {
+        assert!(!is_valid_simple_name(""));
+        assert!(!is_valid_simple_name("."));
+        assert!(!is_valid_simple_name(".."));
+        assert!(!is_valid_simple_name("../etc/passwd"));
+        assert!(!is_valid_simple_name("/etc/passwd"));
+        assert!(!is_valid_simple_name("foo/bar"));
+        assert!(!is_valid_simple_name("foo\\bar"));
+    }
+
+    #[test]
+    fn test_is_valid_simple_name_rejects_drive_prefix() {
+        assert!(!is_valid_simple_name("C:"));
+        assert!(!is_valid_simple_name("C:\\Windows"));
+        assert!(!is_valid_simple_name("Z:foo"));
+    }
+
+    #[test]
+    fn test_is_valid_simple_name_rejects_control_chars() {
+        assert!(!is_valid_simple_name("foo\0bar"));
+        assert!(!is_valid_simple_name("foo\nbar"));
+        assert!(!is_valid_simple_name("foo\tbar"));
+        assert!(!is_valid_simple_name("foo\rbar"));
+    }
+
+    #[test]
+    fn test_create_new_file_rejects_invalid_name() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        app.create_workspace("Validate File");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.create_new_file_in_workspace(folder.path(), "../escape.txt");
+        assert!(!folder.path().join("..").join("escape.txt").exists());
+        // The original tree should be unchanged.
+        let tree_len_before = app.workspace_sidebar.tree[0].entries.len();
+        app.create_new_file_in_workspace(folder.path(), "/abs.txt");
+        assert_eq!(app.workspace_sidebar.tree[0].entries.len(), tree_len_before);
+    }
+
+    #[test]
+    fn test_create_new_folder_rejects_invalid_name() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        app.create_workspace("Validate Folder");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.create_new_folder_in_workspace(folder.path(), "../escape");
+        assert!(!folder.path().join("..").join("escape").exists());
+    }
+
+    #[test]
+    fn test_rename_entry_rejects_invalid_name() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("ok.txt");
+        std::fs::write(&file, "x").unwrap();
+        app.create_workspace("Validate Rename");
+        app.add_folder_path_to_workspace(folder.path());
+
+        app.rename_entry_in_workspace(&file, "../escape.txt");
+        assert!(
+            file.exists(),
+            "Original file must be preserved on rejection"
+        );
+    }
+
+    #[test]
     fn test_app_create_workspace_no_store() {
         let mut app = super::super::tests::test_app();
         // workspace_store is None — should return early
@@ -1438,6 +1658,62 @@ mod tests {
         assert!(!app.workspace_sidebar.show_hidden);
         assert_eq!(app.workspace_sidebar.tree[0].entries.len(), 1);
         assert_eq!(app.workspace_sidebar.tree[0].entries[0].name, "visible.txt");
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_expand_all_queues_bulk() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Expand Action");
+        assert!(app.workspace_sidebar.pending_bulk_collapse.is_none());
+        app.handle_sidebar_action(SidebarAction::ExpandAll);
+        assert_eq!(app.workspace_sidebar.pending_bulk_collapse, Some(true));
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_collapse_all_queues_bulk() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Collapse Action");
+        app.handle_sidebar_action(SidebarAction::CollapseAll);
+        assert_eq!(app.workspace_sidebar.pending_bulk_collapse, Some(false));
+    }
+
+    #[test]
+    fn test_expand_all_does_not_pre_mutate_descendant_flags() {
+        // ExpandAll/CollapseAll only affect workspace roots — descendants
+        // must not be touched at action-dispatch time. Cascading expansion
+        // through render_directory_entry would lazy-load the entire tree
+        // and freeze the UI on large workspaces.
+        use crate::workspace::tree::{EntryKind, TreeEntry};
+
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::create_dir(folder.path().join("nested")).unwrap();
+
+        app.create_workspace("Freeze Repro");
+        app.add_folder_path_to_workspace(folder.path());
+
+        // Force the nested directory entry into a collapsed state so we can
+        // detect any spurious mutation of its `expanded` flag.
+        let nested_idx = app.workspace_sidebar.tree[0]
+            .entries
+            .iter()
+            .position(|e| e.kind == EntryKind::Directory && e.name == "nested")
+            .expect("nested directory should be in the scanned tree");
+        app.workspace_sidebar.tree[0].entries[nested_idx].expanded = false;
+
+        // Sanity-check that descendant flag is false before the action.
+        assert!(!app.workspace_sidebar.tree[0].entries[nested_idx].expanded);
+
+        app.handle_sidebar_action(SidebarAction::ExpandAll);
+
+        // Action only queues the bulk flag; descendant flag must remain
+        // untouched until render_tree consumes it on the root only.
+        assert_eq!(app.workspace_sidebar.pending_bulk_collapse, Some(true));
+        let nested: &TreeEntry = &app.workspace_sidebar.tree[0].entries[nested_idx];
+        assert!(
+            !nested.expanded,
+            "ExpandAll must not pre-mutate descendant directory flags"
+        );
     }
 
     #[test]

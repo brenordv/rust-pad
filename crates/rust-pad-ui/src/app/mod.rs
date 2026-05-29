@@ -22,6 +22,7 @@ mod status_bar;
 mod sync_scroll;
 mod tab_bar;
 mod theme_controller;
+mod view_state;
 pub(crate) mod workspace_ops;
 
 pub use auto_save::AutoSaveController;
@@ -196,6 +197,12 @@ pub struct App {
     /// Cached workspace list (id, name) to avoid DB reads every frame.
     /// Invalidated after workspace create/delete/rename operations.
     pub(crate) cached_workspace_list: Option<Vec<(String, String)>>,
+    /// Last time a watcher-overflow warning was logged. Used to throttle
+    /// the warning when the per-tick event cap is repeatedly hit.
+    pub(crate) last_watcher_overflow_log: Option<Instant>,
+    /// Per-file view-state store (cursor + scroll restored across
+    /// sessions). `None` if the store could not be opened.
+    pub(crate) view_state_store: Option<rust_pad_config::ViewStateStore>,
 }
 
 #[derive(Debug, Default)]
@@ -383,6 +390,8 @@ impl App {
             workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar::new(),
             workspace_store: Self::init_workspace_store(args.portable),
             cached_workspace_list: None,
+            last_watcher_overflow_log: None,
+            view_state_store: Self::init_view_state_store(args.portable),
         };
 
         // Reapply persisted split-view layout once the App is fully built.
@@ -396,6 +405,11 @@ impl App {
         if ws_sidebar_visible {
             app.restore_workspace_on_startup();
         }
+
+        // Apply persisted cursor + scroll positions to every file-backed
+        // tab restored from the session. Runtime opens go through
+        // try_open_file_from_bytes which has its own restore hook.
+        app.restore_view_states_for_open_files();
 
         app
     }
@@ -911,6 +925,15 @@ impl App {
             };
         } else {
             self.recent_files.track(&path);
+            // Restore previously persisted cursor + scroll for this file.
+            let active = self.tabs.active;
+            let store = self.view_state_store.as_ref();
+            if let Some(doc) = self.tabs.documents.get_mut(active) {
+                let doc_path = doc.file_path.clone();
+                if let Some(doc_path) = doc_path {
+                    view_state::apply_saved_view_state(store, doc, &doc_path);
+                }
+            }
         }
     }
 
@@ -1120,6 +1143,12 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         self.tabs.flush_all_history();
 
+        // Persist per-file view-state for every file-backed open tab so
+        // re-opening the file in a future session restores cursor + scroll.
+        for doc in &self.tabs.documents {
+            self.persist_view_state(doc);
+        }
+
         // Save session state (tab list + unsaved content) to redb
         if let Some(store) = &self.session_store {
             let mut tabs_list = Vec::new();
@@ -1302,6 +1331,8 @@ mod tests {
             workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar::new(),
             workspace_store: None,
             cached_workspace_list: None,
+            last_watcher_overflow_log: None,
+            view_state_store: None,
         }
     }
 

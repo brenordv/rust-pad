@@ -13,8 +13,9 @@ const MIN_WIDTH: f32 = 150.0;
 const MAX_WIDTH: f32 = 500.0;
 /// Default sidebar width in pixels.
 const DEFAULT_WIDTH: f32 = 250.0;
-/// Space reserved for toolbar buttons (close, add folder, toggle hidden) in the header row.
-const HEADER_TOOLBAR_RESERVED: f32 = 110.0;
+/// Space reserved for toolbar buttons (close, add folder, toggle hidden,
+/// expand-all, collapse-all) in the header row.
+const HEADER_TOOLBAR_RESERVED: f32 = 160.0;
 
 /// Actions the sidebar can request from the main application.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +46,10 @@ pub enum SidebarAction {
     ConfirmRenameEntry(PathBuf, String),
     /// Toggle visibility of hidden files in the workspace tree.
     ToggleHiddenFiles,
+    /// Expand every collapsible entry currently loaded in the tree.
+    ExpandAll,
+    /// Collapse every collapsible entry currently loaded in the tree.
+    CollapseAll,
     /// No action.
     None,
 }
@@ -58,6 +63,10 @@ pub(crate) struct NewEntryState {
     pub name: String,
     /// True if creating a directory, false for a file.
     pub is_dir: bool,
+    /// When true, the stem of `name` (or full name if no extension) is
+    /// selected on the first render so the user can replace it by typing.
+    /// Cleared after the selection is applied.
+    pub select_on_focus: bool,
 }
 
 /// State for inline rename of a file or folder.
@@ -69,6 +78,8 @@ pub(crate) struct RenameEntryState {
     pub name: String,
     /// True if this is a directory.
     pub is_dir: bool,
+    /// When true, the stem of `name` is selected on the first render.
+    pub select_on_focus: bool,
 }
 
 /// State for the workspace sidebar panel.
@@ -100,6 +111,16 @@ pub struct WorkspaceSidebar {
     pub(crate) rename_entry: Option<RenameEntryState>,
     /// Whether hidden files/folders (names starting with `.`) are shown.
     pub show_hidden: bool,
+    /// Pending bulk expand/collapse for the next render. `Some(true)` =
+    /// expand all loaded entries; `Some(false)` = collapse all; `None` =
+    /// no bulk action queued. Consumed during the next `render_tree`
+    /// because the egui `CollapsingState` ids are only addressable from
+    /// within the sidebar's `Ui` scope.
+    pub(crate) pending_bulk_collapse: Option<bool>,
+    /// Whether the next render of the workspace rename buffer should
+    /// select all text on focus. Set when entering rename mode, cleared
+    /// after the selection is applied.
+    pub(crate) workspace_rename_select_pending: bool,
 }
 
 impl Default for WorkspaceSidebar {
@@ -124,6 +145,8 @@ impl WorkspaceSidebar {
             new_entry: None,
             rename_entry: None,
             show_hidden: false,
+            pending_bulk_collapse: None,
+            workspace_rename_select_pending: false,
         }
     }
 
@@ -215,6 +238,20 @@ impl WorkspaceSidebar {
                 {
                     *action = SidebarAction::ToggleHiddenFiles;
                 }
+                if ui
+                    .small_button("\u{25B8}")
+                    .on_hover_text("Collapse all")
+                    .clicked()
+                {
+                    *action = SidebarAction::CollapseAll;
+                }
+                if ui
+                    .small_button("\u{25BE}")
+                    .on_hover_text("Expand all")
+                    .clicked()
+                {
+                    *action = SidebarAction::ExpandAll;
+                }
             });
         });
     }
@@ -222,12 +259,21 @@ impl WorkspaceSidebar {
     /// Renders the inline text field for renaming the workspace.
     fn render_workspace_rename_field(&mut self, ui: &mut egui::Ui, action: &mut SidebarAction) {
         let buf = self.rename_buffer.as_mut().unwrap();
+        let buf_snapshot = buf.clone();
         let available = ui.available_width() - HEADER_TOOLBAR_RESERVED;
         let desired = available.max(80.0);
-        let response = ui.add(egui::TextEdit::singleline(buf).desired_width(desired));
+        let response = ui.add(
+            egui::TextEdit::singleline(buf)
+                .id_salt("ws-workspace-rename")
+                .desired_width(desired),
+        );
         ui.add_space(8.0);
         if !response.has_focus() && !response.lost_focus() {
             response.request_focus();
+        }
+        if self.workspace_rename_select_pending {
+            select_stem_in_text_edit(&response.ctx, response.id, &buf_snapshot);
+            self.workspace_rename_select_pending = false;
         }
         if response.lost_focus() {
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -252,6 +298,7 @@ impl WorkspaceSidebar {
             .on_hover_text("Double-click to rename");
         if name_response.double_clicked() {
             self.rename_buffer = Some(self.workspace_name.clone());
+            self.workspace_rename_select_pending = true;
         }
         name_response.context_menu(|ui| {
             if ui.button("New Workspace...").clicked() {
@@ -290,6 +337,7 @@ impl WorkspaceSidebar {
         let mut context_action = SidebarAction::None;
         let mut new_entry_request: Option<NewEntryState> = None;
         let tree_len = self.tree.len();
+        let bulk = self.pending_bulk_collapse.take();
 
         for root_idx in 0..tree_len {
             let root_path = self.tree[root_idx].path.clone();
@@ -301,6 +349,9 @@ impl WorkspaceSidebar {
             let folder_exists = root_path.is_dir();
 
             let id = ui.make_persistent_id(format!("root_{root_idx}"));
+            if let Some(open) = bulk {
+                self.tree[root_idx].expanded = open;
+            }
             let expanded = self.tree[root_idx].expanded;
 
             // Force-open the root if the inline new entry targets it
@@ -314,6 +365,10 @@ impl WorkspaceSidebar {
                 id,
                 expanded,
             );
+            if let Some(open) = bulk {
+                cs.set_open(open);
+                cs.store(ui.ctx());
+            }
             if should_force_open && !cs.is_open() {
                 cs.set_open(true);
             }
@@ -406,10 +461,18 @@ fn render_inline_rename(
     };
     ui.horizontal(|ui| {
         ui.label(icon);
-        let resp =
-            ui.add(egui::TextEdit::singleline(&mut state.name).desired_width(ui.available_width()));
+        let name_snapshot = state.name.clone();
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut state.name)
+                .id_salt("ws-rename-entry")
+                .desired_width(ui.available_width()),
+        );
         if !resp.has_focus() && !resp.lost_focus() {
             resp.request_focus();
+        }
+        if state.select_on_focus {
+            select_stem_in_text_edit(&resp.ctx, resp.id, &name_snapshot);
+            state.select_on_focus = false;
         }
         if resp.lost_focus() {
             let name = state.name.trim().to_string();
@@ -431,6 +494,11 @@ fn render_inline_rename(
 }
 
 /// Renders a directory tree entry with collapsing header, context menu, and lazy-loaded children.
+///
+/// `ExpandAll` / `CollapseAll` deliberately do NOT propagate here — they only
+/// flip the workspace-root flags. Cascading expansion through every
+/// recursively rendered directory triggers lazy-loads for the entire reachable
+/// tree on a single frame, which froze the UI on large workspaces.
 #[allow(clippy::too_many_arguments)]
 fn render_directory_entry(
     ui: &mut egui::Ui,
@@ -469,6 +537,7 @@ fn render_directory_entry(
                         original_path: path.clone(),
                         name: name.clone(),
                         is_dir: true,
+                        select_on_focus: true,
                     });
                     ui.close();
                 }
@@ -537,6 +606,7 @@ fn render_file_entry(
                 original_path: entry.path.clone(),
                 name: entry.name.clone(),
                 is_dir: false,
+                select_on_focus: true,
             });
             ui.close();
         }
@@ -562,10 +632,18 @@ fn render_inline_new_entry_field(
     };
     ui.horizontal(|ui| {
         ui.label(icon);
-        let resp =
-            ui.add(egui::TextEdit::singleline(&mut state.name).desired_width(ui.available_width()));
+        let name_snapshot = state.name.clone();
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut state.name)
+                .id_salt("ws-new-entry")
+                .desired_width(ui.available_width()),
+        );
         if !resp.has_focus() && !resp.lost_focus() {
             resp.request_focus();
+        }
+        if state.select_on_focus {
+            select_stem_in_text_edit(&resp.ctx, resp.id, &name_snapshot);
+            state.select_on_focus = false;
         }
         if resp.lost_focus() {
             let name = state.name.trim().to_string();
@@ -681,6 +759,7 @@ fn show_new_entry_menu(
             parent: parent.to_path_buf(),
             name,
             is_dir: false,
+            select_on_focus: true,
         });
         ui.close();
     }
@@ -690,8 +769,28 @@ fn show_new_entry_menu(
             parent: parent.to_path_buf(),
             name,
             is_dir: true,
+            select_on_focus: true,
         });
         ui.close();
+    }
+}
+
+/// Selects the filename stem (chars before the last `.`) in the text edit
+/// state, or the full text if there is no extension. Stem-selection lets
+/// the user replace the name by typing while preserving the extension —
+/// matches IDE convention (VS Code, IntelliJ).
+fn select_stem_in_text_edit(ctx: &egui::Context, widget_id: egui::Id, name: &str) {
+    let stem_char_count = match name.rfind('.') {
+        Some(byte_idx) if byte_idx > 0 => name[..byte_idx].chars().count(),
+        _ => name.chars().count(),
+    };
+    if let Some(mut state) = egui::widgets::text_edit::TextEditState::load(ctx, widget_id) {
+        let range = egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(stem_char_count),
+        );
+        state.cursor.set_char_range(Some(range));
+        state.store(ctx, widget_id);
     }
 }
 
@@ -757,6 +856,8 @@ mod tests {
             SidebarAction::ConfirmNewFolder(PathBuf::from("/e"), "folder".to_string()),
             SidebarAction::ConfirmRenameEntry(PathBuf::from("/f"), "new_name".to_string()),
             SidebarAction::ToggleHiddenFiles,
+            SidebarAction::ExpandAll,
+            SidebarAction::CollapseAll,
             SidebarAction::None,
         ];
 
@@ -825,6 +926,7 @@ mod tests {
             parent: PathBuf::from("/project/src"),
             name: "new_file.txt".to_string(),
             is_dir: false,
+            select_on_focus: true,
         };
         assert_eq!(state.parent, PathBuf::from("/project/src"));
         assert_eq!(state.name, "new_file.txt");
@@ -837,6 +939,7 @@ mod tests {
             original_path: PathBuf::from("/project/src/old.rs"),
             name: "old.rs".to_string(),
             is_dir: false,
+            select_on_focus: true,
         };
         assert_eq!(state.original_path, PathBuf::from("/project/src/old.rs"));
         assert_eq!(state.name, "old.rs");
@@ -949,6 +1052,7 @@ mod tests {
             parent: PathBuf::from("/project/src"),
             name: "new_folder".to_string(),
             is_dir: true,
+            select_on_focus: true,
         };
         assert!(state.is_dir);
         assert_eq!(state.name, "new_folder");
@@ -960,6 +1064,7 @@ mod tests {
             original_path: PathBuf::from("/project/src"),
             name: "src".to_string(),
             is_dir: true,
+            select_on_focus: true,
         };
         assert!(state.is_dir);
         assert_eq!(state.name, "src");
@@ -997,6 +1102,7 @@ mod tests {
             parent: PathBuf::from("/project"),
             name: "file.txt".to_string(),
             is_dir: false,
+            select_on_focus: true,
         });
         assert!(sidebar.new_entry.is_some());
         assert!(sidebar.rename_entry.is_none());
@@ -1006,6 +1112,7 @@ mod tests {
             original_path: PathBuf::from("/project/old.rs"),
             name: "old.rs".to_string(),
             is_dir: false,
+            select_on_focus: true,
         });
         sidebar.new_entry = None;
         assert!(sidebar.new_entry.is_none());
@@ -1055,6 +1162,7 @@ mod tests {
             parent: PathBuf::from("/a"),
             name: "b".to_string(),
             is_dir: false,
+            select_on_focus: true,
         };
         let cloned = state.clone();
         assert_eq!(state.parent, cloned.parent);
@@ -1068,6 +1176,7 @@ mod tests {
             original_path: PathBuf::from("/a/b"),
             name: "b".to_string(),
             is_dir: true,
+            select_on_focus: true,
         };
         let cloned = state.clone();
         assert_eq!(state.original_path, cloned.original_path);
