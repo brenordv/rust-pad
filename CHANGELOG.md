@@ -18,6 +18,9 @@
 - Coalesce duplicate `(kind, path)` filesystem events in a single drain. Overlapping recursive watchers can emit the same notification multiple times; deduplication bounds per-tick work amplification at N=1.
 - Fixed the Workspace sidebar freezing when toggling Expand All on a large tree. The action was traversing every recursively rendered directory, which forced lazy-load of the entire reachable filesystem on a single frame. Bulk expand/collapse now only flips the workspace-root flags; descendants are expanded normally on click.
 
+### Changes
+- Updated dependencies egui, eframe, serde_json, egui_kittest, and pdf-writer to their latest stable versions.
+
 ## [2.8.0]
 
 ### Added
