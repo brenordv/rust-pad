@@ -17,9 +17,11 @@
 - Capped workspace filesystem events at 1000 per UI tick. During large refactors or rapid bulk operations, an unbounded event queue could starve the UI. Surplus events stay queued for the next tick, and an overflow warning is logged at most once per minute.
 - Coalesce duplicate `(kind, path)` filesystem events in a single drain. Overlapping recursive watchers can emit the same notification multiple times; deduplication bounds per-tick work amplification at N=1.
 - Fixed the Workspace sidebar freezing when toggling Expand All on a large tree. The action was traversing every recursively rendered directory, which forced lazy-load of the entire reachable filesystem on a single frame. Bulk expand/collapse now only flips the workspace-root flags; descendants are expanded normally on click.
+- Fixed syntax highlighting not refreshing existing text when an untitled tab is saved under a recognized extension (e.g., typing Markdown in a new tab and saving it as `*.md`). The galley cache only invalidated on colour-theme changes, so lines whose textual content had not changed kept their old Plain Text styling until they were retyped. The cache now also invalidates when the detected syntax language changes, while staying stable across same-language renames.
 
 ### Changes
 - Updated dependencies egui, eframe, serde_json, egui_kittest, and pdf-writer to their latest stable versions.
+- Internal refactor (no user-visible behaviour change): collapsed the duplicated bincode-deserialize-with-corruption-fallback pattern across the workspace, session, and view-state stores into a shared `deserialize_record` helper that preserves the per-store size limits, and collapsed the paired `tracing::warn!` + problem-log write pattern across the UI layer into `warn_problem` / `info_problem` helpers.
 
 ## [2.8.0]
 

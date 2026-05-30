@@ -7,11 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
-use bincode::Options;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use crate::db_helpers::{open_or_create_db, read_table, write_table};
+use crate::db_helpers::{deserialize_record, open_or_create_db, read_table, write_table};
 
 /// Maximum size in bytes for deserializing session metadata.
 /// 10 MB is generous for tab metadata; anything larger is likely corrupt.
@@ -164,23 +163,15 @@ impl SessionStore {
     /// Loads the session tab list, or `None` if no session was saved.
     pub fn load_session(&self) -> Result<Option<SessionData>> {
         read_table!(self.db, SESSION_META, |table| {
-            match table.get("data").context("Failed to read session data")? {
-                Some(guard) => {
-                    match bincode::DefaultOptions::new()
-                        .with_fixint_encoding()
-                        .allow_trailing_bytes()
-                        .with_limit(MAX_SESSION_META_BYTES)
-                        .deserialize::<SessionData>(guard.value())
-                    {
-                        Ok(data) => Ok(Some(data)),
-                        Err(e) => {
-                            tracing::warn!("Corrupted session data, starting fresh: {e}");
-                            Ok(None)
-                        }
-                    }
-                }
-                None => Ok(None),
-            }
+            let data = match table.get("data").context("Failed to read session data")? {
+                Some(guard) => deserialize_record::<SessionData>(
+                    guard.value(),
+                    MAX_SESSION_META_BYTES,
+                    "session data",
+                ),
+                None => None,
+            };
+            Ok(data)
         })
     }
 

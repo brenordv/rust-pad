@@ -25,9 +25,7 @@ impl App {
     pub(crate) fn accept_external_reload(&mut self, idx: usize) {
         let doc = &mut self.tabs.documents[idx];
         if let Err(e) = doc.reload_from_disk(self.max_file_size_bytes) {
-            let msg = format!("Reload failed for '{}': {e:#}", doc.title);
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!("Reload failed for '{}': {e:#}", doc.title));
         }
         doc.external_change_detected = false;
     }

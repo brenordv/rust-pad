@@ -71,9 +71,9 @@ impl App {
             }
         };
         let Some(sanitized) = sanitize_clipboard_for_filename(&text) else {
-            let msg = "Pasted text rejected: not a valid file or folder name.";
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(msg);
+            crate::problem_log::warn_problem(
+                "Pasted text rejected: not a valid file or folder name.",
+            );
             return;
         };
         ctx.input_mut(|i| i.events.push(egui::Event::Paste(sanitized)));

@@ -707,9 +707,11 @@ mod tests {
 
     #[test]
     fn test_workspace_sidebar_fields_serde_roundtrip() {
-        let mut config = AppConfig::default();
-        config.workspace_sidebar_visible = true;
-        config.workspace_sidebar_width = 350.0;
+        let config = AppConfig {
+            workspace_sidebar_visible: true,
+            workspace_sidebar_width: 350.0,
+            ..Default::default()
+        };
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();

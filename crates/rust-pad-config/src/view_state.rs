@@ -14,11 +14,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bincode::Options;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use crate::db_helpers::{open_or_create_db, read_table, write_table};
+use crate::db_helpers::{deserialize_record, open_or_create_db, read_table, write_table};
 
 /// Maximum size in bytes for deserializing a `ViewState` value.
 /// 1 MB is generous; the realistic record size is < 100 bytes.
@@ -121,19 +120,15 @@ impl ViewStateStore {
         read_table!(self.db, VIEW_STATE_TABLE, |table| {
             match table.get(key).context("Failed to read view-state entry")? {
                 Some(guard) => {
-                    let bytes: &[u8] = guard.value();
-                    match bincode::DefaultOptions::new()
-                        .with_fixint_encoding()
-                        .allow_trailing_bytes()
-                        .with_limit(MAX_VIEW_STATE_BYTES)
-                        .deserialize::<ViewState>(bytes)
-                    {
-                        Ok(state) => Ok(Some(state)),
-                        Err(e) => {
-                            tracing::warn!("Corrupted view-state entry for '{key}': {e}");
-                            Ok(None)
-                        }
+                    let decoded = deserialize_record::<ViewState>(
+                        guard.value(),
+                        MAX_VIEW_STATE_BYTES,
+                        "view-state entry",
+                    );
+                    if decoded.is_none() {
+                        tracing::debug!("Discarded corrupt view-state entry for key '{key}'");
                     }
+                    Ok(decoded)
                 }
                 None => Ok(None),
             }
@@ -214,15 +209,12 @@ impl ViewStateStore {
                     }
                 };
                 let key = k.value().to_string();
-                let bytes: &[u8] = v.value();
-                match bincode::DefaultOptions::new()
-                    .with_fixint_encoding()
-                    .allow_trailing_bytes()
-                    .with_limit(MAX_VIEW_STATE_BYTES)
-                    .deserialize::<ViewState>(bytes)
-                {
-                    Ok(state) => out.push((key, state)),
-                    Err(_) => continue,
+                if let Some(state) = deserialize_record::<ViewState>(
+                    v.value(),
+                    MAX_VIEW_STATE_BYTES,
+                    "view-state entry",
+                ) {
+                    out.push((key, state));
                 }
             }
             Ok(out)

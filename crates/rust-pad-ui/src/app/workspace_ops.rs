@@ -220,9 +220,7 @@ impl App {
         match WorkspaceStore::open(&path) {
             Ok(store) => Some(store),
             Err(e) => {
-                let msg = format!("Failed to open workspace store: {e}");
-                tracing::warn!("{msg}");
-                crate::problem_log::log_problem(&msg);
+                crate::problem_log::warn_problem(&format!("Failed to open workspace store: {e}"));
                 None
             }
         }
@@ -267,9 +265,7 @@ impl App {
         };
 
         if let Err(e) = store.save_workspace(&entry) {
-            let msg = format!("Failed to save new workspace: {e}");
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!("Failed to save new workspace: {e}"));
             return;
         }
 
@@ -370,22 +366,18 @@ impl App {
         };
 
         if self.is_duplicate_folder(folder_path) {
-            let msg = format!(
+            crate::problem_log::info_problem(&format!(
                 "Folder '{}' was not added: it is already in the workspace.",
                 folder_path.display()
-            );
-            tracing::info!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            ));
             return;
         }
 
         if has_symlink_loop(folder_path) {
-            let msg = format!(
+            crate::problem_log::warn_problem(&format!(
                 "Folder '{}' was not added: symlink loop detected.",
                 folder_path.display()
-            );
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            ));
             return;
         }
 
@@ -395,9 +387,9 @@ impl App {
         if let Some(ws) = entries.iter_mut().find(|e| e.id == ws_id) {
             ws.folders.push(folder_str);
             if let Err(e) = store.save_workspace(ws) {
-                let msg = format!("Failed to save workspace after adding folder: {e}");
-                tracing::warn!("{msg}");
-                crate::problem_log::log_problem(&msg);
+                crate::problem_log::warn_problem(&format!(
+                    "Failed to save workspace after adding folder: {e}"
+                ));
                 return;
             }
         }
@@ -489,23 +481,25 @@ impl App {
     /// Creates a new empty file with the given name in the specified directory.
     pub(crate) fn create_new_file_in_workspace(&mut self, parent: &Path, name: &str) {
         if !is_valid_simple_name(name) {
-            let msg =
-                format!("Name '{name}' rejected: contains invalid characters or path separators");
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!(
+                "Name '{name}' rejected: contains invalid characters or path separators"
+            ));
             return;
         }
         let path = parent.join(name);
         if path.exists() {
-            let msg = format!("'{}' already exists in '{}'", name, parent.display());
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!(
+                "'{}' already exists in '{}'",
+                name,
+                parent.display()
+            ));
             return;
         }
         if let Err(e) = std::fs::write(&path, "") {
-            let msg = format!("Failed to create file '{}': {e}", path.display());
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!(
+                "Failed to create file '{}': {e}",
+                path.display()
+            ));
             return;
         }
         self.notify_tree(&FsEvent::Created(path));
@@ -514,23 +508,25 @@ impl App {
     /// Creates a new subdirectory with the given name in the specified directory.
     pub(crate) fn create_new_folder_in_workspace(&mut self, parent: &Path, name: &str) {
         if !is_valid_simple_name(name) {
-            let msg =
-                format!("Name '{name}' rejected: contains invalid characters or path separators");
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!(
+                "Name '{name}' rejected: contains invalid characters or path separators"
+            ));
             return;
         }
         let path = parent.join(name);
         if path.exists() {
-            let msg = format!("'{}' already exists in '{}'", name, parent.display());
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!(
+                "'{}' already exists in '{}'",
+                name,
+                parent.display()
+            ));
             return;
         }
         if let Err(e) = std::fs::create_dir(&path) {
-            let msg = format!("Failed to create folder '{}': {e}", path.display());
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!(
+                "Failed to create folder '{}': {e}",
+                path.display()
+            ));
             return;
         }
         self.notify_tree(&FsEvent::Created(path));
@@ -539,11 +535,9 @@ impl App {
     /// Renames a file or folder in the workspace.
     pub(crate) fn rename_entry_in_workspace(&mut self, old_path: &Path, new_name: &str) {
         if !is_valid_simple_name(new_name) {
-            let msg = format!(
+            crate::problem_log::warn_problem(&format!(
                 "Name '{new_name}' rejected: contains invalid characters or path separators"
-            );
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            ));
             return;
         }
         let Some(parent) = old_path.parent() else {
@@ -552,20 +546,16 @@ impl App {
         let new_path = parent.join(new_name);
 
         if new_path.exists() {
-            let msg = format!("'{}' already exists", new_path.display());
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!("'{}' already exists", new_path.display()));
             return;
         }
 
         if let Err(e) = std::fs::rename(old_path, &new_path) {
-            let msg = format!(
+            crate::problem_log::warn_problem(&format!(
                 "Failed to rename '{}' to '{}': {e}",
                 old_path.display(),
                 new_path.display()
-            );
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            ));
             return;
         }
 
@@ -581,9 +571,10 @@ impl App {
             }
             SidebarAction::DeleteFile(path) => {
                 if let Err(e) = trash::delete(&path) {
-                    let msg = format!("Failed to delete '{}': {e}", path.display());
-                    tracing::warn!("{msg}");
-                    crate::problem_log::log_problem(&msg);
+                    crate::problem_log::warn_problem(&format!(
+                        "Failed to delete '{}': {e}",
+                        path.display()
+                    ));
                 }
             }
             SidebarAction::AddFolder => {

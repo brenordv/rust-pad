@@ -268,10 +268,9 @@ impl App {
         let mut tabs = match PersistenceLayer::open(&history_config.data_dir) {
             Ok(pl) => TabManager::with_persistence(pl, history_config),
             Err(e) => {
-                let msg =
-                    format!("Failed to open undo history database, falling back to in-memory: {e}");
-                tracing::warn!("{msg}");
-                crate::problem_log::log_problem(&msg);
+                crate::problem_log::warn_problem(&format!(
+                    "Failed to open undo history database, falling back to in-memory: {e}"
+                ));
                 TabManager::new()
             }
         };
@@ -292,9 +291,7 @@ impl App {
         let session_store = match SessionStore::open(&session_path) {
             Ok(store) => Some(store),
             Err(e) => {
-                let msg = format!("Failed to open session store: {e}");
-                tracing::warn!("{msg}");
-                crate::problem_log::log_problem(&msg);
+                crate::problem_log::warn_problem(&format!("Failed to open session store: {e}"));
                 None
             }
         };
@@ -444,9 +441,9 @@ impl App {
                     let p = std::path::Path::new(path);
                     if p.exists() {
                         if let Err(e) = tabs.open_file(p) {
-                            let msg = format!("Failed to restore '{path}': {e}");
-                            tracing::warn!("{msg}");
-                            crate::problem_log::log_problem(&msg);
+                            crate::problem_log::warn_problem(&format!(
+                                "Failed to restore '{path}': {e}"
+                            ));
                         } else {
                             let color = tab_color
                                 .as_deref()
@@ -519,9 +516,10 @@ impl App {
                 std::env::current_dir().unwrap_or_default().join(path)
             };
             if let Err(e) = tabs.open_file(&abs_path) {
-                let msg = format!("Failed to open '{}': {e}", abs_path.display());
-                tracing::warn!("{msg}");
-                crate::problem_log::log_problem(&msg);
+                crate::problem_log::warn_problem(&format!(
+                    "Failed to open '{}': {e}",
+                    abs_path.display()
+                ));
             }
         }
 
@@ -1168,16 +1166,14 @@ impl eframe::App for App {
 
                     if self.session_content_max_kb > 0 && content_bytes > limit_bytes {
                         let actual_kb = content_bytes / 1024;
-                        let msg = format!(
+                        crate::problem_log::warn_problem(&format!(
                             "Tab '{}' content ({} KB) exceeds session limit ({} KB), skipping content save",
                             doc.title, actual_kb, self.session_content_max_kb,
-                        );
-                        tracing::warn!("{msg}");
-                        crate::problem_log::log_problem(&msg);
+                        ));
                     } else if let Err(e) = store.save_content(&sid, &content) {
-                        let msg = format!("Failed to save session content: {e}");
-                        tracing::warn!("{msg}");
-                        crate::problem_log::log_problem(&msg);
+                        crate::problem_log::warn_problem(&format!(
+                            "Failed to save session content: {e}"
+                        ));
                     }
 
                     tabs_list.push(SessionTabEntry::Unsaved {
@@ -1195,9 +1191,7 @@ impl eframe::App for App {
                 split,
             };
             if let Err(e) = store.save_session(&session_data) {
-                let msg = format!("Failed to save session: {e}");
-                tracing::warn!("{msg}");
-                crate::problem_log::log_problem(&msg);
+                crate::problem_log::warn_problem(&format!("Failed to save session: {e}"));
             }
         }
 
@@ -1239,9 +1233,7 @@ impl eframe::App for App {
             themes: self.theme_ctrl.available_themes.clone(),
         };
         if let Err(e) = config.save(&self.config_path) {
-            let msg = format!("Failed to save config on exit: {e}");
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!("Failed to save config on exit: {e}"));
         }
     }
 }

@@ -51,6 +51,26 @@ pub fn log_problem(message: &str) {
     }
 }
 
+/// Emits `message` at warn level via `tracing` and also persists it to
+/// the problem store. Pairs the two operations that appeared together
+/// at dozens of call sites across the UI layer.
+///
+/// Use this when the user should see the message in Help > Problems
+/// and operators should see it in the structured log. Use bare
+/// `tracing::warn!` when the message is purely diagnostic and would
+/// only add noise to the user-facing problem list.
+pub fn warn_problem(message: &str) {
+    tracing::warn!("{message}");
+    log_problem(message);
+}
+
+/// Same as [`warn_problem`] at info level. Used for routine outcomes
+/// the user might want to acknowledge (e.g. "duplicate folder ignored").
+pub fn info_problem(message: &str) {
+    tracing::info!("{message}");
+    log_problem(message);
+}
+
 /// Returns the number of unread problem entries (0 when the store is
 /// unavailable).
 pub fn unread_count() -> usize {
