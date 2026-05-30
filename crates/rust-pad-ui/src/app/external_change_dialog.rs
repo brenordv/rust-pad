@@ -3,13 +3,19 @@
 use super::App;
 
 impl App {
-    /// Returns the index of the first document with a pending external change,
-    /// or `None` if no documents have been externally modified.
+    /// Returns the index of the active document iff it has a pending
+    /// external change. Inactive tabs with the flag set are deliberately
+    /// ignored — the prompt only surfaces when the user is actually looking
+    /// at the affected tab. Switching to a flagged tab will surface the
+    /// prompt on the next frame.
     pub(crate) fn pending_external_change_idx(&self) -> Option<usize> {
-        self.tabs
-            .documents
-            .iter()
-            .position(|d| d.external_change_detected)
+        let active = self.tabs.active;
+        let doc = self.tabs.documents.get(active)?;
+        if doc.external_change_detected {
+            Some(active)
+        } else {
+            None
+        }
     }
 
     /// Handles the "Reload" action for a document with an external change.
@@ -19,9 +25,7 @@ impl App {
     pub(crate) fn accept_external_reload(&mut self, idx: usize) {
         let doc = &mut self.tabs.documents[idx];
         if let Err(e) = doc.reload_from_disk(self.max_file_size_bytes) {
-            let msg = format!("Reload failed for '{}': {e:#}", doc.title);
-            tracing::warn!("{msg}");
-            crate::problem_log::log_problem(&msg);
+            crate::problem_log::warn_problem(&format!("Reload failed for '{}': {e:#}", doc.title));
         }
         doc.external_change_detected = false;
     }
@@ -102,9 +106,23 @@ mod tests {
     }
 
     #[test]
-    fn pending_external_change_idx_returns_first_flagged() {
+    fn pending_external_change_idx_returns_active_when_flagged() {
         let mut app = test_app();
         app.tabs.active_doc_mut().external_change_detected = true;
+        assert_eq!(app.pending_external_change_idx(), Some(app.tabs.active));
+    }
+
+    #[test]
+    fn pending_external_change_idx_none_when_only_inactive_tab_flagged() {
+        let mut app = test_app();
+        // Open a second tab and switch to it; flag the inactive (first) tab.
+        app.new_tab();
+        assert_eq!(app.tabs.active, 1);
+        app.tabs.documents[0].external_change_detected = true;
+        // Active doc is not flagged → no prompt.
+        assert_eq!(app.pending_external_change_idx(), None);
+        // Switch back to flagged tab → prompt now surfaces.
+        app.tabs.switch_to(0);
         assert_eq!(app.pending_external_change_idx(), Some(0));
     }
 

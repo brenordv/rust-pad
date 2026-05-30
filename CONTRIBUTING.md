@@ -265,6 +265,9 @@ The project has undergone multiple security hardening phases. Maintain these sta
 
 ## Quality Checklist
 
+1. Test coverage on new code must be at least 50%.
+2. Code duplication must stay at 0%.
+
 Before submitting a PR, run these commands and ensure they all pass:
 
 ```bash

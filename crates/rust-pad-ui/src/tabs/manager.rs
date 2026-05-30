@@ -442,9 +442,10 @@ impl TabManager {
     pub fn flush_all_history(&mut self) {
         for doc in &mut self.documents {
             if let Err(e) = doc.flush_history() {
-                let msg = format!("Failed to flush history for '{}': {e}", doc.title);
-                tracing::warn!("{msg}");
-                crate::problem_log::log_problem(&msg);
+                crate::problem_log::warn_problem(&format!(
+                    "Failed to flush history for '{}': {e}",
+                    doc.title
+                ));
             }
         }
     }
@@ -464,12 +465,10 @@ impl TabManager {
     fn delete_tab_history(&mut self, idx: usize) {
         if idx < self.documents.len() {
             if let Err(e) = self.documents[idx].delete_history() {
-                let msg = format!(
+                crate::problem_log::warn_problem(&format!(
                     "Failed to delete history for '{}': {e}",
                     self.documents[idx].title
-                );
-                tracing::warn!("{msg}");
-                crate::problem_log::log_problem(&msg);
+                ));
             }
         }
     }

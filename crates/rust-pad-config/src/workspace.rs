@@ -6,11 +6,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bincode::Options;
 use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use crate::db_helpers::{open_or_create_db, read_table, write_table};
+use crate::db_helpers::{deserialize_record, open_or_create_db, read_table, write_table};
 
 /// Maximum size in bytes for deserializing workspace metadata.
 /// 5 MB is generous for a list of workspace entries.
@@ -76,24 +75,16 @@ impl WorkspaceStore {
     /// Returns all saved workspaces.
     pub fn list_workspaces(&self) -> Result<Vec<WorkspaceEntry>> {
         read_table!(self.db, WORKSPACE_META, |table| {
-            match table.get("list").context("Failed to read workspace list")? {
-                Some(guard) => {
-                    let bytes: &[u8] = guard.value();
-                    match bincode::DefaultOptions::new()
-                        .with_fixint_encoding()
-                        .allow_trailing_bytes()
-                        .with_limit(MAX_WORKSPACE_META_BYTES)
-                        .deserialize::<Vec<WorkspaceEntry>>(bytes)
-                    {
-                        Ok(entries) => Ok(entries),
-                        Err(e) => {
-                            tracing::warn!("Corrupted workspace list, returning empty: {e}");
-                            Ok(Vec::new())
-                        }
-                    }
-                }
-                None => Ok(Vec::new()),
-            }
+            let entries = match table.get("list").context("Failed to read workspace list")? {
+                Some(guard) => deserialize_record::<Vec<WorkspaceEntry>>(
+                    guard.value(),
+                    MAX_WORKSPACE_META_BYTES,
+                    "workspace list",
+                )
+                .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            Ok(entries)
         })
     }
 
@@ -136,27 +127,23 @@ impl WorkspaceStore {
     /// Returns the active workspace ID, or `None` if no workspace is active.
     pub fn get_active_workspace_id(&self) -> Result<Option<String>> {
         read_table!(self.db, WORKSPACE_META, |table| {
-            match table
+            let id = match table
                 .get("active")
                 .context("Failed to read active workspace")?
             {
-                Some(guard) => {
-                    let bytes: &[u8] = guard.value();
-                    match bincode::DefaultOptions::new()
-                        .with_fixint_encoding()
-                        .allow_trailing_bytes()
-                        .with_limit(MAX_WORKSPACE_META_BYTES)
-                        .deserialize::<Option<String>>(bytes)
-                    {
-                        Ok(id) => Ok(id),
-                        Err(e) => {
-                            tracing::warn!("Corrupted active workspace data, returning None: {e}");
-                            Ok(None)
-                        }
-                    }
-                }
-                None => Ok(None),
-            }
+                // `deserialize_record` returns `Option<T>`; the stored value
+                // is itself an `Option<String>`. `unwrap_or(None)` flattens
+                // both layers: corrupt record OR explicit `None` both yield
+                // "no active workspace".
+                Some(guard) => deserialize_record::<Option<String>>(
+                    guard.value(),
+                    MAX_WORKSPACE_META_BYTES,
+                    "active workspace",
+                )
+                .unwrap_or(None),
+                None => None,
+            };
+            Ok(id)
         })
     }
 

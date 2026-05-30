@@ -110,6 +110,11 @@ impl App {
         if idx < self.tabs.tab_count() && self.tabs.documents[idx].modified {
             self.dialog_state = DialogState::ConfirmClose(idx);
         } else if idx < self.tabs.tab_count() {
+            // Persist scroll + cursor before the tab leaves memory, so
+            // re-opening the file later restores the user's last position.
+            if let Some(doc) = self.tabs.documents.get(idx) {
+                self.persist_view_state(doc);
+            }
             self.cleanup_session_for_tab(idx);
             self.tabs.close_tab(idx);
         }

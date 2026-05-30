@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.8.1]
+
+### Added
+- **Per-file view-state persistence**: cursor position and scroll offset are now remembered for every file you open and restored the next time the file is opened, across tab close, app restart, and session reopen.
+- **Expand All / Collapse All** toolbar buttons in the Workspace sidebar that fold or unfold every workspace root in one click.
+- **Stem selection on rename / new entry** in the Workspace sidebar: the part of the name before the last `.` is pre-selected (matching VS Code / IntelliJ behavior) so you can rewrite the base while keeping the extension.
+
+### Fixed
+- External-change prompt no longer surfaces for inactive tabs. The "file changed on disk" dialog only appears for the currently active document; switching to a flagged tab raises the prompt on the next frame. Previously, a stale flag on any background tab could pop the dialog out from under unrelated editing.
+- Fixed Ctrl+V doing nothing in inline workspace text fields on macOS. egui's TextEdit only paste-handles `Cmd+V` on macOS, so Ctrl-only paste was dropped silently in rename / new-file / new-folder fields. Ctrl+V now synthesizes a Paste event into the focused field. Pasted text is sanitized, CR/LF/NUL are stripped and the result is rejected (with a Problems entry) if it is not a valid single-segment filename.
+- Fixed Ctrl+A / Ctrl+C / Ctrl+V / Ctrl+X / Ctrl+Z / Ctrl+Y in inline workspace fields also affecting the editor. The editor-input suppression that already covered the workspace rename field is now extended to the new-entry and rename-entry fields too, so shortcuts in those text inputs no longer bleed through to the underlying document.
+- Workspace folders that overlap (nested or parent of an existing root) are now allowed. Only exact-path duplicates are rejected. The previous "no overlap" rule blocked legitimate setups like adding both a monorepo root and one of its subprojects.
+- Added symlink-loop detection when adding a workspace folder. Folders that walk back into themselves through symlinks (within the first 64 levels) are now rejected with a Problems entry instead of hanging the lazy scan.
+- Filename validation on a new file, new folder, and rename in the workspace sidebar. Empty names, `.`, `..`, names containing `/` `\` NUL or control characters, absolute paths, and Windows drive prefixes (`C:`) are now rejected and surfaced in the Problems dialog, instead of silently creating files outside the intended directory.
+- Capped workspace filesystem events at 1000 per UI tick. During large refactors or rapid bulk operations, an unbounded event queue could starve the UI. Surplus events stay queued for the next tick, and an overflow warning is logged at most once per minute.
+- Coalesce duplicate `(kind, path)` filesystem events in a single drain. Overlapping recursive watchers can emit the same notification multiple times; deduplication bounds per-tick work amplification at N=1.
+- Fixed the Workspace sidebar freezing when toggling Expand All on a large tree. The action was traversing every recursively rendered directory, which forced lazy-load of the entire reachable filesystem on a single frame. Bulk expand/collapse now only flips the workspace-root flags; descendants are expanded normally on click.
+- Fixed syntax highlighting not refreshing existing text when an untitled tab is saved under a recognized extension (e.g., typing Markdown in a new tab and saving it as `*.md`). The galley cache only invalidated on colour-theme changes, so lines whose textual content had not changed kept their old Plain Text styling until they were retyped. The cache now also invalidates when the detected syntax language changes, while staying stable across same-language renames.
+
+### Changes
+- Updated dependencies egui, eframe, serde_json, egui_kittest, and pdf-writer to their latest stable versions.
+- Internal refactor (no user-visible behaviour change): collapsed the duplicated bincode-deserialize-with-corruption-fallback pattern across the workspace, session, and view-state stores into a shared `deserialize_record` helper that preserves the per-store size limits, and collapsed the paired `tracing::warn!` + problem-log write pattern across the UI layer into `warn_problem` / `info_problem` helpers.
+
 ## [2.8.0]
 
 ### Added

@@ -15,6 +15,7 @@ const SESSION_FILE_NAME: &str = "rust-pad-session.redb";
 const HISTORY_FILE_NAME: &str = "history.redb";
 const PROBLEM_LOG_FILE_NAME: &str = "rust-pad-problems.redb";
 const WORKSPACE_FILE_NAME: &str = "rust-pad-workspaces.redb";
+const VIEW_STATE_FILE_NAME: &str = "rust-pad-view-state.redb";
 
 /// Legacy sub-directory name for history data (next to the executable).
 const LEGACY_HISTORY_DIR: &str = ".data";
@@ -71,6 +72,35 @@ pub fn problem_log_file_path() -> PathBuf {
 /// Returns the full path for the workspace database.
 pub fn workspace_file_path() -> PathBuf {
     app_data_dir().join(WORKSPACE_FILE_NAME)
+}
+
+/// Returns the full path for the per-file view-state database
+/// (cursor + scroll position, restored when a file is re-opened).
+pub fn view_state_file_path() -> PathBuf {
+    app_data_dir().join(VIEW_STATE_FILE_NAME)
+}
+
+/// Returns a stable, canonical string key for `path`, suitable for use
+/// as a persistence key in the view-state database.
+///
+/// Canonicalizes the path when the file exists (resolving symlinks and
+/// relative segments), then strips the Windows `\\?\` UNC prefix so the
+/// same file is keyed consistently whether opened via CLI, file dialog,
+/// or workspace sidebar. Falls back to a lossy display string when the
+/// file does not exist or cannot be canonicalized.
+///
+/// The canonical key MUST be computed on save and stored verbatim — do
+/// not canonicalize again on read, since that introduces a TOCTOU window
+/// where a swapped file could cause restored state to land on the wrong
+/// document.
+pub fn canonical_path_key(path: &Path) -> String {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let s = canon.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else {
+        s.into_owned()
+    }
 }
 
 /// Returns the directory where the history database lives.
@@ -142,6 +172,11 @@ pub fn portable_problem_log_file_path() -> PathBuf {
 /// Returns the workspace file path next to the executable (portable mode).
 pub fn portable_workspace_file_path() -> PathBuf {
     exe_dir().join(WORKSPACE_FILE_NAME)
+}
+
+/// Returns the view-state file path next to the executable (portable mode).
+pub fn portable_view_state_file_path() -> PathBuf {
+    exe_dir().join(VIEW_STATE_FILE_NAME)
 }
 
 /// Returns the history data directory next to the executable (portable mode).

@@ -12,6 +12,10 @@ impl App {
     ///
     /// Find/Replace is excluded — it is non-modal and allows editing
     /// in the editor when it doesn't have focus.
+    ///
+    /// External-change prompts only count as modal for the active tab —
+    /// a flagged inactive tab does not block shortcuts; the prompt
+    /// appears the next frame after the user switches to it.
     pub(crate) fn is_modal_dialog_open(&self) -> bool {
         self.go_to_line.visible
             || self.settings_open
@@ -22,8 +26,8 @@ impl App {
             || self
                 .tabs
                 .documents
-                .iter()
-                .any(|d| d.external_change_detected)
+                .get(self.tabs.active)
+                .is_some_and(|d| d.external_change_detected)
     }
 
     /// Returns true if any dialog is currently open (modal or non-modal).
@@ -69,11 +73,28 @@ impl App {
         });
 
         // Handle semantic clipboard events (from focused widget).
-        // Suppressed when a modal dialog is open or when the Find/Replace
-        // dialog has focus (so Ctrl+C/V/X operate on the dialog's text fields).
-        let suppress_editor_input = self.is_modal_dialog_open()
-            || self.find_replace.has_focus
-            || self.workspace_sidebar.rename_buffer.is_some();
+        // Suppressed when a modal dialog is open, when the Find/Replace
+        // dialog has focus, or when any inline workspace text field is
+        // active (rename workspace, create file/folder, rename entry) —
+        // otherwise Ctrl+A/V/C/X/Z/Y in those fields would also affect
+        // the editor.
+        let inline_field_active = self.workspace_sidebar.rename_buffer.is_some()
+            || self.workspace_sidebar.new_entry.is_some()
+            || self.workspace_sidebar.rename_entry.is_some();
+        let suppress_editor_input =
+            self.is_modal_dialog_open() || self.find_replace.has_focus || inline_field_active;
+
+        // Bug 6: on macOS egui's TextEdit only paste-handles `Cmd+V`. When
+        // an inline workspace field is focused and the user pressed Ctrl-only
+        // (not Cmd), synthesize a Paste event so the focused TextEdit reads
+        // it natively. Sanitize per V5 — filenames are single-segment text;
+        // strip CR/LF/NUL and reject the paste entirely if the result is
+        // not a valid simple name.
+        let ctrl_only = ctx.input(|i| i.modifiers.ctrl && !i.modifiers.mac_cmd);
+        if inline_field_active && ctrl_only && keys.contains(&egui::Key::V) {
+            self.inject_inline_paste(ctx);
+        }
+
         if !suppress_editor_input {
             if has_copy {
                 self.copy();

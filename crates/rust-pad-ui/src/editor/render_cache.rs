@@ -8,6 +8,23 @@ use std::sync::Arc;
 
 use egui::Galley;
 
+/// Hash of the active syntect colour theme (e.g. `"base16-eighties.dark"`).
+///
+/// Newtype rather than a bare `u64` so [`RenderCache::validate`] cannot
+/// silently take a syntax-language hash in this slot (or vice versa) —
+/// both invalidation keys are `u64` and an argument swap would only
+/// surface as a visual glitch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SyntaxThemeHash(pub u64);
+
+/// Hash of the active syntect syntax-language name (e.g. `"Markdown"`).
+///
+/// Bumped when the detected language changes (a typical trigger is the
+/// user saving an Untitled tab under a new extension). Newtype-wrapped
+/// for the same reason as [`SyntaxThemeHash`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SyntaxNameHash(pub u64);
+
 /// Cached galley for a single line.
 struct CachedGalley {
     /// Hash of the line content (used to detect changes).
@@ -24,8 +41,11 @@ pub(crate) struct RenderCache {
     last_version: u64,
     /// Font size used when galleys were cached (invalidate on zoom change).
     last_font_size: f32,
-    /// Hash of the syntax theme name (invalidate on theme change).
-    last_syntax_theme: u64,
+    /// Hash of the syntax colour-theme name (invalidate on theme change).
+    last_syntax_theme: SyntaxThemeHash,
+    /// Hash of the active syntax-language name (invalidate when the file
+    /// extension changes — e.g. Untitled saved as `*.md`).
+    last_syntax_name: SyntaxNameHash,
 }
 
 impl RenderCache {
@@ -34,27 +54,49 @@ impl RenderCache {
             galleys: HashMap::new(),
             last_version: u64::MAX, // force miss on first use
             last_font_size: 0.0,
-            last_syntax_theme: 0,
+            last_syntax_theme: SyntaxThemeHash(0),
+            last_syntax_name: SyntaxNameHash(0),
         }
     }
 
-    /// Validates the cache against the current font size and syntax theme.
+    /// Validates the cache against the current font size, colour theme, and
+    /// syntax language.
     ///
-    /// Font size and syntax theme changes require a full clear because every
-    /// galley embeds font metrics and highlight colors respectively.
+    /// Font size, colour theme, and syntax-language changes all require a
+    /// full clear: every galley embeds font metrics, highlight colours, and
+    /// the per-token colouring produced by the active language definition.
     /// Content version changes do **not** clear the cache — per-line content
     /// hashes in [`get`] already handle correctness by returning `None` when
     /// a line's content has changed.
-    pub fn validate(&mut self, version: u64, font_size: f32, syntax_theme_hash: u64) {
+    pub fn validate(
+        &mut self,
+        version: u64,
+        font_size: f32,
+        syntax_theme: SyntaxThemeHash,
+        syntax_name: SyntaxNameHash,
+    ) {
         // Font size change: must clear everything (galleys are font-dependent).
         if (self.last_font_size - font_size).abs() > f32::EPSILON {
             self.galleys.clear();
             self.last_font_size = font_size;
         }
         // Syntax theme change: must clear everything (galleys embed highlight colors).
-        if self.last_syntax_theme != syntax_theme_hash {
+        if self.last_syntax_theme != syntax_theme {
             self.galleys.clear();
-            self.last_syntax_theme = syntax_theme_hash;
+            self.last_syntax_theme = syntax_theme;
+        }
+        // Syntax-language change (e.g. Untitled saved as *.md): clear so
+        // existing lines re-highlight under the new grammar. Without this
+        // step, lines whose textual content did not change keep their old
+        // Plain Text galleys until the user retypes them.
+        if self.last_syntax_name != syntax_name {
+            tracing::debug!(
+                "RenderCache cleared: syntax-language change ({:#x} -> {:#x})",
+                self.last_syntax_name.0,
+                syntax_name.0
+            );
+            self.galleys.clear();
+            self.last_syntax_name = syntax_name;
         }
         // Version change: do NOT clear. Per-line content hashes handle correctness.
         self.last_version = version;
@@ -195,54 +237,76 @@ mod tests {
     #[test]
     fn cache_validate_version_change_preserves_entries() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         cache.insert(0, 42, test_galley());
         assert!(cache.get(0, 42).is_some());
 
         // Same version → preserved
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         assert!(cache.get(0, 42).is_some());
 
         // Different version → still preserved (per-line hash guards correctness)
-        cache.validate(2, 14.0, 0);
+        cache.validate(2, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         assert!(cache.get(0, 42).is_some());
     }
 
     #[test]
     fn cache_validate_font_size_change_clears() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         cache.insert(0, 42, test_galley());
         assert!(cache.get(0, 42).is_some());
 
         // Different font size → cleared
-        cache.validate(1, 16.0, 0);
+        cache.validate(1, 16.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         assert!(cache.get(0, 42).is_none());
     }
 
     #[test]
     fn cache_validate_syntax_theme_change_clears() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 100);
+        cache.validate(1, 14.0, SyntaxThemeHash(100), SyntaxNameHash(0));
 
         cache.insert(0, 42, test_galley());
         assert!(cache.get(0, 42).is_some());
 
         // Same theme → preserved
-        cache.validate(1, 14.0, 100);
+        cache.validate(1, 14.0, SyntaxThemeHash(100), SyntaxNameHash(0));
         assert!(cache.get(0, 42).is_some());
 
         // Different syntax theme → cleared
-        cache.validate(1, 14.0, 200);
+        cache.validate(1, 14.0, SyntaxThemeHash(200), SyntaxNameHash(0));
+        assert!(cache.get(0, 42).is_none());
+    }
+
+    // Regression: an Untitled tab saved as `*.md` left existing lines
+    // rendered as Plain Text because the cache only invalidated on colour-
+    // theme changes, not on syntax-language changes.
+    #[test]
+    fn cache_validate_syntax_name_change_clears() {
+        let mut cache = RenderCache::new();
+        let plain = SyntaxNameHash(hash_str("Plain Text"));
+        let markdown = SyntaxNameHash(hash_str("Markdown"));
+
+        cache.validate(1, 14.0, SyntaxThemeHash(0), plain);
+        cache.insert(0, 42, test_galley());
+        assert!(cache.get(0, 42).is_some());
+
+        // Same language → preserved
+        cache.validate(1, 14.0, SyntaxThemeHash(0), plain);
+        assert!(cache.get(0, 42).is_some());
+
+        // Plain Text → Markdown: must clear so existing lines re-highlight.
+        cache.validate(1, 14.0, SyntaxThemeHash(0), markdown);
         assert!(cache.get(0, 42).is_none());
     }
 
     #[test]
     fn cache_get_mismatched_hash() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         cache.insert(0, 42, test_galley());
 
@@ -257,7 +321,7 @@ mod tests {
     #[test]
     fn cache_insert_and_get() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         cache.insert(5, 100, test_galley());
 
@@ -268,7 +332,7 @@ mod tests {
     #[test]
     fn cache_insert_overwrites_same_line() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         cache.insert(0, 42, test_galley());
         cache.insert(0, 99, test_galley());
@@ -292,7 +356,7 @@ mod tests {
 
         {
             let cache = get_render_cache(&mut slot);
-            cache.validate(1, 14.0, 0);
+            cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
             cache.insert(5, 100, test_galley());
         }
 
@@ -314,11 +378,11 @@ mod tests {
     #[test]
     fn version_change_with_same_hash_is_cache_hit() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         cache.insert(10, 42, test_galley());
 
         // Bump version — line 10 content unchanged (same hash)
-        cache.validate(2, 14.0, 0);
+        cache.validate(2, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         assert!(
             cache.get(10, 42).is_some(),
             "unchanged line should remain a cache hit after version bump"
@@ -328,11 +392,11 @@ mod tests {
     #[test]
     fn version_change_with_different_hash_is_cache_miss() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         cache.insert(10, 42, test_galley());
 
         // Bump version — line 10 content changed (different hash)
-        cache.validate(2, 14.0, 0);
+        cache.validate(2, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         assert!(
             cache.get(10, 99).is_none(),
             "changed line should be a cache miss"
@@ -342,7 +406,7 @@ mod tests {
     #[test]
     fn line_shift_causes_miss_for_shifted_lines() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         // Lines 0-3 cached with distinct hashes.
         for i in 0..4 {
@@ -352,7 +416,7 @@ mod tests {
         // Simulate inserting a line at index 1: old line 1 (hash 101) is now
         // at index 2. Querying index 2 with hash 101 should miss because the
         // cache still holds (index 2, hash 102).
-        cache.validate(2, 14.0, 0);
+        cache.validate(2, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         assert!(
             cache.get(2, 101).is_none(),
             "shifted line should miss (wrong hash at old index)"
@@ -366,7 +430,7 @@ mod tests {
     #[test]
     fn prune_removes_entries_outside_range() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         for i in 0..200 {
             cache.insert(i, i as u64, test_galley());
@@ -385,7 +449,7 @@ mod tests {
     #[test]
     fn prune_handles_start_of_file() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         for i in 0..100 {
             cache.insert(i, i as u64, test_galley());
@@ -402,7 +466,7 @@ mod tests {
     #[test]
     fn prune_with_zero_margin() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
 
         for i in 0..10 {
             cache.insert(i, i as u64, test_galley());
@@ -419,7 +483,7 @@ mod tests {
     #[test]
     fn prune_on_empty_cache_is_noop() {
         let mut cache = RenderCache::new();
-        cache.validate(1, 14.0, 0);
+        cache.validate(1, 14.0, SyntaxThemeHash(0), SyntaxNameHash(0));
         cache.prune(0, 10, 50); // should not panic
     }
 }

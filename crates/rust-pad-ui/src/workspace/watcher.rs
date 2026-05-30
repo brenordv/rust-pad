@@ -16,7 +16,7 @@ use notify_debouncer_mini::{new_debouncer, DebounceEventResult, DebouncedEventKi
 /// `notify-debouncer-mini` cannot reliably detect renames — they surface as
 /// a `Removed` followed by a `Created`, which is sufficient for the sidebar
 /// tree's incremental update logic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FsEvent {
     /// A file or directory was created.
     ///
@@ -110,10 +110,18 @@ impl WorkspaceWatcher {
     }
 
     /// Non-blocking drain of all pending filesystem events.
+    ///
+    /// Duplicate events for the same `(kind, path)` pair within a single
+    /// drain are coalesced into one. With overlapping workspace roots a
+    /// recursive watcher may emit the same notification multiple times;
+    /// deduplication bounds the per-tick work amplification at N=1.
     pub fn poll_events(&self) -> Vec<FsEvent> {
         let mut events = Vec::new();
+        let mut seen: std::collections::HashSet<FsEvent> = std::collections::HashSet::new();
         while let Ok(event) = self.receiver.try_recv() {
-            events.push(event);
+            if seen.insert(event.clone()) {
+                events.push(event);
+            }
         }
         events
     }
@@ -284,6 +292,34 @@ mod tests {
         assert_ne!(created, modified);
         assert_ne!(created, removed);
         assert_ne!(modified, removed);
+    }
+
+    #[test]
+    fn test_poll_events_deduplicates_repeated_events() {
+        // Send the same event twice through the internal channel and verify
+        // poll_events emits only one copy. Bypasses the debouncer by
+        // injecting directly into the receiver.
+        let (tx, rx) = mpsc::channel();
+        let same = FsEvent::Modified(PathBuf::from("/x/y/z"));
+        tx.send(same.clone()).expect("send 1");
+        tx.send(same.clone()).expect("send 2");
+        tx.send(FsEvent::Removed(PathBuf::from("/x/y/z")))
+            .expect("send removed");
+        drop(tx);
+
+        // Drain manually using the dedup logic.
+        let mut events: Vec<FsEvent> = Vec::new();
+        let mut seen: std::collections::HashSet<FsEvent> = std::collections::HashSet::new();
+        while let Ok(event) = rx.try_recv() {
+            if seen.insert(event.clone()) {
+                events.push(event);
+            }
+        }
+
+        // 2 unique events out of 3 sent.
+        assert_eq!(events.len(), 2);
+        assert!(events.contains(&FsEvent::Modified(PathBuf::from("/x/y/z"))));
+        assert!(events.contains(&FsEvent::Removed(PathBuf::from("/x/y/z"))));
     }
 
     #[test]

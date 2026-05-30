@@ -12,7 +12,7 @@ use rust_pad_core::cursor::Position;
 use rust_pad_core::document::{Document, ScrollbarDrag};
 
 use super::painter::SyntaxHighlighter;
-use super::render_cache::{get_render_cache, hash_str};
+use super::render_cache::{get_render_cache, hash_str, SyntaxNameHash, SyntaxThemeHash};
 use super::theme::EditorTheme;
 use super::wrap_map::WrapMap;
 
@@ -602,15 +602,25 @@ impl<'a> EditorWidget<'a> {
         };
 
         {
-            let syntax_theme_hash = self
-                .highlighter
-                .map(|h| hash_str(h.current_theme()))
-                .unwrap_or(0);
+            // Hash the active colour theme + the resolved syntax-language name
+            // so the galley cache invalidates whenever either changes. Hashing
+            // the language *name* (not the file path) avoids spuriously clearing
+            // the cache on renames that don't change the detected grammar
+            // (e.g. `notes.md` → `daily.md`).
+            let syntax_path = self.syntax_path();
+            let (syntax_theme_hash, syntax_name_hash) = match self.highlighter {
+                Some(h) => (
+                    SyntaxThemeHash(hash_str(h.current_theme())),
+                    SyntaxNameHash(hash_str(&h.detect_syntax(syntax_path.as_deref()).name)),
+                ),
+                None => (SyntaxThemeHash(0), SyntaxNameHash(0)),
+            };
             let cache = get_render_cache(&mut self.doc.render_cache);
             cache.validate(
                 self.doc.content_version,
                 layout.effective_font_size,
                 syntax_theme_hash,
+                syntax_name_hash,
             );
         }
 
