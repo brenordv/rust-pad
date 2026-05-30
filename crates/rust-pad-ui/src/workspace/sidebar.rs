@@ -441,6 +441,64 @@ impl WorkspaceSidebar {
     }
 }
 
+/// Outcome of one frame of inline name-field editing.
+///
+/// `Submitted` carries the trimmed name as the user typed it; **this layer
+/// performs no filename validation** — sanitization is the caller's or the
+/// downstream `SidebarAction` handler's responsibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InlineEntryOutcome {
+    Editing,
+    Cancelled,
+    Submitted(String),
+}
+
+/// Shared scaffolding for the inline rename and new-entry text fields.
+///
+/// Renders an icon plus an auto-focused single-line `TextEdit`, applies the
+/// one-shot stem selection when `*select_on_focus` is true (and clears it),
+/// and reports the next state transition to the caller.
+///
+/// State transitions are intentionally not traced — this runs per frame; if
+/// observability is ever needed, instrument the `SidebarAction` handler
+/// instead, never this helper.
+fn render_inline_entry_field(
+    ui: &mut egui::Ui,
+    icon: &str,
+    id_salt: &str,
+    name: &mut String,
+    select_on_focus: &mut bool,
+) -> InlineEntryOutcome {
+    ui.horizontal(|ui| {
+        ui.label(icon);
+        let name_snapshot = name.clone();
+        let resp = ui.add(
+            egui::TextEdit::singleline(name)
+                .id_salt(id_salt)
+                .desired_width(ui.available_width()),
+        );
+        if !resp.has_focus() && !resp.lost_focus() {
+            resp.request_focus();
+        }
+        if *select_on_focus {
+            select_stem_in_text_edit(&resp.ctx, resp.id, &name_snapshot);
+            *select_on_focus = false;
+        }
+        if resp.lost_focus() {
+            let trimmed = name.trim().to_string();
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                return InlineEntryOutcome::Submitted(trimmed);
+            }
+            return InlineEntryOutcome::Cancelled;
+        }
+        if resp.ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return InlineEntryOutcome::Cancelled;
+        }
+        InlineEntryOutcome::Editing
+    })
+    .inner
+}
+
 /// Renders the inline rename text field for a tree entry.
 /// Returns `true` when the rename interaction is complete.
 fn render_inline_rename(
@@ -459,38 +517,21 @@ fn render_inline_rename(
     } else {
         file_icon(&original_name)
     };
-    ui.horizontal(|ui| {
-        ui.label(icon);
-        let name_snapshot = state.name.clone();
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut state.name)
-                .id_salt("ws-rename-entry")
-                .desired_width(ui.available_width()),
-        );
-        if !resp.has_focus() && !resp.lost_focus() {
-            resp.request_focus();
+    match render_inline_entry_field(
+        ui,
+        icon,
+        "ws-rename-entry",
+        &mut state.name,
+        &mut state.select_on_focus,
+    ) {
+        InlineEntryOutcome::Submitted(name) if !name.is_empty() && name != original_name => {
+            *action = SidebarAction::ConfirmRenameEntry(state.original_path.clone(), name);
+            *rename_just_confirmed = true;
+            true
         }
-        if state.select_on_focus {
-            select_stem_in_text_edit(&resp.ctx, resp.id, &name_snapshot);
-            state.select_on_focus = false;
-        }
-        if resp.lost_focus() {
-            let name = state.name.trim().to_string();
-            if ui.input(|i| i.key_pressed(egui::Key::Enter))
-                && !name.is_empty()
-                && name != original_name
-            {
-                *action = SidebarAction::ConfirmRenameEntry(state.original_path.clone(), name);
-                *rename_just_confirmed = true;
-            }
-            return true;
-        }
-        if resp.ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            return true;
-        }
-        false
-    })
-    .inner
+        InlineEntryOutcome::Cancelled | InlineEntryOutcome::Submitted(_) => true,
+        InlineEntryOutcome::Editing => false,
+    }
 }
 
 /// Renders a directory tree entry with collapsing header, context menu, and lazy-loaded children.
@@ -630,39 +671,25 @@ fn render_inline_new_entry_field(
     } else {
         "\u{1F4C4}"
     };
-    ui.horizontal(|ui| {
-        ui.label(icon);
-        let name_snapshot = state.name.clone();
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut state.name)
-                .id_salt("ws-new-entry")
-                .desired_width(ui.available_width()),
-        );
-        if !resp.has_focus() && !resp.lost_focus() {
-            resp.request_focus();
+    match render_inline_entry_field(
+        ui,
+        icon,
+        "ws-new-entry",
+        &mut state.name,
+        &mut state.select_on_focus,
+    ) {
+        InlineEntryOutcome::Submitted(name) if !name.is_empty() => {
+            *action = if state.is_dir {
+                SidebarAction::ConfirmNewFolder(state.parent.clone(), name)
+            } else {
+                SidebarAction::ConfirmNewFile(state.parent.clone(), name)
+            };
+            *rename_just_confirmed = true;
+            true
         }
-        if state.select_on_focus {
-            select_stem_in_text_edit(&resp.ctx, resp.id, &name_snapshot);
-            state.select_on_focus = false;
-        }
-        if resp.lost_focus() {
-            let name = state.name.trim().to_string();
-            if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !name.is_empty() {
-                if state.is_dir {
-                    *action = SidebarAction::ConfirmNewFolder(state.parent.clone(), name);
-                } else {
-                    *action = SidebarAction::ConfirmNewFile(state.parent.clone(), name);
-                }
-                *rename_just_confirmed = true;
-            }
-            return true;
-        }
-        if resp.ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            return true;
-        }
-        false
-    })
-    .inner
+        InlineEntryOutcome::Cancelled | InlineEntryOutcome::Submitted(_) => true,
+        InlineEntryOutcome::Editing => false,
+    }
 }
 
 /// Renders a slice of tree entries recursively, with lazy-loading of children.
@@ -810,6 +837,23 @@ fn file_icon(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_inline_entry_outcome_variants_distinct() {
+        let editing = InlineEntryOutcome::Editing;
+        let cancelled = InlineEntryOutcome::Cancelled;
+        let submitted_empty = InlineEntryOutcome::Submitted(String::new());
+        let submitted_name = InlineEntryOutcome::Submitted("foo.txt".to_string());
+
+        assert_ne!(editing, cancelled);
+        assert_ne!(editing, submitted_empty);
+        assert_ne!(cancelled, submitted_empty);
+        assert_ne!(submitted_empty, submitted_name);
+        assert_eq!(
+            submitted_name.clone(),
+            InlineEntryOutcome::Submitted("foo.txt".to_string())
+        );
+    }
 
     #[test]
     fn test_sidebar_default_state() {
