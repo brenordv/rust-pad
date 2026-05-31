@@ -2,8 +2,15 @@
 
 ## [2.9.0]
 
+### Added
+- **Workspace context menu — `Copy Contents` for files.** Right-clicking a file in the workspace now offers a "Copy Contents" item that decodes the file (UTF-8 / UTF-16 / detected legacy encoding), normalises line endings to LF, and pushes the result to the system clipboard. Binary-looking files (decode errors or NULs in the decoded text) are refused with a Problems entry. Files containing Unicode bidirectional override characters (Trojan Source attack class, CVE-2021-42574) are copied with a non-blocking notice so the user can verify before pasting into code or commit messages.
+- **Workspace context menu — `Open in File Explorer` for folders.** Right-clicking a folder (including a workspace root) now offers an "Open in File Explorer" item that reveals the directory in the OS file manager (Windows Explorer, macOS Finder, `xdg-open` on Linux).
+- **Workspace context menu — `Copy Path` submenu.** Right-clicking any entry now exposes a `Copy Path > {Name | Full Path | Relative Path}` submenu. Relative paths are resolved against the workspace root that contains the entry. Paths containing control characters (LF, NUL, ANSI escape, DEL, C1) are refused with a Problems entry to block the Trojan-filename clipboard-injection attack class (cf. CVE-2017-12424).
+- **Setting — `Warn before copying file contents larger than (MB)`.** New row under Settings → History; default 5 MB. Files above this threshold trigger a confirmation dialog showing the canonical path, the file size, and a caveat about OS clipboard history. Files above the hard `max_file_size_mb` cap are refused outright, regardless of this threshold.
+
 ### Changes
 - **Workspace sidebar icon refresh.** Replaced the placeholder emoji glyphs in the workspace tree, sidebar toolbar (close / add / hidden-files toggle / collapse-all / expand-all), workspace-rename context menu, and the inline new-file / new-folder / rename fields with a coherent set of monochrome Phosphor icons. The icons scale with the active text size and recolour with the current theme. The new vocabulary lives in `crates/rust-pad-ui/src/icons.rs` so any future swap is a one-file change.
+- **Workspace tree rendering refactored around a `RenderCtx`.** The recursive `render_entry_list` and per-entry helpers now share a small context struct instead of nine positional arguments. The new struct also threads the owning workspace-root path down to every entry so the new Copy Path / Copy Contents handlers have it without re-walking the tree.
 
 ## [2.8.1]
 

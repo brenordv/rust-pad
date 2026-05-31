@@ -3372,6 +3372,7 @@ dependencies = [
  "egui",
  "egui-phosphor",
  "egui_kittest",
+ "encoding_rs",
  "image",
  "notify",
  "notify-debouncer-mini",

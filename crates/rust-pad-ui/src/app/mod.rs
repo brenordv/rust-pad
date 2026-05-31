@@ -130,6 +130,19 @@ pub struct App {
     session_content_max_kb: usize,
     /// Maximum file size in bytes that can be opened, or `None` for no limit.
     max_file_size_bytes: Option<u64>,
+    /// Threshold in bytes above which "Copy file contents" prompts the user
+    /// before reading. `0` means "always prompt".
+    pub(crate) copy_contents_warning_bytes: u64,
+    /// In-flight "Copy file contents" confirmation. `Some((canonical_path,
+    /// size_bytes))` while the confirm dialog is open; cleared when the
+    /// user resolves the dialog either way.
+    pub(crate) pending_copy_contents: Option<(std::path::PathBuf, u64)>,
+    /// Canonical paths of in-flight `ReadFileForClipboard` requests. Used to
+    /// route `IoResponse::Error` and `IoResponse::FileTooLarge` away from
+    /// the "open file in editor" prompt (which would offer to open a file
+    /// the user only wanted to copy) and into the clipboard-specific
+    /// `problem_log` channel. Cleared in every terminal response arm.
+    pub(crate) pending_clipboard_reads: Vec<std::path::PathBuf>,
     last_window_title: String,
     live_monitor: LiveMonitorController,
     pub settings_open: bool,
@@ -319,6 +332,7 @@ impl App {
         Self::open_startup_files(&mut tabs, &args);
 
         let max_file_size_bytes = app_config.max_file_size_bytes();
+        let copy_contents_warning_bytes = app_config.copy_contents_warning_bytes();
         let ws_sidebar_visible = app_config.workspace_sidebar_visible;
         let ws_sidebar_width = app_config.workspace_sidebar_width;
         let ws_show_hidden = app_config.show_hidden_files;
@@ -364,6 +378,9 @@ impl App {
             session_store,
             session_content_max_kb: app_config.session_content_max_kb,
             max_file_size_bytes,
+            copy_contents_warning_bytes,
+            pending_copy_contents: None,
+            pending_clipboard_reads: Vec::new(),
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -653,14 +670,38 @@ impl App {
                         self.io_activity.pending_saves.retain(|s| s.path != *p);
                         self.io_activity.pending_reads =
                             self.io_activity.pending_reads.saturating_sub(1);
+                        // A clipboard read with a matching path is dropped
+                        // here too — its failure mode is already surfaced
+                        // through the generic I/O-error problem entry.
+                        self.pending_clipboard_reads.retain(|p2| p2 != p);
                     }
                 }
                 IoResponse::FileTooLarge { path, message } => {
-                    tracing::warn!("File too large: {message}");
-                    if self.io_activity.dialog_open {
-                        self.io_activity.dialog_open = false;
+                    if let Some(pos) = self.pending_clipboard_reads.iter().position(|p| *p == path)
+                    {
+                        // Route to clipboard-specific channel instead of the
+                        // "open file" prompt (which would offer to open a
+                        // file the user only wanted to copy). See R-Obs-7.
+                        self.pending_clipboard_reads.remove(pos);
+                        self.io_activity.pending_reads =
+                            self.io_activity.pending_reads.saturating_sub(1);
+                        tracing::warn!(path = ?path, "[CC04] Copy Contents refused: {message}");
+                        crate::problem_log::warn_problem(&format!(
+                            "[CC04] Copy Contents refused: {message}"
+                        ));
+                    } else {
+                        tracing::warn!("File too large: {message}");
+                        if self.io_activity.dialog_open {
+                            self.io_activity.dialog_open = false;
+                        }
+                        self.dialog_state = DialogState::ConfirmLargeFile { path, message };
                     }
-                    self.dialog_state = DialogState::ConfirmLargeFile { path, message };
+                }
+                IoResponse::ClipboardFileRead { path, bytes } => {
+                    self.io_activity.pending_reads =
+                        self.io_activity.pending_reads.saturating_sub(1);
+                    self.pending_clipboard_reads.retain(|p| *p != path);
+                    self.complete_copy_contents(&path, &bytes);
                 }
             }
         }
@@ -699,6 +740,7 @@ impl App {
         self.show_confirm_close_dialog(ctx);
         self.show_confirm_reload_dialog(ctx);
         self.show_confirm_large_file_dialog(ctx);
+        self.show_confirm_large_copy_dialog(ctx);
         self.show_file_open_error_dialog(ctx);
         self.show_print_error_dialog(ctx);
         self.show_external_change_dialog(ctx);
@@ -814,6 +856,119 @@ impl App {
 
         if !open {
             self.dialog_state = DialogState::None;
+        }
+    }
+
+    /// Completes the Copy Contents pipeline once the worker has handed back
+    /// the file bytes. Implements §3.5 steps 6.1–7:
+    ///
+    /// * encoding detection + decode (`encoding::detect_encoding` /
+    ///   `encoding::decode_bytes`),
+    /// * binary refusal on decode error or post-decode NUL,
+    /// * Trojan-Source bidi notice (information-only),
+    /// * LF normalisation (matches the paste path),
+    /// * clipboard write through the sanitising helper.
+    ///
+    /// Never logs the decoded text — only path and length. See the
+    /// module-level "observability" note in `app/clipboard.rs`.
+    fn complete_copy_contents(&mut self, path: &std::path::Path, bytes: &[u8]) {
+        tracing::debug!(
+            path = ?path,
+            bytes = bytes.len(),
+            "Copy Contents bytes received",
+        );
+
+        let encoding = rust_pad_core::encoding::detect_encoding(bytes);
+        let text = match rust_pad_core::encoding::decode_bytes(bytes, encoding) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    path = ?path,
+                    encoding = ?encoding,
+                    error = %e,
+                    "Copy Contents refused: decode error",
+                );
+                crate::problem_log::warn_problem(
+                    "[CC05] File appears to be binary; not copied to clipboard.",
+                );
+                return;
+            }
+        };
+
+        if text.contains('\0') {
+            tracing::warn!(
+                path = ?path,
+                "Copy Contents refused: NUL byte after decode",
+            );
+            crate::problem_log::warn_problem(
+                "[CC05] File appears to be binary; not copied to clipboard.",
+            );
+            return;
+        }
+
+        if clipboard::contains_bidi_override(&text) {
+            tracing::info!(path = ?path, "Copy Contents bidi-override notice emitted");
+            crate::problem_log::info_problem(
+                "[CC06] Copied text contains bidirectional override characters that can mask \
+                 code intent. Verify before pasting into code or commit messages.",
+            );
+        }
+
+        let normalized = rust_pad_core::encoding::normalize_line_endings(&text);
+        let chars = normalized.chars().count();
+        if self.copy_text_to_clipboard(&normalized, clipboard::ContentKind::FileContent) {
+            tracing::debug!(path = ?path, chars, "Copy Contents written to clipboard");
+        }
+    }
+
+    /// Shows the confirmation dialog for "Copy file contents" on files
+    /// larger than the warning threshold. Mirrors the shape of the
+    /// `ConfirmLargeFile` dialog but binds to `pending_copy_contents`
+    /// instead of `DialogState` because the two flows are independent —
+    /// users can have a pending "open file too large" prompt and a
+    /// "copy contents too large" prompt at the same time.
+    ///
+    /// Body content per plan §3.5 step 4 + R-Sec-1/R-Sec-2: canonical
+    /// path, size in MB, clipboard-persistence caveat, Cancel/Copy buttons.
+    fn show_confirm_large_copy_dialog(&mut self, ctx: &egui::Context) {
+        let Some((path, size_bytes)) = self.pending_copy_contents.clone() else {
+            return;
+        };
+        let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+
+        let mut open = true;
+        egui::Window::new("Copy file contents to clipboard?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(format!("Copy {size_mb:.1} MB from"));
+                ui.monospace(path.display().to_string());
+                ui.label("to the system clipboard?");
+                ui.add_space(4.0);
+                ui.weak(
+                    "Clipboard contents may be retained by the OS (e.g., Windows \
+                     Clipboard History, macOS Universal Clipboard) and accessible to \
+                     other applications.",
+                );
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.button("  Copy  ").clicked() {
+                        self.pending_copy_contents = None;
+                        self.send_copy_contents_read(path.clone());
+                    }
+                    if ui.button("  Cancel  ").clicked() {
+                        self.pending_copy_contents = None;
+                    }
+                });
+            });
+
+        if !open {
+            self.pending_copy_contents = None;
         }
     }
 
@@ -1230,6 +1385,7 @@ impl eframe::App for App {
             recent_files_cleanup: self.recent_files.cleanup,
             recent_files: self.recent_files.to_config_strings(),
             max_file_size_mb: self.max_file_size_bytes.map_or(0, |b| b / (1024 * 1024)),
+            copy_contents_warning_mb: self.copy_contents_warning_bytes / (1024 * 1024),
             session_content_max_kb: self.session_content_max_kb,
             print_show_line_numbers: self.print_show_line_numbers,
             sync_scroll_enabled: self.sync_scroll_enabled,
@@ -1300,6 +1456,9 @@ mod tests {
             session_store: None,
             session_content_max_kb: 10_240,
             max_file_size_bytes: Some(512 * 1024 * 1024),
+            copy_contents_warning_bytes: 5 * 1024 * 1024,
+            pending_copy_contents: None,
+            pending_clipboard_reads: Vec::new(),
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,

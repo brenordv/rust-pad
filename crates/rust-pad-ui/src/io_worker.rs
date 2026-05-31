@@ -32,6 +32,15 @@ pub enum IoRequest {
     },
     /// Write encoded content to a known path.
     SaveFile { path: PathBuf, content: Vec<u8> },
+    /// Read a file off-thread so its contents can be pushed to the system
+    /// clipboard. Distinct from [`IoRequest::ReadFile`] because the response
+    /// handler decodes-and-discards rather than building a `Document`; the
+    /// two paths consume the bytes differently. See plan §3.2 / ADR-020.
+    ReadFileForClipboard {
+        path: PathBuf,
+        /// Maximum file size in bytes. `None` = no limit.
+        max_file_size_bytes: Option<u64>,
+    },
 }
 
 /// A response from a completed background I/O operation.
@@ -60,6 +69,10 @@ pub enum IoResponse {
         /// Human-readable description (e.g. "File is too large (2.0 MB)…").
         message: String,
     },
+    /// Companion to [`IoRequest::ReadFileForClipboard`]. The bytes are
+    /// decoded + binary-checked + pushed to the clipboard on the UI side;
+    /// the worker stays a pure byte mover.
+    ClipboardFileRead { path: PathBuf, bytes: Vec<u8> },
 }
 
 /// Context for a pending save-as operation, stored on the UI side.
@@ -260,6 +273,21 @@ fn process(request: IoRequest) -> IoResponse {
                 path: Some(path),
             },
         },
+        IoRequest::ReadFileForClipboard {
+            path,
+            max_file_size_bytes,
+        } => {
+            if let Some(err) = check_file_size(&path, max_file_size_bytes) {
+                return err;
+            }
+            match std::fs::read(&path) {
+                Ok(bytes) => IoResponse::ClipboardFileRead { path, bytes },
+                Err(e) => IoResponse::Error {
+                    message: format!("Failed to read '{}': {e}", path.display()),
+                    path: Some(path),
+                },
+            }
+        }
     }
 }
 
@@ -573,6 +601,67 @@ mod tests {
                 assert_eq!(p, path);
             }
             other => panic!("Expected FileRead, got {other:?}"),
+        }
+    }
+
+    // ── ReadFileForClipboard ──────────────────────────────────────────
+
+    #[test]
+    fn test_read_for_clipboard_returns_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.txt");
+        std::fs::write(&path, b"clipboard payload").unwrap();
+
+        let worker = IoWorker::new();
+        worker.send(IoRequest::ReadFileForClipboard {
+            path: path.clone(),
+            max_file_size_bytes: None,
+        });
+
+        match poll_blocking(&worker, TEST_TIMEOUT) {
+            Some(IoResponse::ClipboardFileRead { path: p, bytes }) => {
+                assert_eq!(p, path);
+                assert_eq!(bytes, b"clipboard payload");
+            }
+            other => panic!("Expected ClipboardFileRead, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_read_for_clipboard_size_limit_uses_shared_too_large_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(&path, vec![0u8; 1024]).unwrap();
+
+        let worker = IoWorker::new();
+        worker.send(IoRequest::ReadFileForClipboard {
+            path: path.clone(),
+            max_file_size_bytes: Some(100),
+        });
+
+        match poll_blocking(&worker, TEST_TIMEOUT) {
+            Some(IoResponse::FileTooLarge { path: p, message }) => {
+                assert_eq!(p, path);
+                assert!(message.contains("too large"), "got: {message}");
+            }
+            other => panic!("Expected FileTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_read_for_clipboard_missing_file_yields_error() {
+        let worker = IoWorker::new();
+        worker.send(IoRequest::ReadFileForClipboard {
+            path: PathBuf::from("/nonexistent_clip_path_xyz_42"),
+            max_file_size_bytes: None,
+        });
+
+        match poll_blocking(&worker, TEST_TIMEOUT) {
+            Some(IoResponse::Error { path, message }) => {
+                assert!(path.is_some());
+                assert!(message.contains("Failed to read"), "got: {message}");
+            }
+            other => panic!("Expected Error, got {other:?}"),
         }
     }
 }

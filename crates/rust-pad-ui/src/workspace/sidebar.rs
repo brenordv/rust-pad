@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
+use super::menus::{show_directory_context_menu, show_file_context_menu, show_root_context_menu};
 use super::tree::{EntryKind, FolderRoot, TreeEntry};
 use super::watcher::WorkspaceWatcher;
-use crate::app::workspace_ops::generate_unique_name;
 use crate::icons;
 
 /// Minimum sidebar width in pixels.
@@ -17,6 +17,16 @@ const DEFAULT_WIDTH: f32 = 250.0;
 /// Space reserved for toolbar buttons (close, add folder, toggle hidden,
 /// expand-all, collapse-all) in the header row.
 const HEADER_TOOLBAR_RESERVED: f32 = 160.0;
+
+/// Which representation of a path the `CopyPath` action should write to
+/// the clipboard. Mirrors the three submenu items in
+/// `Copy Path > {Name | Full Path | Relative Path}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyPathScope {
+    Name,
+    Full,
+    Relative,
+}
 
 /// Actions the sidebar can request from the main application.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +61,27 @@ pub enum SidebarAction {
     ExpandAll,
     /// Collapse every collapsible entry currently loaded in the tree.
     CollapseAll,
+    /// Copy a file's contents to the system clipboard, gated by the
+    /// configured size-warning threshold. `workspace_root` is the
+    /// `FolderRoot.path` that owns the entry — required by the
+    /// canonical-containment security gate in §3.5 step 1.
+    CopyFileContents {
+        path: PathBuf,
+        workspace_root: PathBuf,
+    },
+    /// Reveal a folder in the OS file explorer (Windows Explorer, macOS
+    /// Finder, `xdg-open` on Linux).
+    OpenInFileExplorer(PathBuf),
+    /// Copy a representation of an entry path to the clipboard.
+    ///
+    /// `root` is the workspace-root path that contains `path`, used to
+    /// compute the relative scope. For root entries `root == path` and the
+    /// relative scope degenerates to the workspace folder name.
+    CopyPath {
+        path: PathBuf,
+        root: PathBuf,
+        scope: CopyPathScope,
+    },
     /// No action.
     None,
 }
@@ -393,28 +424,31 @@ impl WorkspaceSidebar {
                         ))
                     };
                     response.context_menu(|ui| {
-                        if folder_exists {
-                            show_new_entry_menu(ui, &root_path, &mut new_entry_request);
-                            ui.separator();
-                        }
-                        if ui.button("Remove from Workspace").clicked() {
-                            context_action = SidebarAction::RemoveFolder(root_path.clone());
-                            ui.close();
-                        }
+                        show_root_context_menu(
+                            ui,
+                            &root_path,
+                            folder_exists,
+                            &mut context_action,
+                            &mut new_entry_request,
+                        );
                     });
                     response
                 })
                 .body(|ui| {
                     if folder_exists {
+                        let mut ctx = RenderCtx {
+                            action,
+                            new_entry: &mut self.new_entry,
+                            rename_entry: &mut self.rename_entry,
+                            rename_just_confirmed: &mut self.rename_just_confirmed,
+                            workspace_root: &root_path,
+                            show_hidden: self.show_hidden,
+                        };
                         render_entry_list(
                             ui,
                             &root_path,
                             &mut self.tree[root_idx].entries,
-                            action,
-                            &mut self.new_entry,
-                            &mut self.rename_entry,
-                            &mut self.rename_just_confirmed,
-                            self.show_hidden,
+                            &mut ctx,
                         );
                     } else {
                         ui.weak("Folder not found or inaccessible");
@@ -542,30 +576,46 @@ fn render_inline_rename(
     }
 }
 
+/// Mutable rendering context threaded through every recursive call into the
+/// workspace tree. Bundling these fields removes a multi-argument
+/// `#[allow(clippy::too_many_arguments)]` from the rendering helpers and
+/// makes it impossible to thread a stale `workspace_root` by accident.
+///
+/// `new_entry_request` and `rename_request` deliberately stay out of this
+/// struct: they are *outgoing* signals back to the immediate parent
+/// `render_entry_list`, not state inherited by the whole sub-tree.
+pub(crate) struct RenderCtx<'a> {
+    pub action: &'a mut SidebarAction,
+    pub new_entry: &'a mut Option<NewEntryState>,
+    pub rename_entry: &'a mut Option<RenameEntryState>,
+    pub rename_just_confirmed: &'a mut bool,
+    /// The `FolderRoot.path` that owns the subtree currently being rendered.
+    /// Used by the Copy Path > Relative scope and by the Copy Contents
+    /// security gate that verifies a symlinked file does not escape the
+    /// workspace folder it appears under.
+    pub workspace_root: &'a Path,
+    pub show_hidden: bool,
+}
+
 /// Renders a directory tree entry with collapsing header, context menu, and lazy-loaded children.
 ///
 /// `ExpandAll` / `CollapseAll` deliberately do NOT propagate here — they only
 /// flip the workspace-root flags. Cascading expansion through every
 /// recursively rendered directory triggers lazy-loads for the entire reachable
 /// tree on a single frame, which froze the UI on large workspaces.
-#[allow(clippy::too_many_arguments)]
 fn render_directory_entry(
     ui: &mut egui::Ui,
     entry: &mut TreeEntry,
-    action: &mut SidebarAction,
-    new_entry: &mut Option<NewEntryState>,
-    rename_entry: &mut Option<RenameEntryState>,
-    rename_just_confirmed: &mut bool,
+    ctx: &mut RenderCtx<'_>,
     new_entry_request: &mut Option<NewEntryState>,
     rename_request: &mut Option<RenameEntryState>,
-    show_hidden: bool,
 ) {
     let name = entry.name.clone();
     let path = entry.path.clone();
     let expanded = entry.expanded;
     let id = ui.make_persistent_id(("entry", &path));
 
-    let should_force_open = new_entry.as_ref().is_some_and(|ne| ne.parent == path);
+    let should_force_open = ctx.new_entry.as_ref().is_some_and(|ne| ne.parent == path);
 
     let mut cs =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, expanded);
@@ -573,6 +623,8 @@ fn render_directory_entry(
         cs.set_open(true);
     }
 
+    let show_hidden = ctx.show_hidden;
+    let workspace_root = ctx.workspace_root.to_path_buf();
     let (_toggle, header_inner, _body) = cs
         .show_header(ui, |ui| {
             let response = ui
@@ -582,21 +634,15 @@ fn render_directory_entry(
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             response.context_menu(|ui| {
-                show_new_entry_menu(ui, &path, new_entry_request);
-                ui.separator();
-                if ui.button("Rename").clicked() {
-                    *rename_request = Some(RenameEntryState {
-                        original_path: path.clone(),
-                        name: name.clone(),
-                        is_dir: true,
-                        select_on_focus: true,
-                    });
-                    ui.close();
-                }
-                if ui.button("Delete").clicked() {
-                    *action = SidebarAction::DeleteFile(path.clone());
-                    ui.close();
-                }
+                show_directory_context_menu(
+                    ui,
+                    &path,
+                    &name,
+                    &workspace_root,
+                    ctx,
+                    new_entry_request,
+                    rename_request,
+                );
             });
             response
         })
@@ -610,16 +656,7 @@ fn render_directory_entry(
                     entry.children = children;
                 }
             }
-            render_entry_list(
-                ui,
-                &path,
-                &mut entry.children,
-                action,
-                new_entry,
-                rename_entry,
-                rename_just_confirmed,
-                show_hidden,
-            );
+            render_entry_list(ui, &path, &mut entry.children, ctx);
         });
 
     if header_inner.inner.double_clicked() {
@@ -635,37 +672,24 @@ fn render_directory_entry(
         .map_or(expanded, |s| s.is_open());
 }
 
-/// Renders a file tree entry with context menu for open, rename, and delete.
+/// Renders a file tree entry with the §3.1 file-layout context menu.
 fn render_file_entry(
     ui: &mut egui::Ui,
     entry: &TreeEntry,
-    action: &mut SidebarAction,
+    ctx: &mut RenderCtx<'_>,
     rename_request: &mut Option<RenameEntryState>,
 ) {
     let icon = file_icon(&entry.name);
     let response = ui.selectable_label(false, format!("{icon} {}", entry.name));
 
     if response.double_clicked() {
-        *action = SidebarAction::OpenFile(entry.path.clone());
+        *ctx.action = SidebarAction::OpenFile(entry.path.clone());
     }
+    let workspace_root = ctx.workspace_root.to_path_buf();
+    let path = entry.path.clone();
+    let name = entry.name.clone();
     response.context_menu(|ui| {
-        if ui.button("Open").clicked() {
-            *action = SidebarAction::OpenFile(entry.path.clone());
-            ui.close();
-        }
-        if ui.button("Rename").clicked() {
-            *rename_request = Some(RenameEntryState {
-                original_path: entry.path.clone(),
-                name: entry.name.clone(),
-                is_dir: false,
-                select_on_focus: true,
-            });
-            ui.close();
-        }
-        if ui.button("Delete").clicked() {
-            *action = SidebarAction::DeleteFile(entry.path.clone());
-            ui.close();
-        }
+        show_file_context_menu(ui, &path, &name, &workspace_root, ctx, rename_request);
     });
 }
 
@@ -707,29 +731,25 @@ fn render_inline_new_entry_field(
 ///
 /// Works at any nesting depth — directories lazy-load their children on first
 /// expand and cache the result in `TreeEntry.children`.
-#[allow(clippy::too_many_arguments)]
 fn render_entry_list(
     ui: &mut egui::Ui,
     parent_path: &Path,
     entries: &mut [TreeEntry],
-    action: &mut SidebarAction,
-    new_entry: &mut Option<NewEntryState>,
-    rename_entry: &mut Option<RenameEntryState>,
-    rename_just_confirmed: &mut bool,
-    show_hidden: bool,
+    ctx: &mut RenderCtx<'_>,
 ) {
     let mut new_entry_request: Option<NewEntryState> = None;
     let mut rename_request: Option<RenameEntryState> = None;
     let mut clear_rename = false;
 
     for entry in entries.iter_mut() {
-        let is_renaming = rename_entry
+        let is_renaming = ctx
+            .rename_entry
             .as_ref()
             .is_some_and(|r| r.original_path == entry.path);
 
         if is_renaming {
-            if let Some(ref mut state) = rename_entry {
-                if render_inline_rename(ui, state, action, rename_just_confirmed) {
+            if let Some(ref mut state) = ctx.rename_entry {
+                if render_inline_rename(ui, state, ctx.action, ctx.rename_just_confirmed) {
                     clear_rename = true;
                 }
             }
@@ -738,29 +758,19 @@ fn render_entry_list(
 
         match entry.kind {
             EntryKind::Directory => {
-                render_directory_entry(
-                    ui,
-                    entry,
-                    action,
-                    new_entry,
-                    rename_entry,
-                    rename_just_confirmed,
-                    &mut new_entry_request,
-                    &mut rename_request,
-                    show_hidden,
-                );
+                render_directory_entry(ui, entry, ctx, &mut new_entry_request, &mut rename_request);
             }
             EntryKind::File => {
-                render_file_entry(ui, entry, action, &mut rename_request);
+                render_file_entry(ui, entry, ctx, &mut rename_request);
             }
         }
     }
 
     // Inline new entry text field (at the end of the list)
     let mut clear_new = false;
-    if let Some(ref mut state) = new_entry {
+    if let Some(ref mut state) = ctx.new_entry {
         if state.parent.as_path() == parent_path
-            && render_inline_new_entry_field(ui, state, action, rename_just_confirmed)
+            && render_inline_new_entry_field(ui, state, ctx.action, ctx.rename_just_confirmed)
         {
             clear_new = true;
         }
@@ -768,48 +778,18 @@ fn render_entry_list(
 
     // Apply deferred state changes
     if let Some(req) = new_entry_request {
-        *new_entry = Some(req);
-        *rename_entry = None;
+        *ctx.new_entry = Some(req);
+        *ctx.rename_entry = None;
     }
     if let Some(req) = rename_request {
-        *rename_entry = Some(req);
-        *new_entry = None;
+        *ctx.rename_entry = Some(req);
+        *ctx.new_entry = None;
     }
     if clear_rename {
-        *rename_entry = None;
+        *ctx.rename_entry = None;
     }
     if clear_new {
-        *new_entry = None;
-    }
-}
-
-/// Renders "New File..." and "New Folder..." context menu items.
-///
-/// Used in both root folder and subdirectory context menus to avoid duplication.
-fn show_new_entry_menu(
-    ui: &mut egui::Ui,
-    parent: &Path,
-    new_entry_request: &mut Option<NewEntryState>,
-) {
-    if ui.button("New File...").clicked() {
-        let name = generate_unique_name(parent, "new_file.txt", false);
-        *new_entry_request = Some(NewEntryState {
-            parent: parent.to_path_buf(),
-            name,
-            is_dir: false,
-            select_on_focus: true,
-        });
-        ui.close();
-    }
-    if ui.button("New Folder...").clicked() {
-        let name = generate_unique_name(parent, "new_folder", true);
-        *new_entry_request = Some(NewEntryState {
-            parent: parent.to_path_buf(),
-            name,
-            is_dir: true,
-            select_on_focus: true,
-        });
-        ui.close();
+        *ctx.new_entry = None;
     }
 }
 

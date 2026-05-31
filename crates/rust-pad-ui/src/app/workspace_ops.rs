@@ -136,6 +136,37 @@ pub(crate) fn is_valid_simple_name(name: &str) -> bool {
     true
 }
 
+/// Renders the relative representation of `path` against `root`.
+///
+/// * When `path == root` (the user clicked Copy Path > Relative on the
+///   workspace root itself) the result is the root's file name — falling
+///   back to its full display when it has no terminal component.
+/// * When `strip_prefix` fails (path is not under root — should not happen
+///   given the tree only renders descendants, but defensive nonetheless)
+///   the absolute display string is returned and a warning is logged.
+fn render_relative_path(path: &std::path::Path, root: &std::path::Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) => {
+            let rel_str = rel.display().to_string();
+            if rel_str.is_empty() {
+                root.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.display().to_string())
+            } else {
+                rel_str
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                path = ?path,
+                root = ?root,
+                "Copy Path > Relative fell back to absolute path",
+            );
+            path.display().to_string()
+        }
+    }
+}
+
 /// Maximum depth walked when checking for a symlink loop.
 const SYMLINK_LOOP_DEPTH: usize = 64;
 
@@ -616,8 +647,191 @@ impl App {
             SidebarAction::CollapseAll => {
                 self.workspace_sidebar.pending_bulk_collapse = Some(false);
             }
+            SidebarAction::CopyFileContents {
+                path,
+                workspace_root,
+            } => {
+                self.handle_copy_file_contents(&path, &workspace_root);
+            }
+            SidebarAction::OpenInFileExplorer(path) => {
+                self.handle_open_in_file_explorer(&path);
+            }
+            SidebarAction::CopyPath { path, root, scope } => {
+                self.handle_copy_path(&path, &root, scope);
+            }
             SidebarAction::None => {}
         }
+    }
+
+    /// Initiates a "Copy file contents" operation.
+    ///
+    /// Runs the security gates from plan §3.5 step 1 (canonicalize +
+    /// workspace containment + regular-file check), the size guards
+    /// (steps 2-3), and either opens the confirmation dialog (step 4)
+    /// or sends the read request to the worker (step 5).
+    pub(crate) fn handle_copy_file_contents(
+        &mut self,
+        path: &std::path::Path,
+        workspace_root: &std::path::Path,
+    ) {
+        tracing::debug!(
+            path = ?path,
+            workspace_root = ?workspace_root,
+            "Copy Contents requested",
+        );
+
+        // ── Security gate (plan §3.5 step 1) ───────────────────────────
+        let canonical_path = match std::fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    path = ?path,
+                    error = %e,
+                    "[CC01] Copy Contents refused: canonicalize",
+                );
+                crate::problem_log::warn_problem(
+                    "[CC01] Copy Contents refused: could not resolve the file path.",
+                );
+                return;
+            }
+        };
+        let canonical_root = match std::fs::canonicalize(workspace_root) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    root = ?workspace_root,
+                    error = %e,
+                    "[CC01] Copy Contents refused: canonicalize workspace root",
+                );
+                crate::problem_log::warn_problem(
+                    "[CC01] Copy Contents refused: workspace folder is no longer accessible.",
+                );
+                return;
+            }
+        };
+        if !canonical_path.starts_with(&canonical_root) {
+            tracing::warn!(
+                path = ?canonical_path,
+                root = ?canonical_root,
+                "[CC02] Copy Contents refused: outside workspace",
+            );
+            crate::problem_log::warn_problem(
+                "[CC02] Copy Contents refused: target lies outside the workspace folder \
+                 it appears under.",
+            );
+            return;
+        }
+        if !canonical_path.is_file() {
+            tracing::warn!(
+                path = ?canonical_path,
+                "[CC03] Copy Contents refused: not a regular file",
+            );
+            crate::problem_log::warn_problem(
+                "[CC03] Copy Contents refused: target is not a regular file.",
+            );
+            return;
+        }
+
+        // ── Size gates (plan §3.5 steps 2-4) ───────────────────────────
+        let size_bytes = match std::fs::metadata(&canonical_path) {
+            Ok(m) => m.len(),
+            Err(e) => {
+                tracing::warn!(
+                    path = ?canonical_path,
+                    error = %e,
+                    "Copy Contents refused: metadata read failed",
+                );
+                crate::problem_log::warn_problem(&format!(
+                    "Copy Contents refused: could not read file size: {e}"
+                ));
+                return;
+            }
+        };
+        if let Some(max) = self.max_file_size_bytes {
+            if size_bytes > max {
+                let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+                let max_mb = max as f64 / (1024.0 * 1024.0);
+                tracing::warn!(
+                    path = ?canonical_path,
+                    size_bytes,
+                    max,
+                    "[CC04] Copy Contents refused: too large",
+                );
+                crate::problem_log::warn_problem(&format!(
+                    "[CC04] Copy Contents refused: file is {size_mb:.1} MB, exceeds the \
+                     {max_mb:.0} MB hard cap."
+                ));
+                return;
+            }
+        }
+
+        let warn_bytes = self.copy_contents_warning_bytes;
+        let needs_prompt = warn_bytes == 0 || size_bytes > warn_bytes;
+        if needs_prompt {
+            tracing::debug!(
+                path = ?canonical_path,
+                size_bytes,
+                warn_bytes,
+                "Copy Contents prompt shown",
+            );
+            self.pending_copy_contents = Some((canonical_path, size_bytes));
+            return;
+        }
+
+        self.send_copy_contents_read(canonical_path);
+    }
+
+    /// Sends `IoRequest::ReadFileForClipboard` after either the size check
+    /// passed without a prompt, or the user confirmed the prompt.
+    pub(crate) fn send_copy_contents_read(&mut self, canonical_path: std::path::PathBuf) {
+        self.io_activity.pending_reads += 1;
+        self.pending_clipboard_reads.push(canonical_path.clone());
+        self.io_worker
+            .send(crate::io_worker::IoRequest::ReadFileForClipboard {
+                path: canonical_path,
+                max_file_size_bytes: self.max_file_size_bytes,
+            });
+    }
+
+    /// Reveals a directory in the OS file explorer via the `opener` crate.
+    ///
+    /// Defensive `is_dir()` check (R-Sec-4) protects against the path being
+    /// a stale workspace entry or an injected non-filesystem string from
+    /// the persisted workspace store.
+    pub(crate) fn handle_open_in_file_explorer(&mut self, path: &std::path::Path) {
+        tracing::debug!(path = ?path, "Open in File Explorer requested");
+        if !path.is_dir() {
+            tracing::warn!(path = ?path, "Open in File Explorer refused: not a directory");
+            crate::problem_log::warn_problem(
+                "Open in File Explorer refused: target is not a directory.",
+            );
+            return;
+        }
+        if let Err(e) = opener::open(path) {
+            tracing::warn!(path = ?path, error = %e, "Open in File Explorer failed");
+            crate::problem_log::warn_problem(&format!("Open in File Explorer failed: {e}"));
+        }
+    }
+
+    /// Renders the requested representation of `path` and pushes the
+    /// result through the sanitising clipboard helper (plan §3.7 + §3.7.1).
+    pub(crate) fn handle_copy_path(
+        &mut self,
+        path: &std::path::Path,
+        root: &std::path::Path,
+        scope: crate::workspace::sidebar::CopyPathScope,
+    ) {
+        use crate::workspace::sidebar::CopyPathScope;
+        tracing::debug!(path = ?path, root = ?root, scope = ?scope, "Copy Path requested");
+        let text = match scope {
+            CopyPathScope::Name => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            CopyPathScope::Full => path.display().to_string(),
+            CopyPathScope::Relative => render_relative_path(path, root),
+        };
+        let _ = self.copy_text_to_clipboard(&text, super::clipboard::ContentKind::Path);
     }
 
     /// Polls filesystem events and applies them to the sidebar tree.
@@ -1721,5 +1935,237 @@ mod tests {
         app.handle_sidebar_action(SidebarAction::ToggleHiddenFiles);
         assert!(app.workspace_sidebar.show_hidden);
         assert_eq!(app.workspace_sidebar.tree[0].entries.len(), 2);
+    }
+
+    // ── Phase 18: Copy Path / Copy Contents / Open in Explorer ───────
+
+    use crate::workspace::sidebar::CopyPathScope;
+
+    #[test]
+    fn render_relative_path_strips_workspace_prefix() {
+        let root = std::path::Path::new("/proj");
+        let nested = std::path::Path::new("/proj/src/main.rs");
+        let rel = render_relative_path(nested, root);
+        // Output uses OS-native separator (Path::display). Both 'src/main.rs'
+        // and 'src\\main.rs' are accepted depending on the platform.
+        assert!(rel.ends_with("main.rs"));
+        assert!(rel.starts_with("src"));
+    }
+
+    #[test]
+    fn render_relative_path_root_entry_returns_folder_name() {
+        let root = std::path::Path::new("/proj");
+        let rel = render_relative_path(root, root);
+        assert_eq!(rel, "proj");
+    }
+
+    #[test]
+    fn render_relative_path_falls_back_to_absolute_when_outside() {
+        let root = std::path::Path::new("/workspace");
+        let elsewhere = std::path::Path::new("/etc/passwd");
+        let rel = render_relative_path(elsewhere, root);
+        // The fallback is the absolute display string.
+        assert!(rel.contains("etc") && rel.contains("passwd"));
+    }
+
+    #[test]
+    fn handle_copy_path_name_scope_runs_without_panic() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("notes.md");
+        std::fs::write(&file, "hello").unwrap();
+        // Returns no clipboard handle in test_app; we are exercising the
+        // dispatch path and confirming it completes cleanly.
+        app.handle_copy_path(&file, folder.path(), CopyPathScope::Name);
+    }
+
+    #[test]
+    fn handle_copy_path_refuses_control_chars_via_helper() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let weird = folder.path().join("ok.txt");
+        // The Path itself is safe; we are checking that handle_copy_path
+        // is wired through copy_text_to_clipboard which rejects bad input.
+        // Here we feed a hand-crafted output by going via the helper
+        // directly, since file system rules prevent control chars in
+        // filenames on Windows.
+        let written =
+            app.copy_text_to_clipboard("bad\npath", super::super::clipboard::ContentKind::Path);
+        assert!(!written);
+        let _ = weird; // silence unused
+    }
+
+    #[test]
+    fn handle_open_in_file_explorer_refuses_non_directory() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("not_a_dir.txt");
+        std::fs::write(&file, "").unwrap();
+        // Should refuse silently (problem log emits warning). The fact
+        // that it doesn't panic, doesn't actually invoke `opener::open`,
+        // and returns is the contract.
+        app.handle_open_in_file_explorer(&file);
+    }
+
+    #[test]
+    fn copy_contents_below_warning_threshold_sends_worker_request() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("tiny.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        app.copy_contents_warning_bytes = 1024;
+        let pending_reads_before = app.io_activity.pending_reads;
+        app.handle_copy_file_contents(&file, folder.path());
+
+        assert!(app.pending_copy_contents.is_none(), "no prompt expected");
+        assert_eq!(
+            app.io_activity.pending_reads,
+            pending_reads_before + 1,
+            "a worker read was dispatched",
+        );
+        assert_eq!(app.pending_clipboard_reads.len(), 1);
+    }
+
+    #[test]
+    fn copy_contents_at_threshold_boundary_one_byte_under_no_prompt() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("boundary.txt");
+        std::fs::write(&file, "x".repeat(99)).unwrap();
+
+        app.copy_contents_warning_bytes = 100;
+        app.handle_copy_file_contents(&file, folder.path());
+
+        assert!(
+            app.pending_copy_contents.is_none(),
+            "99 bytes is one under the 100-byte threshold; no prompt",
+        );
+    }
+
+    #[test]
+    fn copy_contents_above_threshold_opens_prompt() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("oversize.txt");
+        std::fs::write(&file, "x".repeat(101)).unwrap();
+
+        app.copy_contents_warning_bytes = 100;
+        let pending_reads_before = app.io_activity.pending_reads;
+        app.handle_copy_file_contents(&file, folder.path());
+
+        assert!(app.pending_copy_contents.is_some(), "prompt expected");
+        assert_eq!(
+            app.io_activity.pending_reads, pending_reads_before,
+            "no worker read until user confirms",
+        );
+    }
+
+    #[test]
+    fn copy_contents_above_hard_cap_refused_outright() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("huge.txt");
+        std::fs::write(&file, "x".repeat(200)).unwrap();
+
+        app.max_file_size_bytes = Some(100);
+        app.copy_contents_warning_bytes = 50;
+        app.handle_copy_file_contents(&file, folder.path());
+
+        assert!(app.pending_copy_contents.is_none(), "no prompt");
+        assert_eq!(app.pending_clipboard_reads.len(), 0, "no worker read");
+    }
+
+    #[test]
+    fn copy_contents_zero_warning_threshold_always_prompts() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("tiny2.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        app.copy_contents_warning_bytes = 0;
+        app.handle_copy_file_contents(&file, folder.path());
+
+        assert!(
+            app.pending_copy_contents.is_some(),
+            "0 means always prompt — even a 1-byte file should trigger",
+        );
+    }
+
+    #[test]
+    fn copy_contents_directory_is_refused() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let sub = folder.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+
+        app.handle_copy_file_contents(&sub, folder.path());
+        // Directory is not a regular file → CC03 refusal, no worker, no prompt.
+        assert!(app.pending_copy_contents.is_none());
+        assert_eq!(app.pending_clipboard_reads.len(), 0);
+    }
+
+    #[test]
+    fn copy_contents_nonexistent_path_is_refused() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let missing = folder.path().join("does_not_exist.txt");
+
+        app.handle_copy_file_contents(&missing, folder.path());
+        assert!(app.pending_copy_contents.is_none());
+        assert_eq!(app.pending_clipboard_reads.len(), 0);
+    }
+
+    #[test]
+    fn send_copy_contents_read_tracks_in_flight_path() {
+        let (mut app, _dir) = app_with_workspace();
+        let path = std::path::PathBuf::from("/tmp/something.txt");
+        let pending_reads_before = app.io_activity.pending_reads;
+        app.send_copy_contents_read(path.clone());
+        assert_eq!(app.io_activity.pending_reads, pending_reads_before + 1);
+        assert!(app.pending_clipboard_reads.contains(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_contents_symlink_escaping_workspace_is_refused() {
+        let (mut app, _dir) = app_with_workspace();
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "credentials").unwrap();
+
+        let link = workspace.path().join("link.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        app.handle_copy_file_contents(&link, workspace.path());
+
+        assert!(app.pending_copy_contents.is_none(), "no prompt");
+        assert_eq!(
+            app.pending_clipboard_reads.len(),
+            0,
+            "containment gate must refuse before any worker request",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_contents_symlink_inside_workspace_is_allowed() {
+        let (mut app, _dir) = app_with_workspace();
+        let workspace = tempfile::tempdir().unwrap();
+        let target = workspace.path().join("target.txt");
+        std::fs::write(&target, "ok").unwrap();
+        let link = workspace.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        app.copy_contents_warning_bytes = 1024;
+        app.handle_copy_file_contents(&link, workspace.path());
+
+        assert_eq!(
+            app.pending_clipboard_reads.len(),
+            1,
+            "symlinks inside the workspace pass the containment check",
+        );
     }
 }
