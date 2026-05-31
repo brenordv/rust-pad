@@ -1146,6 +1146,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-phosphor"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb4e4b18e368ff336c8dd2102992e2631b118f29a2164b0d2be9d8889dcd367e"
+dependencies = [
+ "egui",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.34.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3296,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad"
-version = "2.8.1"
+version = "2.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3310,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-config"
-version = "2.8.1"
+version = "2.9.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3325,7 +3334,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-core"
-version = "2.8.1"
+version = "2.9.0"
 dependencies = [
  "anyhow",
  "chardetng",
@@ -3339,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-mod-history"
-version = "2.8.1"
+version = "2.9.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3352,7 +3361,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-ui"
-version = "2.8.1"
+version = "2.9.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3361,6 +3370,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "egui-phosphor",
  "egui_kittest",
  "image",
  "notify",

@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.9.0]
+
+### Changes
+- **Workspace sidebar icon refresh.** Replaced the placeholder emoji glyphs in the workspace tree, sidebar toolbar (close / add / hidden-files toggle / collapse-all / expand-all), workspace-rename context menu, and the inline new-file / new-folder / rename fields with a coherent set of monochrome Phosphor icons. The icons scale with the active text size and recolour with the current theme. The new vocabulary lives in `crates/rust-pad-ui/src/icons.rs` so any future swap is a one-file change.
+
 ## [2.8.1]
 
 ### Added

@@ -239,6 +239,13 @@ impl App {
         // Disable egui's built-in keyboard zoom so Ctrl+/- only affects the editor text
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
+        // Install the Phosphor icon font alongside egui's defaults so that
+        // every constant in `crate::icons` renders at the active text size
+        // and recolours with the active theme. Phase 18 — plan §4.
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        cc.egui_ctx.set_fonts(fonts);
+
         // Migrate config/data from legacy exe-relative paths to platform dirs
         if !args.portable {
             rust_pad_config::paths::migrate_legacy_paths();

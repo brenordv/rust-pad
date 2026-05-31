@@ -6,6 +6,7 @@ use eframe::egui;
 use super::tree::{EntryKind, FolderRoot, TreeEntry};
 use super::watcher::WorkspaceWatcher;
 use crate::app::workspace_ops::generate_unique_name;
+use crate::icons;
 
 /// Minimum sidebar width in pixels.
 const MIN_WIDTH: f32 = 150.0;
@@ -212,19 +213,23 @@ impl WorkspaceSidebar {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .small_button("\u{2715}")
+                    .small_button(icons::X)
                     .on_hover_text("Close workspace")
                     .clicked()
                 {
                     *action = SidebarAction::CloseWorkspace;
                 }
-                if ui.small_button("+").on_hover_text("Add folder").clicked() {
+                if ui
+                    .small_button(icons::PLUS)
+                    .on_hover_text("Add folder")
+                    .clicked()
+                {
                     *action = SidebarAction::AddFolder;
                 }
                 let hidden_label = if self.show_hidden {
-                    "\u{25C9}"
+                    icons::EYE
                 } else {
-                    "\u{25CE}"
+                    icons::EYE_SLASH
                 };
                 let hidden_tooltip = if self.show_hidden {
                     "Hide hidden files"
@@ -239,14 +244,14 @@ impl WorkspaceSidebar {
                     *action = SidebarAction::ToggleHiddenFiles;
                 }
                 if ui
-                    .small_button("\u{25B8}")
+                    .small_button(icons::CARET_DOUBLE_UP)
                     .on_hover_text("Collapse all")
                     .clicked()
                 {
                     *action = SidebarAction::CollapseAll;
                 }
                 if ui
-                    .small_button("\u{25BE}")
+                    .small_button(icons::CARET_DOUBLE_DOWN)
                     .on_hover_text("Expand all")
                     .clicked()
                 {
@@ -311,7 +316,7 @@ impl WorkspaceSidebar {
                     for (ws_id, ws_name) in &self.available_workspaces {
                         let is_active = ws_id == active_id;
                         let label = if is_active {
-                            format!("\u{2713} {ws_name}")
+                            format!("{} {ws_name}", icons::CHECK)
                         } else {
                             ws_name.clone()
                         };
@@ -382,7 +387,10 @@ impl WorkspaceSidebar {
                         )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                     } else {
-                        ui.weak(format!("\u{26A0} {root_name} (unavailable)"))
+                        ui.weak(format!(
+                            "{} {root_name} (unavailable)",
+                            icons::WARNING_CIRCLE
+                        ))
                     };
                     response.context_menu(|ui| {
                         if folder_exists {
@@ -513,7 +521,7 @@ fn render_inline_rename(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let icon = if state.is_dir {
-        "\u{1F4C1}"
+        icons::FOLDER
     } else {
         file_icon(&original_name)
     };
@@ -568,7 +576,10 @@ fn render_directory_entry(
     let (_toggle, header_inner, _body) = cs
         .show_header(ui, |ui| {
             let response = ui
-                .add(egui::Label::new(format!("\u{1F4C1} {name}")).sense(egui::Sense::click()))
+                .add(
+                    egui::Label::new(format!("{} {name}", icons::FOLDER))
+                        .sense(egui::Sense::click()),
+                )
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             response.context_menu(|ui| {
                 show_new_entry_menu(ui, &path, new_entry_request);
@@ -667,9 +678,9 @@ fn render_inline_new_entry_field(
     rename_just_confirmed: &mut bool,
 ) -> bool {
     let icon = if state.is_dir {
-        "\u{1F4C1}"
+        icons::FOLDER_PLUS
     } else {
-        "\u{1F4C4}"
+        icons::FILE_PLUS
     };
     match render_inline_entry_field(
         ui,
@@ -821,16 +832,16 @@ fn select_stem_in_text_edit(ctx: &egui::Context, widget_id: egui::Id, name: &str
     }
 }
 
-/// Returns a simple text icon based on file extension.
+/// Returns a Phosphor icon constant for a filename based on its extension.
 fn file_icon(name: &str) -> &'static str {
     let ext = name.rsplit('.').next().unwrap_or("");
     match ext.to_lowercase().as_str() {
-        "rs" => "\u{1F9E0}",
-        "toml" | "yaml" | "yml" | "json" | "xml" => "\u{2699}",
-        "md" | "txt" | "log" => "\u{1F4DD}",
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" => "\u{1F5BC}",
-        "lock" => "\u{1F512}",
-        _ => "\u{1F4C4}",
+        "rs" => icons::FILE_CODE,
+        "toml" | "yaml" | "yml" | "json" | "xml" => icons::GEAR,
+        "md" | "txt" | "log" => icons::FILE_TEXT,
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" => icons::FILE_IMAGE,
+        "lock" => icons::LOCK,
+        _ => icons::FILE,
     }
 }
 
@@ -956,12 +967,12 @@ mod tests {
 
     #[test]
     fn test_file_icon_known_extensions() {
-        assert_eq!(file_icon("main.rs"), "\u{1F9E0}");
-        assert_eq!(file_icon("Cargo.toml"), "\u{2699}");
-        assert_eq!(file_icon("README.md"), "\u{1F4DD}");
-        assert_eq!(file_icon("logo.png"), "\u{1F5BC}");
-        assert_eq!(file_icon("Cargo.lock"), "\u{1F512}");
-        assert_eq!(file_icon("unknown.xyz"), "\u{1F4C4}");
+        assert_eq!(file_icon("main.rs"), icons::FILE_CODE);
+        assert_eq!(file_icon("Cargo.toml"), icons::GEAR);
+        assert_eq!(file_icon("README.md"), icons::FILE_TEXT);
+        assert_eq!(file_icon("logo.png"), icons::FILE_IMAGE);
+        assert_eq!(file_icon("Cargo.lock"), icons::LOCK);
+        assert_eq!(file_icon("unknown.xyz"), icons::FILE);
     }
 
     #[test]
@@ -1025,15 +1036,15 @@ mod tests {
 
     #[test]
     fn test_file_icon_case_insensitive() {
-        assert_eq!(file_icon("main.RS"), "\u{1F9E0}");
-        assert_eq!(file_icon("config.TOML"), "\u{2699}");
-        assert_eq!(file_icon("image.PNG"), "\u{1F5BC}");
+        assert_eq!(file_icon("main.RS"), icons::FILE_CODE);
+        assert_eq!(file_icon("config.TOML"), icons::GEAR);
+        assert_eq!(file_icon("image.PNG"), icons::FILE_IMAGE);
     }
 
     #[test]
     fn test_file_icon_no_extension() {
         // File with no extension should return default icon
-        assert_eq!(file_icon("Makefile"), "\u{1F4C4}");
+        assert_eq!(file_icon("Makefile"), icons::FILE);
     }
 
     #[test]
@@ -1165,25 +1176,25 @@ mod tests {
 
     #[test]
     fn test_file_icon_all_image_types() {
-        assert_eq!(file_icon("photo.jpg"), "\u{1F5BC}");
-        assert_eq!(file_icon("photo.jpeg"), "\u{1F5BC}");
-        assert_eq!(file_icon("animation.gif"), "\u{1F5BC}");
-        assert_eq!(file_icon("vector.svg"), "\u{1F5BC}");
-        assert_eq!(file_icon("favicon.ico"), "\u{1F5BC}");
+        assert_eq!(file_icon("photo.jpg"), icons::FILE_IMAGE);
+        assert_eq!(file_icon("photo.jpeg"), icons::FILE_IMAGE);
+        assert_eq!(file_icon("animation.gif"), icons::FILE_IMAGE);
+        assert_eq!(file_icon("vector.svg"), icons::FILE_IMAGE);
+        assert_eq!(file_icon("favicon.ico"), icons::FILE_IMAGE);
     }
 
     #[test]
     fn test_file_icon_config_types() {
-        assert_eq!(file_icon("config.yaml"), "\u{2699}");
-        assert_eq!(file_icon("config.yml"), "\u{2699}");
-        assert_eq!(file_icon("data.json"), "\u{2699}");
-        assert_eq!(file_icon("pom.xml"), "\u{2699}");
+        assert_eq!(file_icon("config.yaml"), icons::GEAR);
+        assert_eq!(file_icon("config.yml"), icons::GEAR);
+        assert_eq!(file_icon("data.json"), icons::GEAR);
+        assert_eq!(file_icon("pom.xml"), icons::GEAR);
     }
 
     #[test]
     fn test_file_icon_text_types() {
-        assert_eq!(file_icon("notes.txt"), "\u{1F4DD}");
-        assert_eq!(file_icon("app.log"), "\u{1F4DD}");
+        assert_eq!(file_icon("notes.txt"), icons::FILE_TEXT);
+        assert_eq!(file_icon("app.log"), icons::FILE_TEXT);
     }
 
     #[test]
