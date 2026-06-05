@@ -18,10 +18,9 @@ use crate::app::workspace_ops::is_valid_simple_name;
 /// * **Paths** are intended to be pasted into shells, file dialogs, or
 ///   bookmark bars. Any control character (CR, LF, TAB, NUL, ANSI escape,
 ///   DEL) inside a path opens the Trojan-filename attack class (CVE-2017-
-///   12424 lineage). Refuse outright with a `[CP01]` problem-log entry —
-///   see plan §3.7.1 / ADR-021.
+///   12424 lineage). Refuse outright with a `[CP01]` problem-log entry.
 /// * **File content** legitimately contains `\n`, `\t`, `\r`. Only refuse
-///   on `\0` (already filtered upstream by §3.5 step 6.4 decode check), as
+///   on `\0` (already filtered upstream by the decode step), as
 ///   belt-and-suspenders defence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContentKind {
@@ -38,6 +37,17 @@ pub(crate) enum ContentKind {
 fn is_path_control_char(ch: char) -> bool {
     let code = ch as u32;
     code < 0x20 || code == 0x7F || (0x80..=0x9F).contains(&code)
+}
+
+/// Scans `s` for the first character that fails [`is_path_control_char`]
+/// and returns its Unicode codepoint, or `None` if `s` is clean. Sole
+/// source of truth used by the [`copy_text_to_clipboard`] rejection
+/// branch so the structured-log line can report the actual offending
+/// codepoint without re-scanning the string twice.
+pub(crate) fn first_path_control_char(s: &str) -> Option<u32> {
+    s.chars()
+        .find(|c| is_path_control_char(*c))
+        .map(|c| c as u32)
 }
 
 /// Returns `true` if `text` contains any Unicode bidirectional override
@@ -83,22 +93,31 @@ impl App {
     /// ## sanitization rules
     /// * `ContentKind::Path` — refuses if `text` contains any C0 control
     ///   character, DEL, or any C1 control. Emits `[CP01]` to the problem
-    ///   log on refusal. See plan §3.7.1 / ADR-021.
+    ///   log on refusal.
     /// * `ContentKind::FileContent` — refuses only on NUL (`\0`). Legitimate
     ///   file content can carry `\n`/`\t`/`\r` and must reach the clipboard
-    ///   intact. The §3.5 decode step already filters NUL upstream, so a
+    ///   intact. The decode step already filters NUL upstream, so a
     ///   refusal here means the upstream check was bypassed (defence in
     ///   depth).
     pub(crate) fn copy_text_to_clipboard(&mut self, text: &str, kind: ContentKind) -> bool {
         match kind {
             ContentKind::Path => {
-                if text.is_empty() || text.chars().any(is_path_control_char) {
+                if text.is_empty() {
+                    crate::problem_log::warn_problem(
+                        "[CP01] Path contains control characters that could be exploited \
+                         if pasted into a shell. Copy refused.",
+                    );
+                    tracing::warn!(chars = 0, "Copy Path refused: empty input");
+                    return false;
+                }
+                if let Some(cp) = first_path_control_char(text) {
                     crate::problem_log::warn_problem(
                         "[CP01] Path contains control characters that could be exploited \
                          if pasted into a shell. Copy refused.",
                     );
                     tracing::warn!(
                         chars = text.chars().count(),
+                        first_offending_codepoint = %format!("U+{cp:04X}"),
                         "Copy Path refused: control characters",
                     );
                     return false;
@@ -285,6 +304,22 @@ mod tests {
                 "U+{code:04X} should be classified as a control character",
             );
         }
+    }
+
+    #[test]
+    fn first_path_control_char_returns_none_for_clean_string() {
+        assert!(first_path_control_char("").is_none());
+        assert!(first_path_control_char("hello world").is_none());
+        assert!(first_path_control_char("/home/user/notes.md").is_none());
+        assert!(first_path_control_char("résumé.txt").is_none());
+    }
+
+    #[test]
+    fn first_path_control_char_returns_first_offender() {
+        // First codepoint of the rejection in a multi-bad string.
+        assert_eq!(first_path_control_char("safe\nthen\rtab"), Some(0x0A));
+        assert_eq!(first_path_control_char("a\u{007F}b\u{0085}c"), Some(0x7F));
+        assert_eq!(first_path_control_char("\0null first"), Some(0x00));
     }
 
     #[test]

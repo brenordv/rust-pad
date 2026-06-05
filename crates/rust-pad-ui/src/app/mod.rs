@@ -254,7 +254,7 @@ impl App {
 
         // Install the Phosphor icon font alongside egui's defaults so that
         // every constant in `crate::icons` renders at the active text size
-        // and recolours with the active theme. Phase 18 — plan §4.
+        // and recolours with the active theme.
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
@@ -860,7 +860,7 @@ impl App {
     }
 
     /// Completes the Copy Contents pipeline once the worker has handed back
-    /// the file bytes. Implements §3.5 steps 6.1–7:
+    /// the file bytes:
     ///
     /// * encoding detection + decode (`encoding::detect_encoding` /
     ///   `encoding::decode_bytes`),
@@ -928,8 +928,8 @@ impl App {
     /// users can have a pending "open file too large" prompt and a
     /// "copy contents too large" prompt at the same time.
     ///
-    /// Body content per plan §3.5 step 4 + R-Sec-1/R-Sec-2: canonical
-    /// path, size in MB, clipboard-persistence caveat, Cancel/Copy buttons.
+    /// Body content: canonical path, size in MB, clipboard-persistence
+    /// caveat, Cancel/Copy buttons.
     fn show_confirm_large_copy_dialog(&mut self, ctx: &egui::Context) {
         let Some((path, size_bytes)) = self.pending_copy_contents.clone() else {
             return;
@@ -944,9 +944,10 @@ impl App {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
-                ui.label(format!("Copy {size_mb:.1} MB from"));
+                ui.label(format!(
+                    "Copy {size_mb:.1} MB to the system clipboard from:"
+                ));
                 ui.monospace(path.display().to_string());
-                ui.label("to the system clipboard?");
                 ui.add_space(4.0);
                 ui.weak(
                     "Clipboard contents may be retained by the OS (e.g., Windows \
@@ -5052,12 +5053,21 @@ mod tests {
 
     #[test]
     fn test_refresh_problem_count_without_store() {
+        // Originally asserted `problems_unread == 0` on the assumption that
+        // the global store was never initialised inside the test binary.
+        // The `complete_copy_contents_*` tests now call
+        // `problem_log::init_for_tests`, so a parallel test may have
+        // populated the store. The contract under test is simply that
+        // `refresh_problem_count` reads the count without panicking and
+        // overwrites the stale `problems_unread = 99` to whatever the
+        // store reports.
         let mut app = test_app();
         app.problems_unread = 99;
-        // Global store is not initialized in tests, so refresh should
-        // set count to 0 (the OnceLock is empty).
         app.refresh_problem_count();
-        assert_eq!(app.problems_unread, 0);
+        assert!(
+            app.problems_unread < 99,
+            "refresh must overwrite the stale sentinel (99) with the live count",
+        );
     }
 
     #[test]
@@ -5065,5 +5075,106 @@ mod tests {
         let app = test_app();
         assert!(!app.problems_open);
         assert_eq!(app.problems_unread, 0);
+    }
+
+    // ── complete_copy_contents direct tests ────────────────────────────
+    //
+    // The global problem-log singleton is a process-wide OnceLock, so we
+    // serialise these four tests on a dedicated mutex (no serial_test
+    // dep) and use snapshot/records_since to filter out noise from any
+    // other tests in the same binary. `init_for_tests` is idempotent —
+    // first call wins, later calls reuse the same temp-backed store.
+
+    use std::sync::Mutex;
+    static COPY_CONTENTS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn complete_copy_contents_plain_ascii_emits_no_problem_codes() {
+        let _g = COPY_CONTENTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::problem_log::init_for_tests();
+
+        let mut app = test_app();
+        let baseline = crate::problem_log::snapshot_record_count();
+        app.complete_copy_contents(std::path::Path::new("/tmp/test.txt"), b"hello world\n");
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            !new_records
+                .iter()
+                .any(|r| r.message.contains("[CC05]") || r.message.contains("[CC06]")),
+            "plain ASCII content must not emit [CC05] or [CC06], got: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn complete_copy_contents_nul_byte_emits_cc05() {
+        let _g = COPY_CONTENTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::problem_log::init_for_tests();
+
+        let mut app = test_app();
+        let baseline = crate::problem_log::snapshot_record_count();
+        // UTF-8 string that decodes cleanly but contains an embedded NUL
+        // — exercises the post-decode NUL gate in `complete_copy_contents`.
+        app.complete_copy_contents(std::path::Path::new("/tmp/nul.bin"), b"head\0tail");
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            new_records.iter().any(|r| r.message.contains("[CC05]")),
+            "embedded NUL must emit [CC05]; got: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn complete_copy_contents_bidi_override_emits_cc06_and_still_copies() {
+        let _g = COPY_CONTENTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::problem_log::init_for_tests();
+
+        let mut app = test_app();
+        let baseline = crate::problem_log::snapshot_record_count();
+        // U+202E RIGHT-TO-LEFT OVERRIDE — Trojan-Source class.
+        let bytes = "safe\u{202E}evil".as_bytes();
+        app.complete_copy_contents(std::path::Path::new("/tmp/bidi.txt"), bytes);
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            new_records.iter().any(|r| r.message.contains("[CC06]")),
+            "bidi override must emit [CC06]; got: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+        // [CC05] would mean we refused to copy — must NOT be present.
+        assert!(
+            !new_records.iter().any(|r| r.message.contains("[CC05]")),
+            "bidi override is a notice, not a refusal; [CC05] must not appear",
+        );
+    }
+
+    #[test]
+    fn complete_copy_contents_invalid_utf8_emits_cc05() {
+        let _g = COPY_CONTENTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::problem_log::init_for_tests();
+
+        let mut app = test_app();
+        let baseline = crate::problem_log::snapshot_record_count();
+        // chardetng on this byte sequence will not produce valid UTF-8
+        // for the detected encoding (and even if it decodes, none of the
+        // common encodings produce safe text). The decode error or the
+        // post-decode NUL gate must surface as [CC05].
+        // UTF-16 LE BOM followed by an odd byte count — decode_bytes returns
+        // a hard error (cannot pair the remaining byte), which the decode
+        // gate at line 884 translates to a [CC05] refusal.
+        app.complete_copy_contents(std::path::Path::new("/tmp/binary.bin"), b"\xFF\xFE\xFD");
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            new_records.iter().any(|r| r.message.contains("[CC05]")),
+            "binary input must emit [CC05]; got: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
     }
 }

@@ -167,6 +167,21 @@ fn render_relative_path(path: &std::path::Path, root: &std::path::Path) -> Strin
     }
 }
 
+/// Outcome of size-cap evaluation in the Copy-Contents flow.
+///
+/// Distinguishes the three terminal states the caller needs to log:
+/// hard-cap refusal, dialog-now-pending, and read-dispatched. The
+/// problem-log entry (when applicable) is emitted inside the helper,
+/// not the caller — keeping the variants pure markers for tracing.
+pub(crate) enum CopyContentsDecision {
+    /// `[CC04]` hard-cap refusal — problem-log already emitted.
+    Refused,
+    /// Size exceeds soft warning; the dialog is now pending.
+    NeedsPrompt,
+    /// Read request dispatched to the IO worker.
+    Dispatched,
+}
+
 /// Maximum depth walked when checking for a symlink loop.
 const SYMLINK_LOOP_DEPTH: usize = 64;
 
@@ -565,6 +580,9 @@ impl App {
 
     /// Renames a file or folder in the workspace.
     pub(crate) fn rename_entry_in_workspace(&mut self, old_path: &Path, new_name: &str) {
+        // TODO(security): reject Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9).
+        // TODO(security): handle Windows trailing dots/spaces stripped silently by NTFS.
+        // TODO(security): canonicalize the post-rename path and re-check workspace containment.
         if !is_valid_simple_name(new_name) {
             crate::problem_log::warn_problem(&format!(
                 "Name '{new_name}' rejected: contains invalid characters or path separators"
@@ -665,22 +683,58 @@ impl App {
 
     /// Initiates a "Copy file contents" operation.
     ///
-    /// Runs the security gates from plan §3.5 step 1 (canonicalize +
-    /// workspace containment + regular-file check), the size guards
-    /// (steps 2-3), and either opens the confirmation dialog (step 4)
-    /// or sends the read request to the worker (step 5).
+    /// Runs the security gates (canonicalize + workspace containment +
+    /// regular-file check) and the size guards, then either opens the
+    /// confirmation dialog or sends the read request to the worker.
     pub(crate) fn handle_copy_file_contents(
         &mut self,
         path: &std::path::Path,
         workspace_root: &std::path::Path,
     ) {
+        // SAFETY/TOCTOU: `canonical_path` is captured before the confirmation dialog
+        // and consumed by the worker after the user clicks Copy. An attacker with
+        // write access to the parent directory can replace the entry (symlink,
+        // hardlink, or unlink+create) in that window; `std::fs::read` in the worker
+        // will follow the new entry. Closing this requires holding an open fd
+        // across the dialog. `[CC02]` containment is NOT re-checked post-read.
         tracing::debug!(
             path = ?path,
             workspace_root = ?workspace_root,
             "Copy Contents requested",
         );
+        let Some(canonical) = self.security_gate_for_copy_contents(path, workspace_root) else {
+            return;
+        };
+        // SAFETY: enforce_size_caps_and_dispatch consumes the canonical_path
+        // returned by security_gate_for_copy_contents; never re-canonicalize.
+        match self.enforce_size_caps_and_dispatch(canonical) {
+            CopyContentsDecision::Refused => {
+                tracing::debug!("Copy Contents refused at size cap");
+            }
+            CopyContentsDecision::NeedsPrompt => {
+                tracing::debug!("Copy Contents awaiting user confirm");
+            }
+            CopyContentsDecision::Dispatched => {
+                tracing::debug!("Copy Contents dispatched to worker");
+            }
+        }
+    }
 
-        // ── Security gate (plan §3.5 step 1) ───────────────────────────
+    /// Runs the `[CC01]` / `[CC02]` / `[CC03]` security gates — canonicalize
+    /// the path and the workspace root, verify containment, and require a
+    /// regular file.
+    ///
+    /// Returns `Some(canonical_path)` on success; on refusal returns `None`
+    /// after recording the rejection to both the structured log and the
+    /// user-facing problem log. The caller MUST forward the returned path
+    /// to [`Self::enforce_size_caps_and_dispatch`] without re-canonicalising
+    /// it (would re-introduce the TOCTOU window noted on
+    /// `handle_copy_file_contents`).
+    pub(crate) fn security_gate_for_copy_contents(
+        &mut self,
+        path: &std::path::Path,
+        workspace_root: &std::path::Path,
+    ) -> Option<std::path::PathBuf> {
         let canonical_path = match std::fs::canonicalize(path) {
             Ok(p) => p,
             Err(e) => {
@@ -692,7 +746,7 @@ impl App {
                 crate::problem_log::warn_problem(
                     "[CC01] Copy Contents refused: could not resolve the file path.",
                 );
-                return;
+                return None;
             }
         };
         let canonical_root = match std::fs::canonicalize(workspace_root) {
@@ -706,7 +760,7 @@ impl App {
                 crate::problem_log::warn_problem(
                     "[CC01] Copy Contents refused: workspace folder is no longer accessible.",
                 );
-                return;
+                return None;
             }
         };
         if !canonical_path.starts_with(&canonical_root) {
@@ -719,7 +773,7 @@ impl App {
                 "[CC02] Copy Contents refused: target lies outside the workspace folder \
                  it appears under.",
             );
-            return;
+            return None;
         }
         if !canonical_path.is_file() {
             tracing::warn!(
@@ -729,10 +783,21 @@ impl App {
             crate::problem_log::warn_problem(
                 "[CC03] Copy Contents refused: target is not a regular file.",
             );
-            return;
+            return None;
         }
+        Some(canonical_path)
+    }
 
-        // ── Size gates (plan §3.5 steps 2-4) ───────────────────────────
+    /// Evaluates the size guards against the already-canonicalised file
+    /// referenced by `canonical_path`. Takes the
+    /// `PathBuf` by move so callers cannot accidentally pass a non-canonical
+    /// path back through this function. Either records the `[CC04]` refusal,
+    /// pushes the confirmation prompt, or dispatches the worker read; the
+    /// return value reports which branch fired so the caller can log it.
+    pub(crate) fn enforce_size_caps_and_dispatch(
+        &mut self,
+        canonical_path: std::path::PathBuf,
+    ) -> CopyContentsDecision {
         let size_bytes = match std::fs::metadata(&canonical_path) {
             Ok(m) => m.len(),
             Err(e) => {
@@ -744,7 +809,7 @@ impl App {
                 crate::problem_log::warn_problem(&format!(
                     "Copy Contents refused: could not read file size: {e}"
                 ));
-                return;
+                return CopyContentsDecision::Refused;
             }
         };
         if let Some(max) = self.max_file_size_bytes {
@@ -761,7 +826,7 @@ impl App {
                     "[CC04] Copy Contents refused: file is {size_mb:.1} MB, exceeds the \
                      {max_mb:.0} MB hard cap."
                 ));
-                return;
+                return CopyContentsDecision::Refused;
             }
         }
 
@@ -775,10 +840,11 @@ impl App {
                 "Copy Contents prompt shown",
             );
             self.pending_copy_contents = Some((canonical_path, size_bytes));
-            return;
+            return CopyContentsDecision::NeedsPrompt;
         }
 
         self.send_copy_contents_read(canonical_path);
+        CopyContentsDecision::Dispatched
     }
 
     /// Sends `IoRequest::ReadFileForClipboard` after either the size check
@@ -795,9 +861,9 @@ impl App {
 
     /// Reveals a directory in the OS file explorer via the `opener` crate.
     ///
-    /// Defensive `is_dir()` check (R-Sec-4) protects against the path being
-    /// a stale workspace entry or an injected non-filesystem string from
-    /// the persisted workspace store.
+    /// Defensive `is_dir()` check protects against the path being a stale
+    /// workspace entry or an injected non-filesystem string from the
+    /// persisted workspace store.
     pub(crate) fn handle_open_in_file_explorer(&mut self, path: &std::path::Path) {
         tracing::debug!(path = ?path, "Open in File Explorer requested");
         if !path.is_dir() {
@@ -814,7 +880,7 @@ impl App {
     }
 
     /// Renders the requested representation of `path` and pushes the
-    /// result through the sanitising clipboard helper (plan §3.7 + §3.7.1).
+    /// result through the sanitising clipboard helper.
     pub(crate) fn handle_copy_path(
         &mut self,
         path: &std::path::Path,
@@ -898,6 +964,32 @@ impl App {
 mod tests {
     use super::super::tests::app_with_workspace;
     use super::*;
+
+    /// Serialises the gate tests that assert against the global problem-log
+    /// singleton, so a concurrent test cannot shift the `records_since`
+    /// window between baseline capture and the assertion.
+    static GATE_LOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Asserts that `body` causes exactly one new problem-log record whose
+    /// message carries `expected_code` (e.g. `"[CC01]"`). Returns `body`'s
+    /// value so callers can keep asserting on the gate result.
+    fn assert_emits_problem_code<T>(expected_code: &str, body: impl FnOnce() -> T) -> T {
+        let _guard = GATE_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::problem_log::init_for_tests();
+        let baseline = crate::problem_log::snapshot_record_count();
+        let result = body();
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            new_records
+                .iter()
+                .any(|r| r.message.contains(expected_code)),
+            "expected a problem-log record containing {expected_code}, saw: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+        result
+    }
 
     fn make_entry(name: &str) -> WorkspaceEntry {
         WorkspaceEntry {
@@ -1937,7 +2029,7 @@ mod tests {
         assert_eq!(app.workspace_sidebar.tree[0].entries.len(), 2);
     }
 
-    // ── Phase 18: Copy Path / Copy Contents / Open in Explorer ───────
+    // ── Copy Path / Copy Contents / Open in Explorer ───────
 
     use crate::workspace::sidebar::CopyPathScope;
 
@@ -2167,5 +2259,122 @@ mod tests {
             1,
             "symlinks inside the workspace pass the containment check",
         );
+    }
+
+    // ── security_gate_for_copy_contents direct tests ──────────────────
+
+    #[test]
+    fn security_gate_for_copy_contents_returns_none_for_non_existent_path() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let missing = folder.path().join("missing.txt");
+
+        // [CC01] is the canonicalize-failure code emitted for a missing path.
+        let result = assert_emits_problem_code("[CC01]", || {
+            app.security_gate_for_copy_contents(&missing, folder.path())
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn security_gate_for_copy_contents_returns_none_for_directory() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let sub = folder.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+
+        // [CC03] — refused because it is not a regular file.
+        let result = assert_emits_problem_code("[CC03]", || {
+            app.security_gate_for_copy_contents(&sub, folder.path())
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn security_gate_for_copy_contents_returns_none_for_path_outside_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("not_in_workspace.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        // [CC02] — outside workspace containment.
+        let result = assert_emits_problem_code("[CC02]", || {
+            app.security_gate_for_copy_contents(&file, workspace.path())
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn security_gate_for_copy_contents_returns_some_for_valid_file() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("ok.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let result = app.security_gate_for_copy_contents(&file, folder.path());
+        let canonical = result.expect("gate must succeed for valid in-workspace file");
+        assert!(canonical.is_absolute());
+        assert!(canonical.is_file());
+        // The returned path is canonicalised — must equal what fs::canonicalize sees.
+        assert_eq!(canonical, std::fs::canonicalize(&file).unwrap());
+    }
+
+    // ── enforce_size_caps_and_dispatch direct tests ───────────────────
+
+    #[test]
+    fn enforce_size_caps_and_dispatch_refuses_oversize() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("big.txt");
+        std::fs::write(&file, "x".repeat(200)).unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+
+        app.max_file_size_bytes = Some(100);
+        app.copy_contents_warning_bytes = 50;
+        // [CC04] — hard-cap refusal for an oversize file.
+        let decision =
+            assert_emits_problem_code("[CC04]", || app.enforce_size_caps_and_dispatch(canonical));
+        assert!(matches!(decision, CopyContentsDecision::Refused));
+        assert!(app.pending_copy_contents.is_none());
+        assert_eq!(app.pending_clipboard_reads.len(), 0);
+    }
+
+    #[test]
+    fn enforce_size_caps_and_dispatch_prompts_above_warning() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("warn.txt");
+        std::fs::write(&file, "x".repeat(500)).unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+
+        app.max_file_size_bytes = Some(10_000);
+        app.copy_contents_warning_bytes = 100;
+        let decision = app.enforce_size_caps_and_dispatch(canonical);
+        assert!(matches!(decision, CopyContentsDecision::NeedsPrompt));
+        assert!(app.pending_copy_contents.is_some());
+        assert_eq!(
+            app.pending_clipboard_reads.len(),
+            0,
+            "no worker read until confirm"
+        );
+    }
+
+    #[test]
+    fn enforce_size_caps_and_dispatch_dispatches_below_warning() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("empty.txt");
+        std::fs::write(&file, "").unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+
+        app.max_file_size_bytes = Some(10_000);
+        app.copy_contents_warning_bytes = 1024;
+        let pending_reads_before = app.io_activity.pending_reads;
+        let decision = app.enforce_size_caps_and_dispatch(canonical);
+        assert!(matches!(decision, CopyContentsDecision::Dispatched));
+        assert!(app.pending_copy_contents.is_none());
+        assert_eq!(app.pending_clipboard_reads.len(), 1);
+        assert_eq!(app.io_activity.pending_reads, pending_reads_before + 1);
     }
 }

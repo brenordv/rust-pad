@@ -2,7 +2,7 @@
 //!
 //! The three top-level builders (`show_file_context_menu`,
 //! `show_directory_context_menu`, `show_root_context_menu`) produce the
-//! per-entry menu layouts described in plan §3.1. They mutate
+//! per-entry menu layouts. They mutate
 //! [`RenderCtx::action`] and the outgoing `*_request` slots used by
 //! `render_entry_list`. Keeping them out of `sidebar.rs` keeps that file
 //! focused on rendering geometry; this module owns the menu *vocabulary*.
@@ -82,7 +82,7 @@ pub(crate) fn show_copy_path_submenu(
 }
 
 /// Builds the context menu shown when right-clicking a file entry in the
-/// tree (plan §3.1, file layout).
+/// tree.
 pub(crate) fn show_file_context_menu(
     ui: &mut egui::Ui,
     file_path: &Path,
@@ -121,7 +121,7 @@ pub(crate) fn show_file_context_menu(
 }
 
 /// Builds the context menu shown when right-clicking a directory entry in
-/// the tree (plan §3.1, directory layout).
+/// the tree.
 pub(crate) fn show_directory_context_menu(
     ui: &mut egui::Ui,
     dir_path: &Path,
@@ -156,7 +156,7 @@ pub(crate) fn show_directory_context_menu(
 }
 
 /// Builds the context menu shown when right-clicking a workspace-root
-/// header (plan §3.1, root layout). The root is its own `workspace_root`,
+/// header. The root is its own `workspace_root`,
 /// so the relative-path scope degenerates to the folder name.
 ///
 /// Returns through the two output parameters because the existing

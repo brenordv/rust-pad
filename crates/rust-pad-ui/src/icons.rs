@@ -5,9 +5,8 @@
 //! Phosphor codepoint(s) for the icon, sourced from the `egui-phosphor` crate
 //! (Regular weight). Going through this module instead of inlining codepoints
 //! at call sites means we can swap icon families or weights in one place if
-//! we ever need to.
-//!
-//! See `plan §4.3` (`.task-manager/phase-18-plan.md`) for the mapping table.
+//! we ever need to. The constants defined below are the icon-name → codepoint
+//! mapping table.
 //!
 //! ## Why constants, not an enum
 //!

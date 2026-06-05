@@ -35,7 +35,7 @@ pub enum IoRequest {
     /// Read a file off-thread so its contents can be pushed to the system
     /// clipboard. Distinct from [`IoRequest::ReadFile`] because the response
     /// handler decodes-and-discards rather than building a `Document`; the
-    /// two paths consume the bytes differently. See plan §3.2 / ADR-020.
+    /// two paths consume the bytes differently.
     ReadFileForClipboard {
         path: PathBuf,
         /// Maximum file size in bytes. `None` = no limit.
