@@ -3193,7 +3193,7 @@ mod tests {
         assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
     }
 
-    // ── Main-menu line ops auto-scope (ADR-005) ─────────────────────
+    // ── Main-menu line ops auto-scope ───────────────────────────────
 
     use super::editing::current_op_scope;
 
@@ -3322,7 +3322,7 @@ mod tests {
         );
     }
 
-    // ── Join Lines (ADR-006) ────────────────────────────────────────
+    // ── Join Lines ──────────────────────────────────────────────────
 
     #[test]
     fn join_lines_main_menu_no_selection_joins_whole_doc() {

@@ -1,6 +1,6 @@
 /// Per-file view-state persistence: stores the scroll position and
 /// cursor coordinates of every file the user has opened so they can be
-/// restored on re-open (Bug 17.3 / phase-17-brief item 3).
+/// restored on re-open.
 ///
 /// The store is keyed by a canonical path string (see
 /// [`crate::paths::canonical_path_key`]). Canonicalization is performed

@@ -495,9 +495,9 @@ impl App {
 
         // Handle Escape cancellation before the render loop so the drag state
         // is cleared before we read it for visual feedback. Vertical pointer
-        // departure is deliberately NOT treated as cancel — see the Phase 3
-        // spec (accessibility: users who cannot hold a straight horizontal
-        // line must not lose an in-progress drag).
+        // departure is deliberately NOT treated as cancel, for accessibility:
+        // users who cannot hold a straight horizontal line must not lose an
+        // in-progress drag.
         if self.tab_drag.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.tab_drag = None;
         }

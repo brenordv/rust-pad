@@ -1037,7 +1037,7 @@ fn test_render_document_with_many_lines_for_gutter_width() {
     assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 1002);
 }
 
-// ── Tab / Shift+Tab on selection (Bug #2 & #3 regression) ────────────────
+// ── Tab / Shift+Tab on selection (regression) ───────────────────────────
 
 #[test]
 fn tab_with_multiline_selection_indents_all_lines() {
@@ -1061,7 +1061,7 @@ fn tab_with_multiline_selection_indents_all_lines() {
 
 #[test]
 fn shift_tab_with_multiline_selection_dedents_all_lines() {
-    // Canonical Bug #2 reproduction from phase-16-index.md.
+    // Regression: Shift+Tab with a multiline selection dedents every selected line.
     use egui::{Event, Modifiers};
     let mut harness = create_harness();
     let doc = harness.state_mut().tabs.active_doc_mut();
@@ -1092,7 +1092,7 @@ fn shift_tab_with_multiline_selection_dedents_all_lines() {
 
 #[test]
 fn tab_with_single_line_selection_preserves_text() {
-    // Bug #3: selecting text and pressing Tab must NOT erase the selection.
+    // Selecting text and pressing Tab must NOT erase the selection.
     let mut harness = create_harness();
     let doc = harness.state_mut().tabs.active_doc_mut();
     doc.indent_style = rust_pad_core::indent::IndentStyle::Spaces(2);
@@ -1112,7 +1112,7 @@ fn tab_with_single_line_selection_preserves_text() {
     );
 }
 
-// ── Bug #3 follow-up: selection tracks the indented text ─────────────────
+// ── Selection tracks the indented text ──────────────────────────────────
 
 #[test]
 fn tab_then_tab_keeps_multiline_selection_intact() {

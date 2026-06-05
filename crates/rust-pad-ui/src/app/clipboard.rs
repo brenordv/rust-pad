@@ -176,7 +176,7 @@ impl App {
     /// Synthesizes an `egui::Event::Paste` for a Ctrl+V on a focused
     /// inline workspace field on macOS, where egui's native TextEdit
     /// paste handler only fires on `Cmd+V`. Sanitizes the clipboard
-    /// content per V5 (security review); rejected pastes are surfaced
+    /// content (security hardening); rejected pastes are surfaced
     /// to the Problems dialog so the user understands why nothing
     /// happened.
     pub(crate) fn inject_inline_paste(&mut self, ctx: &egui::Context) {

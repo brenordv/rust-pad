@@ -84,11 +84,11 @@ impl App {
         let suppress_editor_input =
             self.is_modal_dialog_open() || self.find_replace.has_focus || inline_field_active;
 
-        // Bug 6: on macOS egui's TextEdit only paste-handles `Cmd+V`. When
+        // On macOS egui's TextEdit only paste-handles `Cmd+V`. When
         // an inline workspace field is focused and the user pressed Ctrl-only
         // (not Cmd), synthesize a Paste event so the focused TextEdit reads
-        // it natively. Sanitize per V5 — filenames are single-segment text;
-        // strip CR/LF/NUL and reject the paste entirely if the result is
+        // it natively. Sanitize the pasted text — filenames are single-segment
+        // text; strip CR/LF/NUL and reject the paste entirely if the result is
         // not a valid simple name.
         let ctrl_only = ctx.input(|i| i.modifiers.ctrl && !i.modifiers.mac_cmd);
         if inline_field_active && ctrl_only && keys.contains(&egui::Key::V) {
