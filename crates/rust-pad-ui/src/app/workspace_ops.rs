@@ -2571,4 +2571,95 @@ mod tests {
         );
         assert_eq!(folders[2], "/ws/ab", "sibling prefix untouched");
     }
+
+    // ── propagate_root_rename (folder that is a workspace root) ───────
+
+    #[test]
+    fn rename_root_folder_repoints_tree_selection_and_store() {
+        let (mut app, _dir) = app_with_workspace();
+        let parent = tempfile::tempdir().unwrap();
+        let old = parent.path().join("proj");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("a.txt"), "x").unwrap();
+
+        app.create_workspace("RenameRoot");
+        let ws_id = app.workspace_sidebar.workspace_id.clone().unwrap();
+        app.add_folder_path_to_workspace(&old);
+        app.workspace_sidebar.selected = Some(crate::workspace::sidebar::SelectedNode {
+            root_index: 0,
+            path: old.clone(),
+        });
+
+        app.rename_entry_in_workspace(&old, "renamed");
+        let new = parent.path().join("renamed");
+
+        assert!(new.is_dir() && !old.exists(), "renamed on disk");
+        assert_eq!(
+            app.workspace_sidebar.tree[0].path, new,
+            "live root re-pointed"
+        );
+        assert_eq!(
+            app.workspace_sidebar.selected.as_ref().unwrap().path,
+            new,
+            "selection follows the renamed root",
+        );
+
+        // The persisted folder list is rewritten through the same store.
+        let store = app.workspace_store.as_ref().unwrap();
+        let ws = store
+            .list_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == ws_id)
+            .unwrap();
+        assert!(
+            ws.folders.iter().any(|f| Path::new(f) == new),
+            "store reflects the new root path",
+        );
+    }
+
+    #[test]
+    fn rename_root_folder_rebases_child_selection() {
+        let (mut app, _dir) = app_with_workspace();
+        let parent = tempfile::tempdir().unwrap();
+        let old = parent.path().join("proj");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("a.txt"), "x").unwrap();
+
+        app.create_workspace("RebaseChild");
+        app.add_folder_path_to_workspace(&old);
+        app.workspace_sidebar.selected = Some(crate::workspace::sidebar::SelectedNode {
+            root_index: 0,
+            path: old.join("a.txt"),
+        });
+
+        app.rename_entry_in_workspace(&old, "renamed");
+        let new = parent.path().join("renamed");
+
+        assert_eq!(
+            app.workspace_sidebar.selected.as_ref().unwrap().path,
+            new.join("a.txt"),
+            "a child of the renamed root is re-based under the new path",
+        );
+    }
+
+    #[test]
+    fn handle_copy_path_full_scope_runs_without_panic() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("notes.md");
+        std::fs::write(&file, "hello").unwrap();
+        // `test_app` returns no clipboard handle; we exercise the Full-scope
+        // dispatch path and confirm it completes cleanly.
+        app.handle_copy_path(&file, folder.path(), CopyPathScope::Full);
+    }
+
+    #[test]
+    fn handle_copy_path_relative_scope_runs_without_panic() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("sub").join("notes.md");
+        // Relative scope routes through `render_relative_path`.
+        app.handle_copy_path(&file, folder.path(), CopyPathScope::Relative);
+    }
 }

@@ -779,84 +779,105 @@ impl WorkspaceSidebar {
             return None;
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::Enter)) {
-            if let Some(idx) = current_idx {
-                let node = nodes[idx].clone();
-                if let Some(kind) = self.entry_kind_for(&node.path) {
-                    match kind {
-                        EntryKind::File => {
-                            // Opening a file hands keyboard ownership to the
-                            // editor so the user can type immediately.
-                            self.kbd_active = false;
-                            return Some(SidebarAction::OpenFile(node.path));
-                        }
-                        EntryKind::Directory => {
-                            self.toggle_expanded_for(&node.path);
-                            return None;
-                        }
-                    }
-                }
-            }
-            return None;
+            // `kbd_nav_activate` returns `Some` only for files; directories and
+            // an absent selection both yield `None`.
+            return current_idx.and_then(|idx| self.kbd_nav_activate(nodes[idx].clone()));
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::F2)) {
             if let Some(idx) = current_idx {
-                let node = nodes[idx].clone();
-                let path = node.path;
-                tracing::debug!(path = ?path, root_index = node.root_index, "Workspace rename initiated via F2");
-                self.rename_entry = Some(RenameEntryState {
-                    original_path: path.clone(),
-                    root_index: node.root_index,
-                    name: path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    is_dir: matches!(self.entry_kind_for(&path), Some(EntryKind::Directory)),
-                    select_on_focus: true,
-                });
+                self.kbd_nav_begin_rename(nodes[idx].clone());
             }
             return None;
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::ArrowRight)) {
             if let Some(idx) = current_idx {
-                let node = nodes[idx].clone();
-                if matches!(self.entry_kind_for(&node.path), Some(EntryKind::Directory)) {
-                    if self.is_expanded(&node.path) {
-                        // Move to the first child if it appears below us in the
-                        // same root subtree — i.e. lazy-load already ran and
-                        // the directory is non-empty.
-                        if let Some(child) = nodes.get(idx + 1) {
-                            if child.root_index == node.root_index
-                                && child.path.starts_with(&node.path)
-                            {
-                                self.selected = Some(child.clone());
-                            }
-                        }
-                    } else {
-                        self.queue_expand(&node.path, true);
-                    }
-                }
+                self.kbd_nav_expand_or_descend(&nodes, idx);
             }
             return None;
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::ArrowLeft)) {
             if let Some(idx) = current_idx {
-                let node = nodes[idx].clone();
-                let is_dir = matches!(self.entry_kind_for(&node.path), Some(EntryKind::Directory));
-                if is_dir && self.is_expanded(&node.path) {
-                    self.queue_expand(&node.path, false);
-                } else if let Some(parent) = node.path.parent() {
-                    // Jump to the parent row within the same root subtree.
-                    if let Some(parent_node) = nodes
-                        .iter()
-                        .find(|n| n.root_index == node.root_index && n.path == parent)
-                    {
-                        self.selected = Some(parent_node.clone());
-                    }
-                }
+                self.kbd_nav_collapse_or_ascend(&nodes, idx);
             }
             return None;
         }
         None
+    }
+
+    /// Enter on the selected row: opens a file (handing keyboard ownership to
+    /// the editor so the user can type immediately) or toggles a directory's
+    /// expansion. Returns `Some(OpenFile)` only for files; an unknown path is
+    /// a no-op. Extracted from [`handle_tree_kbd_nav`](Self::handle_tree_kbd_nav)
+    /// to keep that dispatcher's cognitive complexity in check and to make the
+    /// action testable without an `egui::Context`.
+    fn kbd_nav_activate(&mut self, node: SelectedNode) -> Option<SidebarAction> {
+        match self.entry_kind_for(&node.path)? {
+            EntryKind::File => {
+                self.kbd_active = false;
+                Some(SidebarAction::OpenFile(node.path))
+            }
+            EntryKind::Directory => {
+                self.toggle_expanded_for(&node.path);
+                None
+            }
+        }
+    }
+
+    /// F2 on the selected row: arms inline rename for `node`, seeding the field
+    /// with the entry's current file name.
+    fn kbd_nav_begin_rename(&mut self, node: SelectedNode) {
+        let path = node.path;
+        tracing::debug!(path = ?path, root_index = node.root_index, "Workspace rename initiated via F2");
+        self.rename_entry = Some(RenameEntryState {
+            original_path: path.clone(),
+            root_index: node.root_index,
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            is_dir: matches!(self.entry_kind_for(&path), Some(EntryKind::Directory)),
+            select_on_focus: true,
+        });
+    }
+
+    /// ArrowRight on the row at `idx`: expands a collapsed directory, or
+    /// descends into its first already-materialised child. No-op for files.
+    fn kbd_nav_expand_or_descend(&mut self, nodes: &[SelectedNode], idx: usize) {
+        let node = nodes[idx].clone();
+        if !matches!(self.entry_kind_for(&node.path), Some(EntryKind::Directory)) {
+            return;
+        }
+        if !self.is_expanded(&node.path) {
+            self.queue_expand(&node.path, true);
+            return;
+        }
+        // Move to the first child if it appears below us in the same root
+        // subtree — i.e. lazy-load already ran and the directory is non-empty.
+        if let Some(child) = nodes.get(idx + 1) {
+            if child.root_index == node.root_index && child.path.starts_with(&node.path) {
+                self.selected = Some(child.clone());
+            }
+        }
+    }
+
+    /// ArrowLeft on the row at `idx`: collapses an expanded directory, else
+    /// jumps to the parent row within the same root subtree.
+    fn kbd_nav_collapse_or_ascend(&mut self, nodes: &[SelectedNode], idx: usize) {
+        let node = nodes[idx].clone();
+        let is_dir = matches!(self.entry_kind_for(&node.path), Some(EntryKind::Directory));
+        if is_dir && self.is_expanded(&node.path) {
+            self.queue_expand(&node.path, false);
+            return;
+        }
+        if let Some(parent) = node.path.parent() {
+            // Jump to the parent row within the same root subtree.
+            if let Some(parent_node) = nodes
+                .iter()
+                .find(|n| n.root_index == node.root_index && n.path == parent)
+            {
+                self.selected = Some(parent_node.clone());
+            }
+        }
     }
 }
 
@@ -2054,5 +2075,279 @@ mod tests {
         // surrogate assertion; richer behaviour is exercised by manual
         // smoke testing of the keyboard nav in the live UI.
         assert!(sidebar.new_entry.is_some());
+    }
+
+    // ── keyboard-nav helper tests ────────────────────────────────────
+    //
+    // The four `kbd_nav_*` helpers carry the per-key behaviour extracted
+    // from `handle_tree_kbd_nav` (which keeps that dispatcher's cognitive
+    // complexity in check). They take plain data — no `egui::Context` — so
+    // each branch is exercised directly here.
+
+    /// Builds a sidebar over a real tempdir root so `visible_nodes` keeps
+    /// the root (it requires `root.path.is_dir()`), with this shape:
+    ///
+    /// ```text
+    /// <root>/            (expanded)
+    ///   sub/             (directory, expanded)
+    ///     child.rs
+    ///   a.txt
+    /// ```
+    ///
+    /// Visible order: `[root, sub, sub/child.rs, a.txt]`.
+    fn sidebar_with_tree() -> (WorkspaceSidebar, tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let child = make_file_entry(&root.join("sub"), "child.rs");
+        let sub = make_dir_entry(&root, "sub", true, vec![child]);
+        let a = make_file_entry(&root, "a.txt");
+        let mut sidebar = WorkspaceSidebar::new();
+        sidebar.tree.push(crate::workspace::tree::FolderRoot {
+            path: root.clone(),
+            entries: vec![sub, a],
+            expanded: true,
+        });
+        (sidebar, tmp, root)
+    }
+
+    fn node_idx(nodes: &[SelectedNode], path: &std::path::Path) -> usize {
+        nodes
+            .iter()
+            .position(|n| n.path == path)
+            .expect("path is visible")
+    }
+
+    #[test]
+    fn kbd_nav_activate_file_opens_and_releases_keyboard() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        sidebar.kbd_active = true;
+        let node = SelectedNode {
+            root_index: 0,
+            path: root.join("a.txt"),
+        };
+        let action = sidebar.kbd_nav_activate(node);
+        assert_eq!(action, Some(SidebarAction::OpenFile(root.join("a.txt"))));
+        assert!(
+            !sidebar.kbd_active,
+            "opening a file hands focus to the editor"
+        );
+    }
+
+    #[test]
+    fn kbd_nav_activate_directory_toggles_and_returns_none() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let sub = root.join("sub");
+        assert!(sidebar.is_expanded(&sub));
+        let node = SelectedNode {
+            root_index: 0,
+            path: sub.clone(),
+        };
+        let action = sidebar.kbd_nav_activate(node);
+        assert!(action.is_none());
+        assert!(!sidebar.is_expanded(&sub), "an expanded dir collapses");
+        assert_eq!(sidebar.pending_expand, Some((sub, false)));
+    }
+
+    #[test]
+    fn kbd_nav_activate_unknown_path_is_noop() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let node = SelectedNode {
+            root_index: 0,
+            path: root.join("ghost"),
+        };
+        assert!(sidebar.kbd_nav_activate(node).is_none());
+    }
+
+    #[test]
+    fn kbd_nav_begin_rename_seeds_file_state() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let node = SelectedNode {
+            root_index: 0,
+            path: root.join("a.txt"),
+        };
+        sidebar.kbd_nav_begin_rename(node);
+        let st = sidebar.rename_entry.as_ref().expect("rename armed");
+        assert_eq!(st.original_path, root.join("a.txt"));
+        assert_eq!(st.name, "a.txt");
+        assert!(!st.is_dir);
+        assert_eq!(st.root_index, 0);
+        assert!(st.select_on_focus);
+    }
+
+    #[test]
+    fn kbd_nav_begin_rename_marks_directory() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let node = SelectedNode {
+            root_index: 0,
+            path: root.join("sub"),
+        };
+        sidebar.kbd_nav_begin_rename(node);
+        let st = sidebar.rename_entry.as_ref().expect("rename armed");
+        assert_eq!(st.name, "sub");
+        assert!(st.is_dir);
+    }
+
+    #[test]
+    fn kbd_nav_expand_or_descend_expands_collapsed_dir() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let sub = root.join("sub");
+        sidebar.set_expanded(&sub, false);
+        let nodes = sidebar.visible_nodes();
+        let idx = node_idx(&nodes, &sub);
+        sidebar.kbd_nav_expand_or_descend(&nodes, idx);
+        assert!(sidebar.is_expanded(&sub));
+        assert_eq!(sidebar.pending_expand, Some((sub, true)));
+    }
+
+    #[test]
+    fn kbd_nav_expand_or_descend_selects_first_child_when_open() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let sub = root.join("sub");
+        let nodes = sidebar.visible_nodes();
+        let idx = node_idx(&nodes, &sub);
+        sidebar.kbd_nav_expand_or_descend(&nodes, idx);
+        assert_eq!(
+            sidebar.selected,
+            Some(SelectedNode {
+                root_index: 0,
+                path: sub.join("child.rs"),
+            })
+        );
+    }
+
+    #[test]
+    fn kbd_nav_expand_or_descend_ignores_files() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let nodes = sidebar.visible_nodes();
+        let idx = node_idx(&nodes, &root.join("a.txt"));
+        let before = sidebar.selected.clone();
+        sidebar.kbd_nav_expand_or_descend(&nodes, idx);
+        assert_eq!(sidebar.selected, before);
+        assert!(sidebar.pending_expand.is_none());
+    }
+
+    #[test]
+    fn kbd_nav_collapse_or_ascend_collapses_open_dir() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let sub = root.join("sub");
+        let nodes = sidebar.visible_nodes();
+        let idx = node_idx(&nodes, &sub);
+        sidebar.kbd_nav_collapse_or_ascend(&nodes, idx);
+        assert!(!sidebar.is_expanded(&sub));
+        assert_eq!(sidebar.pending_expand, Some((sub, false)));
+    }
+
+    #[test]
+    fn kbd_nav_collapse_or_ascend_jumps_to_parent_from_file() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let child = root.join("sub").join("child.rs");
+        let nodes = sidebar.visible_nodes();
+        let idx = node_idx(&nodes, &child);
+        sidebar.kbd_nav_collapse_or_ascend(&nodes, idx);
+        assert_eq!(
+            sidebar.selected,
+            Some(SelectedNode {
+                root_index: 0,
+                path: root.join("sub"),
+            })
+        );
+    }
+
+    // ── full-dispatcher tests via a headless egui context ────────────
+    //
+    // These drive `handle_tree_kbd_nav` end-to-end so the activation gate,
+    // ownership latch, and key dispatch lines are exercised too.
+
+    /// Runs one frame of `handle_tree_kbd_nav` with `key` pressed and the
+    /// pointer parked at `pointer`. The sidebar rect is a fixed 200×600 box
+    /// at the origin.
+    fn drive_kbd_nav_with(
+        sidebar: &mut WorkspaceSidebar,
+        key: egui::Key,
+        pointer: egui::Pos2,
+    ) -> Option<SidebarAction> {
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 600.0));
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::PointerMoved(pointer));
+        raw.events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = None;
+        let _ = ctx.run_ui(raw, |ui| {
+            out = sidebar.handle_tree_kbd_nav(ui.ctx(), rect);
+        });
+        out
+    }
+
+    /// Pointer parked at the centre of the sidebar rect.
+    fn drive_kbd_nav(sidebar: &mut WorkspaceSidebar, key: egui::Key) -> Option<SidebarAction> {
+        drive_kbd_nav_with(sidebar, key, egui::pos2(100.0, 300.0))
+    }
+
+    #[test]
+    fn dispatch_arrow_down_selects_first_then_advances() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        assert!(sidebar.selected.is_none());
+
+        let action = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
+        assert!(action.is_none());
+        assert_eq!(sidebar.selected.as_ref().unwrap().path, root);
+        assert!(
+            sidebar.kbd_active,
+            "a nav key over the sidebar latches ownership"
+        );
+
+        drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
+        assert_eq!(sidebar.selected.as_ref().unwrap().path, root.join("sub"));
+    }
+
+    #[test]
+    fn dispatch_arrow_up_moves_back() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        sidebar.selected = Some(SelectedNode {
+            root_index: 0,
+            path: root.join("sub"),
+        });
+        drive_kbd_nav(&mut sidebar, egui::Key::ArrowUp);
+        assert_eq!(sidebar.selected.as_ref().unwrap().path, root);
+    }
+
+    #[test]
+    fn dispatch_enter_on_file_returns_open_action() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        sidebar.selected = Some(SelectedNode {
+            root_index: 0,
+            path: root.join("a.txt"),
+        });
+        let action = drive_kbd_nav(&mut sidebar, egui::Key::Enter);
+        assert_eq!(action, Some(SidebarAction::OpenFile(root.join("a.txt"))));
+    }
+
+    #[test]
+    fn dispatch_ignored_when_pointer_outside_and_no_selection() {
+        let (mut sidebar, _tmp, _root) = sidebar_with_tree();
+        let action = drive_kbd_nav_with(
+            &mut sidebar,
+            egui::Key::ArrowDown,
+            egui::pos2(1000.0, 1000.0),
+        );
+        assert!(action.is_none());
+        assert!(
+            sidebar.selected.is_none(),
+            "keys are ignored with no selection and the pointer away from the sidebar"
+        );
+    }
+
+    #[test]
+    fn dispatch_empty_tree_returns_none() {
+        let mut sidebar = WorkspaceSidebar::new();
+        let action = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
+        assert!(action.is_none());
+        assert!(sidebar.selected.is_none());
     }
 }
