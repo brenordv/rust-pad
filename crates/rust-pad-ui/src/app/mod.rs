@@ -33,7 +33,7 @@ pub use settings_dialog::SettingsTab;
 pub use split::SplitState;
 pub use theme_controller::ThemeController;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -49,6 +49,24 @@ use crate::tabs::TabManager;
 
 /// How often to flush undo history to disk (in seconds).
 const FLUSH_INTERVAL_SECS: u64 = 30;
+
+/// Formats a path for **display**, stripping the Windows extended-length
+/// (`\\?\`) prefix that `std::fs::canonicalize` returns. `\\?\UNC\server\share`
+/// collapses back to `\\server\share`; on non-Windows (and for already-clean
+/// paths) the input is returned unchanged.
+///
+/// Display-only: never feed the result back into filesystem APIs or security
+/// gates — the canonical `PathBuf` remains the source of truth for those.
+fn display_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    }
+}
 
 /// Arguments passed from the command line to the application.
 #[derive(Debug, Clone, Default)]
@@ -133,6 +151,10 @@ pub struct App {
     /// Threshold in bytes above which "Copy file contents" prompts the user
     /// before reading. `0` means "always prompt".
     pub(crate) copy_contents_warning_bytes: u64,
+    /// Hard cap in bytes for "Copy file contents", or `None` for no limit.
+    /// Independent of `max_file_size_bytes` (the editor open limit): copying
+    /// to the clipboard is a distinct operation with its own size ceiling.
+    pub(crate) copy_contents_max_bytes: Option<u64>,
     /// In-flight "Copy file contents" confirmation. `Some((canonical_path,
     /// size_bytes))` while the confirm dialog is open; cleared when the
     /// user resolves the dialog either way.
@@ -333,6 +355,7 @@ impl App {
 
         let max_file_size_bytes = app_config.max_file_size_bytes();
         let copy_contents_warning_bytes = app_config.copy_contents_warning_bytes();
+        let copy_contents_max_bytes = app_config.copy_contents_max_bytes();
         let ws_sidebar_visible = app_config.workspace_sidebar_visible;
         let ws_sidebar_width = app_config.workspace_sidebar_width;
         let ws_show_hidden = app_config.show_hidden_files;
@@ -379,6 +402,7 @@ impl App {
             session_content_max_kb: app_config.session_content_max_kb,
             max_file_size_bytes,
             copy_contents_warning_bytes,
+            copy_contents_max_bytes,
             pending_copy_contents: None,
             pending_clipboard_reads: Vec::new(),
             last_window_title: String::new(),
@@ -947,7 +971,7 @@ impl App {
                 ui.label(format!(
                     "Copy {size_mb:.1} MB to the system clipboard from:"
                 ));
-                ui.monospace(path.display().to_string());
+                ui.monospace(display_path(&path));
                 ui.add_space(4.0);
                 ui.weak(
                     "Clipboard contents may be retained by the OS (e.g., Windows \
@@ -959,16 +983,19 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     if ui.button("  Copy  ").clicked() {
+                        tracing::debug!(path = ?path, size_bytes, "Copy Contents confirmed");
                         self.pending_copy_contents = None;
                         self.send_copy_contents_read(path.clone());
                     }
                     if ui.button("  Cancel  ").clicked() {
+                        tracing::debug!(path = ?path, size_bytes, "Copy Contents cancelled");
                         self.pending_copy_contents = None;
                     }
                 });
             });
 
         if !open {
+            tracing::debug!(path = ?path, size_bytes, "Copy Contents dialog dismissed");
             self.pending_copy_contents = None;
         }
     }
@@ -1138,6 +1165,25 @@ impl eframe::App for App {
         // Prevent egui's built-in Ctrl+scroll zoom — we handle zoom ourselves
         ctx.set_zoom_factor(1.0);
 
+        // macOS (New Bug 2): after the window regains focus (e.g. via
+        // Cmd+Tab), a stale `PointingHand` cursor from a tree row can persist
+        // until the pointer crosses a panel boundary, because winit doesn't
+        // re-push the icon until the pointer moves. Forcing a reset on the
+        // focus-gained event lets the normal per-frame hover logic re-assert
+        // the correct icon. macOS-only — the issue doesn't occur elsewhere,
+        // and scoping it keeps other platforms untouched.
+        #[cfg(target_os = "macos")]
+        {
+            let regained_focus = ctx.input(|i| {
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::WindowFocused(true)))
+            });
+            if regained_focus {
+                ctx.set_cursor_icon(egui::CursorIcon::Default);
+            }
+        }
+
         // Clear the one-frame rename confirmation flag from the previous frame.
         // Must happen before handle_global_shortcuts which checks rename_buffer.
         self.workspace_sidebar.rename_just_confirmed = false;
@@ -1226,6 +1272,11 @@ impl eframe::App for App {
                     return;
                 }
 
+                // When the sidebar owns keyboard input, suppress the editor's
+                // per-frame `auto_focus` so it releases egui focus and arrow
+                // keys reach the sidebar's tree navigation. A click in the
+                // editor reclaims ownership below.
+                let sidebar_kbd_active = self.workspace_sidebar.kbd_active;
                 let response = {
                     let doc = self.tabs.active_doc_mut();
                     let mut editor = EditorWidget::new(
@@ -1240,8 +1291,15 @@ impl eframe::App for App {
                     editor.modal_dialog_open = modal_dialog_open;
                     editor.max_zoom_level = self.theme_ctrl.max_zoom_level;
                     editor.bookmarks = Some(&self.bookmarks);
+                    editor.auto_focus = !sidebar_kbd_active;
                     editor.show(ui)
                 };
+
+                // A click in the editor returns keyboard ownership to it, so
+                // sidebar arrow navigation stops and the editor receives keys.
+                if response.clicked() {
+                    self.workspace_sidebar.kbd_active = false;
+                }
 
                 response.context_menu(|ui| {
                     self.show_editor_context_menu(ui);
@@ -1387,6 +1445,9 @@ impl eframe::App for App {
             recent_files: self.recent_files.to_config_strings(),
             max_file_size_mb: self.max_file_size_bytes.map_or(0, |b| b / (1024 * 1024)),
             copy_contents_warning_mb: self.copy_contents_warning_bytes / (1024 * 1024),
+            copy_contents_max_mb: self
+                .copy_contents_max_bytes
+                .map_or(0, |b| b / (1024 * 1024)),
             session_content_max_kb: self.session_content_max_kb,
             print_show_line_numbers: self.print_show_line_numbers,
             sync_scroll_enabled: self.sync_scroll_enabled,
@@ -1411,6 +1472,38 @@ mod tests {
     use rust_pad_config::RecentFilesCleanup;
     use rust_pad_core::encoding::{LineEnding, TextEncoding};
     use rust_pad_core::line_ops::{CaseConversion, SortOrder, TrimMode};
+
+    #[test]
+    fn display_path_strips_verbatim_prefix() {
+        // Defect D: canonicalized Windows paths carry the `\\?\` prefix; the
+        // dialog must show the clean form. Pure string transform — runs on all
+        // platforms.
+        assert_eq!(
+            display_path(Path::new(r"\\?\Z:\tmp\rust-pad-demo\big.txt")),
+            r"Z:\tmp\rust-pad-demo\big.txt",
+        );
+    }
+
+    #[test]
+    fn display_path_collapses_verbatim_unc() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\file.txt")),
+            r"\\server\share\file.txt",
+        );
+    }
+
+    #[test]
+    fn display_path_passes_clean_paths_through() {
+        // No prefix (Windows drive path or any POSIX path) is returned as-is.
+        assert_eq!(
+            display_path(Path::new("/home/me/notes.md")),
+            "/home/me/notes.md"
+        );
+        assert_eq!(
+            display_path(Path::new(r"C:\Users\me\notes.md")),
+            r"C:\Users\me\notes.md"
+        );
+    }
 
     /// Helper: create an App for unit-testing (no rendering needed).
     pub(crate) fn test_app() -> App {
@@ -1458,6 +1551,7 @@ mod tests {
             session_content_max_kb: 10_240,
             max_file_size_bytes: Some(512 * 1024 * 1024),
             copy_contents_warning_bytes: 5 * 1024 * 1024,
+            copy_contents_max_bytes: Some(64 * 1024 * 1024),
             pending_copy_contents: None,
             pending_clipboard_reads: Vec::new(),
             last_window_title: String::new(),

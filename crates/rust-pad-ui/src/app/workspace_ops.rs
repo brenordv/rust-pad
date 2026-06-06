@@ -98,6 +98,39 @@ fn try_watch_folder(watcher: &mut Option<WorkspaceWatcher>, folder_path: &Path) 
     }
 }
 
+/// Rewrites workspace-root paths after `old` was renamed to `new`, so roots
+/// that *are* the renamed folder — or live under it — track the new location.
+/// Returns the count of roots changed. Pure: touches only the passed slice.
+///
+/// `Path::strip_prefix` is component-wise, so a sibling like `…/ab` is not
+/// rewritten when `…/a` is renamed.
+pub(crate) fn rewrite_root_paths(roots: &mut [FolderRoot], old: &Path, new: &Path) -> usize {
+    let mut changed = 0;
+    for root in roots.iter_mut() {
+        if root.path.as_path() == old {
+            root.path = new.to_path_buf();
+            changed += 1;
+        } else if let Ok(rest) = root.path.strip_prefix(old) {
+            root.path = new.join(rest);
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// Path-string counterpart of [`rewrite_root_paths`] for the persisted
+/// `WorkspaceEntry.folders` list. Pure: touches only the passed slice.
+pub(crate) fn rewrite_folder_strings(folders: &mut [String], old: &Path, new: &Path) {
+    for folder in folders.iter_mut() {
+        let path = Path::new(folder.as_str());
+        if path == old {
+            *folder = new.to_string_lossy().into_owned();
+        } else if let Ok(rest) = path.strip_prefix(old) {
+            *folder = new.join(rest).to_string_lossy().into_owned();
+        }
+    }
+}
+
 /// Scans a directory if it exists, returning an empty list on failure or non-directory paths.
 fn scan_dir_safe(folder_path: &Path, show_hidden: bool) -> Vec<TreeEntry> {
     if folder_path.is_dir() {
@@ -609,13 +642,86 @@ impl App {
         }
 
         self.notify_tree(&FsEvent::Removed(old_path.to_path_buf()));
-        self.notify_tree(&FsEvent::Created(new_path));
+        self.notify_tree(&FsEvent::Created(new_path.clone()));
+
+        // A renamed folder may itself be a workspace root, or contain roots, so
+        // reconcile those root paths (live tree + persisted) — otherwise the
+        // root keeps its stale path and shows as "unavailable".
+        self.propagate_root_rename(old_path, &new_path);
+
+        // Keep the highlight on the renamed row (root_index is unchanged).
+        if let Some(sel) = self.workspace_sidebar.selected.as_mut() {
+            if sel.path.as_path() == old_path {
+                sel.path = new_path.clone();
+            } else if let Ok(rest) = sel.path.strip_prefix(old_path) {
+                sel.path = new_path.join(rest);
+            }
+        }
+    }
+
+    /// Reconciles workspace-root paths after `old_path` was renamed to
+    /// `new_path`: rewrites affected roots in the live tree and in the persisted
+    /// workspace, re-points the watcher, and re-scans so every duplicate row
+    /// reflects the new name. No-op when no root is affected (the common case —
+    /// a plain nested-entry rename is handled by `notify_tree` alone).
+    fn propagate_root_rename(&mut self, old_path: &Path, new_path: &Path) {
+        let old_roots: Vec<PathBuf> = self
+            .workspace_sidebar
+            .tree
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        let changed = rewrite_root_paths(&mut self.workspace_sidebar.tree, old_path, new_path);
+        if changed == 0 {
+            return;
+        }
+
+        // Re-point the watcher at the moved roots.
+        let rewatch: Vec<(PathBuf, PathBuf)> = old_roots
+            .iter()
+            .zip(self.workspace_sidebar.tree.iter())
+            .filter(|(old, root)| *old != &root.path)
+            .map(|(old, root)| (old.clone(), root.path.clone()))
+            .collect();
+        for (old_root, new_root) in rewatch {
+            if let Some(w) = self.workspace_sidebar.watcher.as_mut() {
+                let _ = w.unwatch(&old_root);
+            }
+            try_watch_folder(&mut self.workspace_sidebar.watcher, &new_root);
+        }
+
+        // Re-scan so duplicate rows re-read the renamed folder's contents.
+        self.rescan_workspace_tree();
+
+        // Persist the new root paths through the same store as add/remove.
+        if let (Some(store), Some(ws_id)) = (
+            self.workspace_store.as_ref(),
+            self.workspace_sidebar.workspace_id.clone(),
+        ) {
+            let mut entries = store.list_workspaces().unwrap_or_default();
+            if let Some(ws) = entries.iter_mut().find(|e| e.id == ws_id) {
+                rewrite_folder_strings(&mut ws.folders, old_path, new_path);
+                if let Err(e) = store.save_workspace(ws) {
+                    tracing::warn!("Failed to persist workspace after folder rename: {e}");
+                }
+            }
+        }
+
+        tracing::info!(
+            roots_updated = changed,
+            old = %old_path.display(),
+            new = %new_path.display(),
+            "Workspace root paths reconciled after folder rename",
+        );
     }
 
     /// Processes a sidebar action returned from the sidebar render pass.
     pub(crate) fn handle_sidebar_action(&mut self, action: SidebarAction) {
         match action {
             SidebarAction::OpenFile(path) => {
+                // Opening a file (double-click or Enter) hands keyboard
+                // ownership to the editor so typing lands there.
+                self.workspace_sidebar.kbd_active = false;
                 self.open_file_path(&path);
             }
             SidebarAction::DeleteFile(path) => {
@@ -812,7 +918,7 @@ impl App {
                 return CopyContentsDecision::Refused;
             }
         };
-        if let Some(max) = self.max_file_size_bytes {
+        if let Some(max) = self.copy_contents_max_bytes {
             if size_bytes > max {
                 let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
                 let max_mb = max as f64 / (1024.0 * 1024.0);
@@ -820,11 +926,12 @@ impl App {
                     path = ?canonical_path,
                     size_bytes,
                     max,
+                    cap = "copy_contents",
                     "[CC04] Copy Contents refused: too large",
                 );
                 crate::problem_log::warn_problem(&format!(
                     "[CC04] Copy Contents refused: file is {size_mb:.1} MB, exceeds the \
-                     {max_mb:.0} MB hard cap."
+                     {max_mb:.0} MB copy-to-clipboard limit (separate from the editor open limit)."
                 ));
                 return CopyContentsDecision::Refused;
             }
@@ -855,7 +962,7 @@ impl App {
         self.io_worker
             .send(crate::io_worker::IoRequest::ReadFileForClipboard {
                 path: canonical_path,
-                max_file_size_bytes: self.max_file_size_bytes,
+                max_file_size_bytes: self.copy_contents_max_bytes,
             });
     }
 
@@ -2160,12 +2267,41 @@ mod tests {
         let file = folder.path().join("huge.txt");
         std::fs::write(&file, "x".repeat(200)).unwrap();
 
-        app.max_file_size_bytes = Some(100);
+        // The copy-contents cap — NOT the editor open limit — governs refusal.
+        app.copy_contents_max_bytes = Some(100);
         app.copy_contents_warning_bytes = 50;
         app.handle_copy_file_contents(&file, folder.path());
 
         assert!(app.pending_copy_contents.is_none(), "no prompt");
         assert_eq!(app.pending_clipboard_reads.len(), 0, "no worker read");
+    }
+
+    #[test]
+    fn copy_contents_above_editor_limit_but_under_copy_cap_prompts() {
+        // Regression for Section 6: a file larger than the editor open limit
+        // must still be copyable (with a confirm prompt) when it is under the
+        // separate copy-contents cap. Previously the editor limit was reused
+        // as the copy cap, refusing the copy outright.
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("bigger_than_editor.txt");
+        std::fs::write(&file, "x".repeat(500)).unwrap();
+
+        app.max_file_size_bytes = Some(100); // editor open limit — must not apply
+        app.copy_contents_max_bytes = Some(10_000); // copy cap — file is under it
+        app.copy_contents_warning_bytes = 50; // above warn → prompt
+
+        app.handle_copy_file_contents(&file, folder.path());
+
+        assert!(
+            app.pending_copy_contents.is_some(),
+            "file under the copy cap but over the editor limit should prompt, not refuse",
+        );
+        assert_eq!(
+            app.pending_clipboard_reads.len(),
+            0,
+            "not dispatched until confirmed"
+        );
     }
 
     #[test]
@@ -2330,7 +2466,7 @@ mod tests {
         std::fs::write(&file, "x".repeat(200)).unwrap();
         let canonical = std::fs::canonicalize(&file).unwrap();
 
-        app.max_file_size_bytes = Some(100);
+        app.copy_contents_max_bytes = Some(100);
         app.copy_contents_warning_bytes = 50;
         // [CC04] — hard-cap refusal for an oversize file.
         let decision =
@@ -2376,5 +2512,63 @@ mod tests {
         assert!(app.pending_copy_contents.is_none());
         assert_eq!(app.pending_clipboard_reads.len(), 1);
         assert_eq!(app.io_activity.pending_reads, pending_reads_before + 1);
+    }
+
+    // ── rewrite_root_paths / rewrite_folder_strings (folder-rename reconcile) ──
+
+    fn dir_root(path: &str) -> FolderRoot {
+        FolderRoot {
+            path: PathBuf::from(path),
+            entries: Vec::new(),
+            expanded: true,
+        }
+    }
+
+    #[test]
+    fn rewrite_root_paths_updates_exact_root_only() {
+        let mut roots = vec![dir_root("/ws/C"), dir_root("/ws/D")];
+        let changed = rewrite_root_paths(&mut roots, Path::new("/ws/C"), Path::new("/ws/X"));
+        assert_eq!(changed, 1);
+        assert_eq!(roots[0].path, PathBuf::from("/ws/X"));
+        assert_eq!(
+            roots[1].path,
+            PathBuf::from("/ws/D"),
+            "unrelated root untouched"
+        );
+    }
+
+    #[test]
+    fn rewrite_root_paths_rewrites_nested_root() {
+        // Renaming A also moves the C root that lives under it (A/C → X/C).
+        let mut roots = vec![dir_root("/ws/A/C")];
+        let changed = rewrite_root_paths(&mut roots, Path::new("/ws/A"), Path::new("/ws/X"));
+        assert_eq!(changed, 1);
+        assert_eq!(roots[0].path, Path::new("/ws/X").join("C"));
+    }
+
+    #[test]
+    fn rewrite_root_paths_ignores_sibling_prefix() {
+        // `/ws/ab` must not match a rename of `/ws/a` (component-wise prefix).
+        let mut roots = vec![dir_root("/ws/ab")];
+        let changed = rewrite_root_paths(&mut roots, Path::new("/ws/a"), Path::new("/ws/z"));
+        assert_eq!(changed, 0);
+        assert_eq!(roots[0].path, PathBuf::from("/ws/ab"));
+    }
+
+    #[test]
+    fn rewrite_folder_strings_matches_root_path_semantics() {
+        let mut folders = vec![
+            "/ws/C".to_string(),
+            "/ws/A/C".to_string(),
+            "/ws/ab".to_string(),
+        ];
+        rewrite_folder_strings(&mut folders, Path::new("/ws/A"), Path::new("/ws/X"));
+        assert_eq!(folders[0], "/ws/C", "not under A");
+        assert_eq!(
+            folders[1],
+            Path::new("/ws/X").join("C").to_string_lossy(),
+            "nested rewritten",
+        );
+        assert_eq!(folders[2], "/ws/ab", "sibling prefix untouched");
     }
 }

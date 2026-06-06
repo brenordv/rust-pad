@@ -219,6 +219,27 @@ impl TextBuffer {
         Ok(self.rope.byte_to_char(byte_idx))
     }
 
+    /// Converts a char offset to a byte offset. O(log n) via ropey.
+    ///
+    /// The inverse of [`byte_to_char`](Self::byte_to_char). Callers that
+    /// slice a materialised `String` by a char index must convert through
+    /// this first — char indices are not valid byte offsets once the text
+    /// contains multi-byte codepoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the char index is out of bounds.
+    pub fn char_to_byte(&self, char_idx: usize) -> Result<usize> {
+        if char_idx > self.rope.len_chars() {
+            anyhow::bail!(
+                "char index {} out of bounds (buffer has {} chars)",
+                char_idx,
+                self.rope.len_chars()
+            );
+        }
+        Ok(self.rope.char_to_byte(char_idx))
+    }
+
     /// Returns the leading whitespace of the given line as a `String`.
     ///
     /// Scans from the start of the line until the first non-whitespace character
@@ -487,6 +508,39 @@ mod tests {
     fn test_byte_to_char_out_of_bounds() {
         let buf = TextBuffer::from("hello");
         assert!(buf.byte_to_char(100).is_err());
+    }
+
+    #[test]
+    fn test_char_to_byte_ascii() {
+        let buf = TextBuffer::from("hello");
+        assert_eq!(buf.char_to_byte(0).unwrap(), 0);
+        assert_eq!(buf.char_to_byte(3).unwrap(), 3);
+        assert_eq!(buf.char_to_byte(5).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_char_to_byte_multibyte() {
+        let buf = TextBuffer::from("héllo");
+        // h=1 byte, é=2 bytes, l=1, l=1, o=1.
+        assert_eq!(buf.char_to_byte(0).unwrap(), 0); // 'h'
+        assert_eq!(buf.char_to_byte(1).unwrap(), 1); // 'é'
+        assert_eq!(buf.char_to_byte(2).unwrap(), 3); // 'l' (after 2-byte 'é')
+        assert_eq!(buf.char_to_byte(5).unwrap(), 6); // end
+    }
+
+    #[test]
+    fn test_char_to_byte_out_of_bounds() {
+        let buf = TextBuffer::from("hello");
+        assert!(buf.char_to_byte(100).is_err());
+    }
+
+    #[test]
+    fn test_char_to_byte_inverts_byte_to_char() {
+        let buf = TextBuffer::from("a—b—c"); // em dashes are 3 bytes each
+        for char_idx in 0..=buf.len_chars() {
+            let byte_idx = buf.char_to_byte(char_idx).unwrap();
+            assert_eq!(buf.byte_to_char(byte_idx).unwrap(), char_idx);
+        }
     }
 
     // ── Empty buffer operations ──────────────────────────────────────

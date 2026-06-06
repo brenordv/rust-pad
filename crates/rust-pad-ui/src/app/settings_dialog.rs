@@ -329,6 +329,34 @@ impl App {
         ui.add_space(6.0);
 
         ui.horizontal(|ui| {
+            ui.label("Maximum size to copy to clipboard (MB):");
+            let mut value = self
+                .copy_contents_max_bytes
+                .map_or(0.0, |b| b as f64 / (1024.0 * 1024.0));
+            if ui
+                .add(egui::DragValue::new(&mut value).range(0.0..=10_240.0))
+                .changed()
+            {
+                let mb = value as u64;
+                self.copy_contents_max_bytes = if mb == 0 {
+                    None
+                } else {
+                    Some(mb * 1024 * 1024)
+                };
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "0 = no limit. Files larger than this cannot be copied to the clipboard. \
+                 This is separate from the editor open limit above.",
+            )
+            .small()
+            .color(egui::Color32::GRAY),
+        );
+
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
             ui.label("Warn before copying file contents larger than (MB):");
             let mut value = self.copy_contents_warning_bytes as f64 / (1024.0 * 1024.0);
             if ui
@@ -341,8 +369,8 @@ impl App {
         });
         ui.label(
             egui::RichText::new(
-                "0 = always prompt. Files above the maximum size are refused outright, \
-                 regardless of this threshold.",
+                "0 = always prompt. Files above the copy-to-clipboard maximum are refused \
+                 outright, regardless of this threshold.",
             )
             .small()
             .color(egui::Color32::GRAY),

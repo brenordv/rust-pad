@@ -178,12 +178,23 @@ impl App {
         };
 
         let text = doc.buffer.to_string();
+        // `last_char_idx` is a *char* index; `text` is byte-indexed. Slicing
+        // the string with a char index panics once the buffer holds multi-byte
+        // codepoints (e.g. an em dash), so convert to a byte offset first.
+        let last_byte_idx = doc.buffer.char_to_byte(last_char_idx).unwrap_or_else(|e| {
+            tracing::debug!(
+                error = %e,
+                last_char_idx,
+                "char_to_byte out of range in select_next_occurrence; clamping to text end",
+            );
+            text.len()
+        });
 
         // Find next occurrence after last cursor
-        if let Some(byte_offset) = text[last_char_idx..].find(&word) {
+        if let Some(byte_offset) = text[last_byte_idx..].find(&word) {
             // Convert byte offset to char offset
             let char_start = last_char_idx
-                + text[last_char_idx..last_char_idx + byte_offset]
+                + text[last_byte_idx..last_byte_idx + byte_offset]
                     .chars()
                     .count();
             let char_end = char_start + word.chars().count();
@@ -193,9 +204,9 @@ impl App {
             new_cursor.position = char_to_pos(&doc.buffer, char_end);
 
             doc.add_secondary_cursor(new_cursor);
-        } else if last_char_idx > 0 {
+        } else if last_byte_idx > 0 {
             // Wrap around: search from beginning
-            if let Some(byte_offset) = text[..last_char_idx].find(&word) {
+            if let Some(byte_offset) = text[..last_byte_idx].find(&word) {
                 let char_start = text[..byte_offset].chars().count();
                 let char_end = char_start + word.chars().count();
 
@@ -602,5 +613,90 @@ fn clamp_position(pos: &mut Position, max_line: usize, buffer: &TextBuffer) {
     let line_len = buffer.line_len_chars(pos.line).unwrap_or(0);
     if pos.col > line_len {
         pos.col = line_len;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::test_app;
+    use rust_pad_core::cursor::char_to_pos;
+
+    /// Regression for New Bug 3: `select_next_occurrence` sliced the
+    /// byte-indexed buffer string with a char index, panicking when the
+    /// text contained a multi-byte codepoint (an em dash). Selecting the
+    /// next occurrence after such a codepoint must not panic.
+    #[test]
+    fn select_next_occurrence_handles_multibyte_without_panic() {
+        let mut app = test_app();
+        {
+            let doc = app.tabs.active_doc_mut();
+            doc.buffer = "—x x".into();
+            // Select the first "x" (chars 1..2). The end position (char 2),
+            // if misused as a byte index, lands inside the 3-byte em dash.
+            doc.cursor.selection_anchor = Some(char_to_pos(&doc.buffer, 1));
+            doc.cursor.position = char_to_pos(&doc.buffer, 2);
+        }
+
+        app.select_next_occurrence();
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(
+            doc.secondary_cursors.len(),
+            1,
+            "a secondary cursor should be added on the second occurrence",
+        );
+        let sc = &doc.secondary_cursors[0];
+        // Second "x" is at chars 3..4.
+        assert_eq!(sc.selection_anchor, Some(char_to_pos(&doc.buffer, 3)));
+        assert_eq!(sc.position, char_to_pos(&doc.buffer, 4));
+    }
+
+    /// Wrap-around path (the `text[..last_byte_idx]` slice): selecting the
+    /// last occurrence forces the search to wrap to the start, which must
+    /// also convert char→byte before slicing across a multi-byte codepoint.
+    #[test]
+    fn select_next_occurrence_wraps_around_multibyte() {
+        let mut app = test_app();
+        {
+            let doc = app.tabs.active_doc_mut();
+            // chars: x(0) space(1) —(2) x(3).
+            doc.buffer = "x —x".into();
+            doc.cursor.selection_anchor = Some(char_to_pos(&doc.buffer, 3));
+            doc.cursor.position = char_to_pos(&doc.buffer, 4);
+        }
+
+        app.select_next_occurrence();
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(
+            doc.secondary_cursors.len(),
+            1,
+            "wrap-around should add a cursor at the first occurrence",
+        );
+        assert_eq!(
+            doc.secondary_cursors[0].position,
+            char_to_pos(&doc.buffer, 1),
+        );
+    }
+
+    /// ASCII sanity check — the conversion must not regress the common path.
+    #[test]
+    fn select_next_occurrence_ascii_adds_cursor() {
+        let mut app = test_app();
+        {
+            let doc = app.tabs.active_doc_mut();
+            doc.buffer = "foo foo".into();
+            doc.cursor.selection_anchor = Some(char_to_pos(&doc.buffer, 0));
+            doc.cursor.position = char_to_pos(&doc.buffer, 3);
+        }
+
+        app.select_next_occurrence();
+
+        let doc = app.tabs.active_doc();
+        assert_eq!(doc.secondary_cursors.len(), 1);
+        assert_eq!(
+            doc.secondary_cursors[0].position,
+            char_to_pos(&doc.buffer, 7),
+        );
     }
 }

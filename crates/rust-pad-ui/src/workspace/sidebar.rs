@@ -103,12 +103,30 @@ pub(crate) struct NewEntryState {
 pub(crate) struct RenameEntryState {
     /// Original full path of the entry being renamed.
     pub original_path: PathBuf,
+    /// Index of the workspace root whose row initiated the rename. Pairs with
+    /// `original_path` so a physical folder that surfaces under two roots only
+    /// shows the inline field on the row the user actually selected — mirrors
+    /// the [`SelectedNode`] identity model.
+    pub root_index: usize,
     /// Current name in the text field.
     pub name: String,
     /// True if this is a directory.
     pub is_dir: bool,
     /// When true, the stem of `name` is selected on the first render.
     pub select_on_focus: bool,
+}
+
+/// Identifies a single *visible row* in the tree. Two roots can surface the
+/// same physical path (e.g. a folder that is both a workspace root and a
+/// child of another root), so a bare `PathBuf` cannot disambiguate which row
+/// is selected. Pairing the path with the owning root index makes each row
+/// uniquely addressable for selection and inline rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectedNode {
+    /// Index of the workspace root whose subtree contains this row.
+    pub root_index: usize,
+    /// Absolute path of the entry.
+    pub path: PathBuf,
 }
 
 /// State for the workspace sidebar panel.
@@ -146,14 +164,31 @@ pub struct WorkspaceSidebar {
     /// because the egui `CollapsingState` ids are only addressable from
     /// within the sidebar's `Ui` scope.
     pub(crate) pending_bulk_collapse: Option<bool>,
+    /// One-shot keyboard expand/collapse override consumed by the next
+    /// `render_tree`. `Some((path, open))` forces that directory's egui
+    /// `CollapsingState` to `open` for one frame. Keyboard nav mutates the
+    /// data-model `expanded` flag, but egui's `CollapsingState` owns the
+    /// on-screen open state and `load_with_default_open` ignores its default
+    /// once a state is stored — so the model change must be pushed into egui
+    /// here or the header never moves. At most one nav key is handled per
+    /// frame, so a single slot suffices (mirrors `pending_bulk_collapse`).
+    pub(crate) pending_expand: Option<(PathBuf, bool)>,
     /// Whether the next render of the workspace rename buffer should
     /// select all text on focus. Set when entering rename mode, cleared
     /// after the selection is applied.
     pub(crate) workspace_rename_select_pending: bool,
-    /// Currently selected entry path. Path-based so it survives lazy-load
-    /// folder expansion; comparison silently yields false if the path
-    /// disappears, implicitly clearing the highlight.
-    pub(crate) selected_path: Option<std::path::PathBuf>,
+    /// Currently selected entry, identified by `(root_index, path)` so a
+    /// physical folder appearing under two roots highlights only the row the
+    /// user actually clicked. Survives lazy-load expansion; the selection is
+    /// cleared when its row is no longer visible.
+    pub(crate) selected: Option<SelectedNode>,
+    /// Whether the sidebar currently owns keyboard input. Set when the user
+    /// clicks a tree row or navigates with the pointer over the sidebar;
+    /// cleared by `App` when the editor is clicked. The keyboard-nav gate and
+    /// the single-pane editor's `auto_focus` both read this so arrow/Enter/F2
+    /// keys route to whichever panel the user last engaged — independent of
+    /// egui's implicit widget focus.
+    pub(crate) kbd_active: bool,
 }
 
 impl Default for WorkspaceSidebar {
@@ -179,8 +214,10 @@ impl WorkspaceSidebar {
             rename_entry: None,
             show_hidden: false,
             pending_bulk_collapse: None,
+            pending_expand: None,
             workspace_rename_select_pending: false,
-            selected_path: None,
+            selected: None,
+            kbd_active: false,
         }
     }
 
@@ -387,12 +424,20 @@ impl WorkspaceSidebar {
     fn render_tree(&mut self, ui: &mut egui::Ui, action: &mut SidebarAction) {
         let mut context_action = SidebarAction::None;
         let mut new_entry_request: Option<NewEntryState> = None;
-        let mut selection_request: Option<std::path::PathBuf> = None;
+        let mut selection_request: Option<SelectedNode> = None;
         let tree_len = self.tree.len();
         let bulk = self.pending_bulk_collapse.take();
-        // Snapshot the selection so we can pass it as `&Path` through the
-        // borrow-checker without aliasing `self.selected_path` mutably.
-        let selected_snapshot = self.selected_path.clone();
+        // Hoist the inline-rename and pending-expand state into locals so a root
+        // row can render its own rename field (the body's `render_entry_list`
+        // only reaches nested entries) without aliasing `self` mutably across
+        // the `show_header`/`body` closures. Written back after the loop.
+        let mut rename_state = self.rename_entry.take();
+        let mut pending = self.pending_expand.take();
+        let mut rename_confirmed = self.rename_just_confirmed;
+        let mut clear_rename = false;
+        // Snapshot the selection so we can pass it by reference through the
+        // borrow-checker without aliasing `self.selected` mutably.
+        let selected_snapshot = self.selected.clone();
 
         for root_idx in 0..tree_len {
             let root_path = self.tree[root_idx].path.clone();
@@ -402,6 +447,21 @@ impl WorkspaceSidebar {
                 .unwrap_or_else(|| root_path.to_string_lossy().into_owned());
 
             let folder_exists = root_path.is_dir();
+
+            // A root selected for rename shows its inline field in place of the
+            // collapsing header, so the rename targets the row the user picked
+            // — not a same-path duplicate nested under another root.
+            let renaming_this_root = rename_state
+                .as_ref()
+                .is_some_and(|r| r.root_index == root_idx && r.original_path == root_path);
+            if renaming_this_root {
+                if let Some(state) = rename_state.as_mut() {
+                    if render_inline_rename(ui, state, action, &mut rename_confirmed) {
+                        clear_rename = true;
+                    }
+                }
+                continue;
+            }
 
             let id = ui.make_persistent_id(format!("root_{root_idx}"));
             if let Some(open) = bulk {
@@ -427,12 +487,24 @@ impl WorkspaceSidebar {
             if should_force_open && !cs.is_open() {
                 cs.set_open(true);
             }
+            // Apply a queued keyboard expand/collapse for this root (see
+            // `pending_expand`): the data-model flag alone does not move egui's
+            // header state.
+            if pending.as_ref().is_some_and(|(p, _)| *p == root_path) {
+                if let Some((_, open)) = pending.take() {
+                    cs.set_open(open);
+                    cs.store(ui.ctx());
+                    self.tree[root_idx].expanded = open;
+                }
+            }
 
-            let root_selected = selected_snapshot.as_deref() == Some(root_path.as_path());
+            let root_selected = selected_snapshot
+                .as_ref()
+                .is_some_and(|s| s.root_index == root_idx && s.path == root_path);
             let (_toggle, header_inner, _body) = cs
                 .show_header(ui, |ui| {
                     let response = if folder_exists {
-                        ui.selectable_label(root_selected, egui::RichText::new(&root_name).strong())
+                        selectable_row(ui, root_selected, egui::RichText::new(&root_name).strong())
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                     } else {
                         ui.weak(format!(
@@ -441,7 +513,10 @@ impl WorkspaceSidebar {
                         ))
                     };
                     if folder_exists && response.clicked() {
-                        selection_request = Some(root_path.clone());
+                        selection_request = Some(SelectedNode {
+                            root_index: root_idx,
+                            path: root_path.clone(),
+                        });
                     }
                     response.context_menu(|ui| {
                         show_root_context_menu(
@@ -459,11 +534,13 @@ impl WorkspaceSidebar {
                         let mut ctx = RenderCtx {
                             action,
                             new_entry: &mut self.new_entry,
-                            rename_entry: &mut self.rename_entry,
-                            rename_just_confirmed: &mut self.rename_just_confirmed,
+                            rename_entry: &mut rename_state,
+                            rename_just_confirmed: &mut rename_confirmed,
                             workspace_root: &root_path,
                             show_hidden: self.show_hidden,
-                            selected_path: selected_snapshot.as_deref(),
+                            root_index: root_idx,
+                            selected: selected_snapshot.as_ref(),
+                            pending_expand: &mut pending,
                         };
                         render_entry_list(
                             ui,
@@ -500,34 +577,57 @@ impl WorkspaceSidebar {
         }
         if let Some(req) = new_entry_request {
             self.new_entry = Some(req);
-            self.rename_entry = None;
+            rename_state = None;
         }
+        if clear_rename {
+            rename_state = None;
+        }
+        // Write hoisted state back.
+        self.rename_entry = rename_state;
+        self.pending_expand = pending;
+        self.rename_just_confirmed = rename_confirmed;
         if let Some(req) = selection_request {
-            self.selected_path = Some(req);
+            self.selected = Some(req);
+            // A row click hands keyboard ownership to the sidebar so arrow
+            // navigation works regardless of pointer position until the user
+            // clicks another panel.
+            self.kbd_active = true;
         }
     }
 
     // ── Keyboard-navigation helpers ───────────────────────────────────
 
-    /// Returns the paths of all currently visible entries in tree order
-    /// (root → children if open → siblings ...). Honours [`show_hidden`]
-    /// and [`TreeEntry::expanded`]. Used only for keyboard navigation.
+    /// Returns every currently visible row as a [`SelectedNode`] in tree
+    /// order (root → children if open → siblings ...), tagging each with its
+    /// owning root index. Honours [`show_hidden`] and [`TreeEntry::expanded`].
+    /// Used for keyboard navigation and selection identity.
     ///
     /// Lazy-loaded children that have not yet been scanned simply aren't
     /// included — keyboard nav cannot reveal an entry the renderer hasn't
     /// materialised, matching what the user sees.
-    pub(crate) fn visible_paths(&self) -> Vec<std::path::PathBuf> {
+    pub(crate) fn visible_nodes(&self) -> Vec<SelectedNode> {
         let mut out = Vec::new();
-        for root in &self.tree {
+        for (root_index, root) in self.tree.iter().enumerate() {
             if !root.path.is_dir() {
                 continue;
             }
-            out.push(root.path.clone());
+            out.push(SelectedNode {
+                root_index,
+                path: root.path.clone(),
+            });
             if root.expanded {
-                collect_visible(&root.entries, &mut out, self.show_hidden);
+                collect_visible(root_index, &root.entries, &mut out, self.show_hidden);
             }
         }
         out
+    }
+
+    /// Convenience wrapper over [`visible_nodes`](Self::visible_nodes)
+    /// returning just the paths, in the same order. Test-only — production
+    /// navigation works in terms of [`SelectedNode`].
+    #[cfg(test)]
+    pub(crate) fn visible_paths(&self) -> Vec<std::path::PathBuf> {
+        self.visible_nodes().into_iter().map(|n| n.path).collect()
     }
 
     /// Looks up the [`EntryKind`] for `target`. Walks the tree; returns
@@ -580,18 +680,34 @@ impl WorkspaceSidebar {
         }
     }
 
-    /// Convenience: flips [`is_expanded`] for `target`.
+    /// Queues a keyboard-driven expand/collapse: updates the data-model
+    /// `expanded` flag *and* records a one-shot override so the next
+    /// `render_tree` pushes the new state into egui's `CollapsingState`
+    /// (see [`pending_expand`](Self::pending_expand)). Mouse interactions write
+    /// egui directly; keyboard nav must route through here or the header never
+    /// moves on screen.
+    pub(crate) fn queue_expand(&mut self, target: &std::path::Path, open: bool) {
+        self.set_expanded(target, open);
+        self.pending_expand = Some((target.to_path_buf(), open));
+    }
+
+    /// Convenience: flips [`is_expanded`] for `target`, queuing the egui
+    /// override so the change is visible.
     pub(crate) fn toggle_expanded_for(&mut self, target: &std::path::Path) {
         let new = !self.is_expanded(target);
-        self.set_expanded(target, new);
+        self.queue_expand(target, new);
     }
 
     /// Handles arrow / Enter / F2 keystrokes for the sidebar tree.
     ///
-    /// Activation rules — keyboard nav fires when the pointer is over
-    /// the sidebar OR when a selection exists AND no other widget owns
-    /// focus. Returns `Some(action)` only when Enter on a file should
-    /// open it. Inline rename / new-entry editing suspends nav.
+    /// Activation rules — keyboard nav fires when the pointer is over the
+    /// sidebar OR when a selection exists AND the sidebar holds keyboard
+    /// ownership ([`kbd_active`](Self::kbd_active)). The latter lets the user
+    /// navigate after moving the mouse away; ownership is released when the
+    /// editor is clicked, so keys never bleed across panels — independent of
+    /// egui's implicit widget focus (which the editor monopolises via its
+    /// per-frame `auto_focus`). Returns `Some(action)` only when Enter on a
+    /// file should open it. Inline rename / new-entry editing suspends nav.
     pub(crate) fn handle_tree_kbd_nav(
         &mut self,
         ctx: &egui::Context,
@@ -601,61 +717,80 @@ impl WorkspaceSidebar {
         if self.rename_buffer.is_some() || self.rename_entry.is_some() || self.new_entry.is_some() {
             return None;
         }
-        // Gate on pointer-in-sidebar OR (have selection AND nothing else
-        // has focus). The latter clause lets the user navigate after
-        // moving the mouse away, but stops keys bleeding when the editor
-        // is focused.
         let pointer_in_sidebar = ctx.input(|i| {
             i.pointer
                 .latest_pos()
                 .is_some_and(|p| sidebar_rect.contains(p))
         });
-        let no_other_focused = ctx.memory(|m| m.focused().is_none());
-        if !(pointer_in_sidebar || (self.selected_path.is_some() && no_other_focused)) {
+        if !(pointer_in_sidebar || (self.selected.is_some() && self.kbd_active)) {
             return None;
         }
+        // Pressing a navigation key while the pointer is over the sidebar is a
+        // deliberate engagement — latch keyboard ownership so navigation keeps
+        // working after the pointer leaves, until another panel is clicked.
+        // (Mere hovering must NOT latch, or it would silently steal arrows
+        // back from the editor the next time the pointer crosses the sidebar.)
+        if pointer_in_sidebar {
+            use egui::Key;
+            let nav_key_pressed = ctx.input(|i| {
+                i.key_pressed(Key::ArrowDown)
+                    || i.key_pressed(Key::ArrowUp)
+                    || i.key_pressed(Key::ArrowLeft)
+                    || i.key_pressed(Key::ArrowRight)
+                    || i.key_pressed(Key::Enter)
+                    || i.key_pressed(Key::F2)
+            });
+            if nav_key_pressed {
+                self.kbd_active = true;
+            }
+        }
 
-        let paths = self.visible_paths();
-        if paths.is_empty() {
+        let nodes = self.visible_nodes();
+        if nodes.is_empty() {
             return None;
         }
 
         let current_idx = self
-            .selected_path
+            .selected
             .as_ref()
-            .and_then(|p| paths.iter().position(|q| q == p));
+            .and_then(|sel| nodes.iter().position(|n| n == sel));
 
-        // If selection vanished, surface the event and clear.
-        if self.selected_path.is_some() && current_idx.is_none() {
+        // If the selected row is no longer visible, surface the event and clear.
+        if self.selected.is_some() && current_idx.is_none() {
             tracing::info!(
-                previous_path = ?self.selected_path,
-                reason = "path_no_longer_exists",
+                previous = ?self.selected,
+                reason = "row_no_longer_visible",
                 "Workspace selection cleared",
             );
-            self.selected_path = None;
+            self.selected = None;
         }
 
         use egui::{Key, Modifiers};
         let mods = Modifiers::NONE;
 
         if ctx.input_mut(|i| i.consume_key(mods, Key::ArrowDown)) {
-            let next = current_idx.map_or(0, |i| (i + 1).min(paths.len() - 1));
-            self.selected_path = Some(paths[next].clone());
+            let next = current_idx.map_or(0, |i| (i + 1).min(nodes.len() - 1));
+            self.selected = Some(nodes[next].clone());
             return None;
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::ArrowUp)) {
             let prev = current_idx.map_or(0, |i| i.saturating_sub(1));
-            self.selected_path = Some(paths[prev].clone());
+            self.selected = Some(nodes[prev].clone());
             return None;
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::Enter)) {
             if let Some(idx) = current_idx {
-                let selected = paths[idx].clone();
-                if let Some(kind) = self.entry_kind_for(&selected) {
+                let node = nodes[idx].clone();
+                if let Some(kind) = self.entry_kind_for(&node.path) {
                     match kind {
-                        EntryKind::File => return Some(SidebarAction::OpenFile(selected)),
+                        EntryKind::File => {
+                            // Opening a file hands keyboard ownership to the
+                            // editor so the user can type immediately.
+                            self.kbd_active = false;
+                            return Some(SidebarAction::OpenFile(node.path));
+                        }
                         EntryKind::Directory => {
-                            self.toggle_expanded_for(&selected);
+                            self.toggle_expanded_for(&node.path);
                             return None;
                         }
                     }
@@ -665,10 +800,12 @@ impl WorkspaceSidebar {
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::F2)) {
             if let Some(idx) = current_idx {
-                let path = paths[idx].clone();
-                tracing::debug!(path = ?path, "Workspace rename initiated via F2");
+                let node = nodes[idx].clone();
+                let path = node.path;
+                tracing::debug!(path = ?path, root_index = node.root_index, "Workspace rename initiated via F2");
                 self.rename_entry = Some(RenameEntryState {
                     original_path: path.clone(),
+                    root_index: node.root_index,
                     name: path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -681,17 +818,21 @@ impl WorkspaceSidebar {
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::ArrowRight)) {
             if let Some(idx) = current_idx {
-                let path = paths[idx].clone();
-                if matches!(self.entry_kind_for(&path), Some(EntryKind::Directory)) {
-                    if self.is_expanded(&path) {
-                        // Move to first child if it appears below us in
-                        // the visible-paths list — i.e. lazy-load already
-                        // ran and the directory is non-empty.
-                        if idx + 1 < paths.len() && paths[idx + 1].starts_with(&path) {
-                            self.selected_path = Some(paths[idx + 1].clone());
+                let node = nodes[idx].clone();
+                if matches!(self.entry_kind_for(&node.path), Some(EntryKind::Directory)) {
+                    if self.is_expanded(&node.path) {
+                        // Move to the first child if it appears below us in the
+                        // same root subtree — i.e. lazy-load already ran and
+                        // the directory is non-empty.
+                        if let Some(child) = nodes.get(idx + 1) {
+                            if child.root_index == node.root_index
+                                && child.path.starts_with(&node.path)
+                            {
+                                self.selected = Some(child.clone());
+                            }
                         }
                     } else {
-                        self.set_expanded(&path, true);
+                        self.queue_expand(&node.path, true);
                     }
                 }
             }
@@ -699,13 +840,17 @@ impl WorkspaceSidebar {
         }
         if ctx.input_mut(|i| i.consume_key(mods, Key::ArrowLeft)) {
             if let Some(idx) = current_idx {
-                let path = paths[idx].clone();
-                let is_dir = matches!(self.entry_kind_for(&path), Some(EntryKind::Directory));
-                if is_dir && self.is_expanded(&path) {
-                    self.set_expanded(&path, false);
-                } else if let Some(parent) = path.parent() {
-                    if paths.iter().any(|p| p == parent) {
-                        self.selected_path = Some(parent.to_path_buf());
+                let node = nodes[idx].clone();
+                let is_dir = matches!(self.entry_kind_for(&node.path), Some(EntryKind::Directory));
+                if is_dir && self.is_expanded(&node.path) {
+                    self.queue_expand(&node.path, false);
+                } else if let Some(parent) = node.path.parent() {
+                    // Jump to the parent row within the same root subtree.
+                    if let Some(parent_node) = nodes
+                        .iter()
+                        .find(|n| n.root_index == node.root_index && n.path == parent)
+                    {
+                        self.selected = Some(parent_node.clone());
                     }
                 }
             }
@@ -715,17 +860,25 @@ impl WorkspaceSidebar {
     }
 }
 
-/// Recursive helper for [`WorkspaceSidebar::visible_paths`]. Pushes
+/// Recursive helper for [`WorkspaceSidebar::visible_nodes`]. Pushes
 /// `entries` (filtered by `show_hidden`) into `out`, recursing into
 /// expanded directories.
-fn collect_visible(entries: &[TreeEntry], out: &mut Vec<std::path::PathBuf>, show_hidden: bool) {
+fn collect_visible(
+    root_index: usize,
+    entries: &[TreeEntry],
+    out: &mut Vec<SelectedNode>,
+    show_hidden: bool,
+) {
     for entry in entries {
         if !show_hidden && entry.name.starts_with('.') {
             continue;
         }
-        out.push(entry.path.clone());
+        out.push(SelectedNode {
+            root_index,
+            path: entry.path.clone(),
+        });
         if matches!(entry.kind, EntryKind::Directory) && entry.expanded {
-            collect_visible(&entry.children, out, show_hidden);
+            collect_visible(root_index, &entry.children, out, show_hidden);
         }
     }
 }
@@ -880,9 +1033,48 @@ pub(crate) struct RenderCtx<'a> {
     /// workspace folder it appears under.
     pub workspace_root: &'a Path,
     pub show_hidden: bool,
-    /// Path of the currently selected entry, for highlighting. None when
-    /// nothing is selected.
-    pub selected_path: Option<&'a Path>,
+    /// Index of the workspace root whose subtree is being rendered. Combined
+    /// with each entry's path to match the selection (see [`SelectedNode`]).
+    pub root_index: usize,
+    /// The currently selected node, for highlighting. `None` when nothing is
+    /// selected. An entry is highlighted only when both its `root_index` and
+    /// path match.
+    pub selected: Option<&'a SelectedNode>,
+    /// One-shot keyboard expand/collapse override threaded down from
+    /// `render_tree`. When it matches a directory's path, that directory's
+    /// egui `CollapsingState` is forced open/closed for the frame and the slot
+    /// is cleared. See [`WorkspaceSidebar::pending_expand`].
+    pub pending_expand: &'a mut Option<(PathBuf, bool)>,
+}
+
+impl RenderCtx<'_> {
+    /// Whether `path` in the current root subtree is the selected row.
+    fn is_selected(&self, path: &Path) -> bool {
+        self.selected
+            .is_some_and(|s| s.root_index == self.root_index && s.path == path)
+    }
+}
+
+/// Renders a clickable, selectable tree row that mirrors the look of
+/// `ui.selectable_label` (selection highlight, hover fill) but senses with
+/// [`egui::Sense::CLICK`] — the bare, **non-focusable** click flag.
+///
+/// Tree rows must not take egui keyboard focus: a focused row makes egui's
+/// spatial widget navigation hijack the arrow keys (focus jumps to unrelated
+/// widgets) and lets the row's own activation race the sidebar's nav handler.
+/// Keeping rows non-focusable leaves arrow/Enter/F2 entirely to
+/// [`WorkspaceSidebar::handle_tree_kbd_nav`].
+fn selectable_row<'a>(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl egui::IntoAtoms<'a>,
+) -> egui::Response {
+    ui.add(
+        egui::Button::new(text)
+            .selected(selected)
+            .frame_when_inactive(selected)
+            .sense(egui::Sense::CLICK),
+    )
 }
 
 /// Renders a directory tree entry with collapsing header, context menu, and lazy-loaded children.
@@ -897,7 +1089,7 @@ fn render_directory_entry(
     ctx: &mut RenderCtx<'_>,
     new_entry_request: &mut Option<NewEntryState>,
     rename_request: &mut Option<RenameEntryState>,
-    selection_request: &mut Option<std::path::PathBuf>,
+    selection_request: &mut Option<SelectedNode>,
 ) {
     let name = entry.name.clone();
     let path = entry.path.clone();
@@ -911,17 +1103,28 @@ fn render_directory_entry(
     if should_force_open && !cs.is_open() {
         cs.set_open(true);
     }
+    // Apply a queued keyboard expand/collapse to egui's own state — the
+    // data-model flag alone does not move the header (see `pending_expand`).
+    if ctx.pending_expand.as_ref().is_some_and(|(p, _)| *p == path) {
+        if let Some((_, open)) = ctx.pending_expand.take() {
+            cs.set_open(open);
+            entry.expanded = open;
+        }
+    }
 
     let show_hidden = ctx.show_hidden;
     let workspace_root = ctx.workspace_root.to_path_buf();
-    let selected = ctx.selected_path == Some(path.as_path());
+    let selected = ctx.is_selected(&path);
+    let root_index = ctx.root_index;
     let (_toggle, header_inner, _body) = cs
         .show_header(ui, |ui| {
-            let response = ui
-                .selectable_label(selected, format!("{} {name}", icons::FOLDER))
+            let response = selectable_row(ui, selected, format!("{} {name}", icons::FOLDER))
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
-                *selection_request = Some(path.clone());
+                *selection_request = Some(SelectedNode {
+                    root_index,
+                    path: path.clone(),
+                });
             }
             response.context_menu(|ui| {
                 show_directory_context_menu(
@@ -968,14 +1171,17 @@ fn render_file_entry(
     entry: &TreeEntry,
     ctx: &mut RenderCtx<'_>,
     rename_request: &mut Option<RenameEntryState>,
-    selection_request: &mut Option<std::path::PathBuf>,
+    selection_request: &mut Option<SelectedNode>,
 ) {
     let icon = file_icon(&entry.name);
-    let selected = ctx.selected_path == Some(entry.path.as_path());
-    let response = ui.selectable_label(selected, format!("{icon} {}", entry.name));
+    let selected = ctx.is_selected(&entry.path);
+    let response = selectable_row(ui, selected, format!("{icon} {}", entry.name));
 
     if response.clicked() {
-        *selection_request = Some(entry.path.clone());
+        *selection_request = Some(SelectedNode {
+            root_index: ctx.root_index,
+            path: entry.path.clone(),
+        });
     }
     if response.double_clicked() {
         *ctx.action = SidebarAction::OpenFile(entry.path.clone());
@@ -1031,7 +1237,7 @@ fn render_entry_list(
     parent_path: &Path,
     entries: &mut [TreeEntry],
     ctx: &mut RenderCtx<'_>,
-    selection_request: &mut Option<std::path::PathBuf>,
+    selection_request: &mut Option<SelectedNode>,
 ) {
     let mut new_entry_request: Option<NewEntryState> = None;
     let mut rename_request: Option<RenameEntryState> = None;
@@ -1041,7 +1247,7 @@ fn render_entry_list(
         let is_renaming = ctx
             .rename_entry
             .as_ref()
-            .is_some_and(|r| r.original_path == entry.path);
+            .is_some_and(|r| r.root_index == ctx.root_index && r.original_path == entry.path);
 
         if is_renaming {
             if let Some(ref mut state) = ctx.rename_entry {
@@ -1275,6 +1481,7 @@ mod tests {
     fn test_rename_entry_state_creation() {
         let state = RenameEntryState {
             original_path: PathBuf::from("/project/src/old.rs"),
+            root_index: 0,
             name: "old.rs".to_string(),
             is_dir: false,
             select_on_focus: true,
@@ -1400,6 +1607,7 @@ mod tests {
     fn test_rename_entry_state_dir() {
         let state = RenameEntryState {
             original_path: PathBuf::from("/project/src"),
+            root_index: 0,
             name: "src".to_string(),
             is_dir: true,
             select_on_focus: true,
@@ -1448,6 +1656,7 @@ mod tests {
         // Switch to rename state (should conceptually clear new_entry)
         sidebar.rename_entry = Some(RenameEntryState {
             original_path: PathBuf::from("/project/old.rs"),
+            root_index: 0,
             name: "old.rs".to_string(),
             is_dir: false,
             select_on_focus: true,
@@ -1512,12 +1721,14 @@ mod tests {
     fn test_rename_entry_state_clone() {
         let state = RenameEntryState {
             original_path: PathBuf::from("/a/b"),
+            root_index: 2,
             name: "b".to_string(),
             is_dir: true,
             select_on_focus: true,
         };
         let cloned = state.clone();
         assert_eq!(state.original_path, cloned.original_path);
+        assert_eq!(state.root_index, cloned.root_index);
         assert_eq!(state.name, cloned.name);
         assert_eq!(state.is_dir, cloned.is_dir);
     }
@@ -1577,6 +1788,45 @@ mod tests {
         assert_eq!(paths[0], tmp.path());
         assert_eq!(paths[1], tmp.path().join("a.txt"));
         assert_eq!(paths[2], tmp.path().join("b.txt"));
+    }
+
+    #[test]
+    fn visible_nodes_disambiguate_same_path_under_two_roots() {
+        // New Bug 1 topology: folder C is both a child of root A and a root
+        // in its own right, so the same physical path appears on two rows.
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("A");
+        let c = a.join("C");
+        std::fs::create_dir_all(&c).unwrap();
+
+        let mut sidebar = WorkspaceSidebar::new();
+        // Root 0: A (expanded), containing child C.
+        sidebar.tree.push(crate::workspace::tree::FolderRoot {
+            path: a.clone(),
+            entries: vec![make_dir_entry(&a, "C", false, Vec::new())],
+            expanded: true,
+        });
+        // Root 1: C itself — same physical path as A/C.
+        sidebar.tree.push(crate::workspace::tree::FolderRoot {
+            path: c.clone(),
+            entries: Vec::new(),
+            expanded: false,
+        });
+
+        let nodes = sidebar.visible_nodes();
+        let c_nodes: Vec<&SelectedNode> = nodes.iter().filter(|n| n.path == c).collect();
+        assert_eq!(c_nodes.len(), 2, "same path appears under both roots");
+        assert_eq!(c_nodes[0].root_index, 0, "child of root A");
+        assert_eq!(c_nodes[1].root_index, 1, "root C");
+
+        // Selecting the root-1 instance matches exactly one row — not the
+        // child under root A. This is what gives single-row highlight.
+        let selected = SelectedNode {
+            root_index: 1,
+            path: c.clone(),
+        };
+        assert_eq!(nodes.iter().filter(|n| **n == selected).count(), 1);
+        assert_ne!(*c_nodes[0], selected, "the root-A child is a different row");
     }
 
     #[test]
@@ -1715,6 +1965,77 @@ mod tests {
         let found = find_entry_mut(&mut sidebar.tree[0].entries, &target).expect("found");
         assert_eq!(found.name, "deep.rs");
         assert_eq!(found.kind, EntryKind::File);
+    }
+
+    #[test]
+    fn queue_expand_flips_flag_and_records_override() {
+        // Defects A/B: keyboard expand must update BOTH the data-model flag and
+        // the one-shot `pending_expand` override that the next render pushes
+        // into egui's CollapsingState.
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = make_dir_entry(tmp.path(), "src", false, vec![]);
+        let mut sidebar = WorkspaceSidebar::new();
+        sidebar.tree.push(crate::workspace::tree::FolderRoot {
+            path: tmp.path().to_path_buf(),
+            entries: vec![sub],
+            expanded: true,
+        });
+        let target = tmp.path().join("src");
+
+        assert!(!sidebar.is_expanded(&target));
+        assert!(sidebar.pending_expand.is_none());
+
+        sidebar.queue_expand(&target, true);
+        assert!(sidebar.is_expanded(&target), "model flag set");
+        assert_eq!(
+            sidebar.pending_expand,
+            Some((target.clone(), true)),
+            "render override recorded so egui follows the model",
+        );
+
+        // Collapsing records the inverse override.
+        sidebar.queue_expand(&target, false);
+        assert!(!sidebar.is_expanded(&target));
+        assert_eq!(sidebar.pending_expand, Some((target.clone(), false)));
+    }
+
+    #[test]
+    fn toggle_expanded_for_queues_override() {
+        // Enter-on-folder routes through toggle → queue_expand, so it must also
+        // arm the override (the bug was that it only touched the data model).
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = make_dir_entry(tmp.path(), "src", false, vec![]);
+        let mut sidebar = WorkspaceSidebar::new();
+        sidebar.tree.push(crate::workspace::tree::FolderRoot {
+            path: tmp.path().to_path_buf(),
+            entries: vec![sub],
+            expanded: true,
+        });
+        let target = tmp.path().join("src");
+
+        sidebar.toggle_expanded_for(&target);
+        assert!(sidebar.is_expanded(&target));
+        assert_eq!(sidebar.pending_expand, Some((target.clone(), true)));
+    }
+
+    #[test]
+    fn rename_state_identity_is_scoped_by_root_index() {
+        // Defect C: the inline-rename match is (root_index, path), so a physical
+        // folder surfaced under two roots only renames the row the user picked.
+        let path = PathBuf::from("/ws/A/C");
+        let state = RenameEntryState {
+            original_path: path.clone(),
+            root_index: 1,
+            name: "C".to_string(),
+            is_dir: true,
+            select_on_focus: true,
+        };
+        // Mirrors the predicate in `render_entry_list`.
+        let matches = |root_index: usize, entry_path: &std::path::Path| {
+            state.root_index == root_index && state.original_path == entry_path
+        };
+        assert!(matches(1, &path), "selected root-1 instance renames");
+        assert!(!matches(0, &path), "the same path under root 0 does not");
     }
 
     #[test]

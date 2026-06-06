@@ -108,6 +108,7 @@ pub(crate) fn show_file_context_menu(
     if ui.button("Rename").clicked() {
         *rename_request = Some(RenameEntryState {
             original_path: file_path.to_path_buf(),
+            root_index: ctx.root_index,
             name: file_name.to_string(),
             is_dir: false,
             select_on_focus: true,
@@ -143,6 +144,7 @@ pub(crate) fn show_directory_context_menu(
     if ui.button("Rename").clicked() {
         *rename_request = Some(RenameEntryState {
             original_path: dir_path.to_path_buf(),
+            root_index: ctx.root_index,
             name: dir_name.to_string(),
             is_dir: true,
             select_on_focus: true,
