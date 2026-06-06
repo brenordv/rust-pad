@@ -684,7 +684,7 @@ impl Document {
                 // The indentation is inserted/removed at the START of the first
                 // line, i.e. *before* the selection's top endpoint. Pinning the
                 // top endpoint to column 0 absorbs that growth/shrink into the
-                // selection so the beginning never escapes (Bug #3, report 3).
+                // selection so the beginning never escapes.
                 // The bottom endpoint keeps tracking its physical character via
                 // its per-line delta, which already makes the end correct.
                 let anchor_is_top = self
@@ -1851,7 +1851,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── indent_or_dedent_selection (Bug #2/#3 regression) ─────────────
+    // ── indent_or_dedent_selection (regression) ──────────────────────
 
     fn doc_with_text(text: &str) -> Document {
         let mut doc = Document::new();
@@ -1884,7 +1884,7 @@ mod tests {
     fn indent_or_dedent_selection_single_line_indents() {
         let mut doc = doc_with_text("aaa\nbbb\nccc");
         doc.indent_style = IndentStyle::Spaces(2);
-        // Select part of line 0 — Bug #3: the selected text must NOT be erased.
+        // Select part of line 0 — the selected text must NOT be erased.
         doc.cursor.selection_anchor = Some(Position::new(0, 0));
         doc.cursor.position = Position::new(0, 3);
         assert!(doc.indent_or_dedent_selection(true));
@@ -1903,7 +1903,7 @@ mod tests {
 
     #[test]
     fn indent_or_dedent_selection_multiline_dedents_all() {
-        // Canonical Bug #2 reproduction (JSON block, 2-space indent).
+        // Multiline dedent of a JSON block (2-space indent).
         let mut doc = doc_with_text("  {\n    \"id\": 3426410,\n    \"value\": 109,\n  },");
         doc.indent_style = IndentStyle::Spaces(2);
         doc.cursor.selection_anchor = Some(Position::new(0, 0));
@@ -1928,7 +1928,7 @@ mod tests {
         assert_eq!(doc.buffer.to_string(), "aaa\nbbb");
     }
 
-    // ── Bug #3 follow-up: selection tracks the indented text ──────────
+    // ── Selection tracks the indented text ───────────────────────────
 
     #[test]
     fn indent_selection_grows_with_text_single_line() {

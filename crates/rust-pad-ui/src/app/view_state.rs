@@ -74,7 +74,7 @@ impl App {
 
 /// Looks up the saved view-state for `path` and applies it to `doc`.
 ///
-/// V1 (security review): explicitly clamps `cursor_line` and `cursor_col`
+/// Security hardening: explicitly clamps `cursor_line` and `cursor_col`
 /// against the loaded buffer so a tampered or stale record cannot place
 /// the cursor outside the document.
 ///

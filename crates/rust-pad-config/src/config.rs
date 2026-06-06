@@ -54,6 +54,16 @@ pub struct AppConfig {
     /// Maximum file size in MB that can be opened. Files exceeding this limit
     /// are rejected to prevent out-of-memory crashes. 0 = no limit.
     pub max_file_size_mb: u64,
+    /// Threshold in MB above which a "Copy file contents to clipboard" action
+    /// prompts the user for confirmation before reading. Files above
+    /// `copy_contents_max_mb` are refused outright (no prompt). 0 = always prompt.
+    pub copy_contents_warning_mb: u64,
+    /// Hard cap in MB for the "Copy file contents to clipboard" action. Files
+    /// larger than this are refused outright. This is independent of
+    /// `max_file_size_mb` (which limits opening a file in the editor): copying
+    /// to the clipboard is a different operation with different memory limits.
+    /// 0 = no limit.
+    pub copy_contents_max_mb: u64,
     /// Maximum size (in KB) of unsaved tab content to persist in the session store.
     /// 0 = unlimited. Tabs exceeding this limit are saved as metadata only.
     pub session_content_max_kb: usize,
@@ -100,6 +110,8 @@ impl Default for AppConfig {
             recent_files_cleanup: RecentFilesCleanup::default(),
             recent_files: Vec::new(),
             max_file_size_mb: 512,
+            copy_contents_warning_mb: 5,
+            copy_contents_max_mb: 64,
             session_content_max_kb: 10_240,
             print_show_line_numbers: true,
             sync_scroll_enabled: false,
@@ -226,6 +238,26 @@ impl AppConfig {
         }
     }
 
+    /// Returns the Copy Contents warning threshold in bytes.
+    ///
+    /// `0` in `copy_contents_warning_mb` means "always prompt" — the
+    /// caller treats a `0` return value as "every file triggers the
+    /// confirmation dialog".
+    pub fn copy_contents_warning_bytes(&self) -> u64 {
+        self.copy_contents_warning_mb.saturating_mul(1024 * 1024)
+    }
+
+    /// Returns the Copy Contents hard cap in bytes, or `None` if no limit is
+    /// set (`copy_contents_max_mb == 0`). Independent of the editor open
+    /// limit returned by [`max_file_size_bytes`](Self::max_file_size_bytes).
+    pub fn copy_contents_max_bytes(&self) -> Option<u64> {
+        if self.copy_contents_max_mb == 0 {
+            None
+        } else {
+            Some(self.copy_contents_max_mb * 1024 * 1024)
+        }
+    }
+
     /// Clamps values to valid ranges and resets invalid fields.
     pub fn sanitize(&mut self) {
         self.max_zoom_level = self.max_zoom_level.max(1.0);
@@ -246,6 +278,18 @@ impl AppConfig {
         // 0 = no limit; otherwise clamp to 1..=10_240 MB (10 GB)
         if self.max_file_size_mb > 0 {
             self.max_file_size_mb = self.max_file_size_mb.clamp(1, 10_240);
+        }
+        // 0 = unlimited; otherwise clamp to 1..=10_240 MB (10 GB).
+        if self.copy_contents_max_mb > 0 {
+            self.copy_contents_max_mb = self.copy_contents_max_mb.clamp(1, 10_240);
+        }
+        // The Copy Contents warning threshold cannot exceed the Copy Contents
+        // hard cap — otherwise the user would never see the prompt before
+        // hitting the outright refusal. `0` on either side means "no limit /
+        // always prompt" and is preserved as-is.
+        if self.copy_contents_warning_mb > 0 && self.copy_contents_max_mb > 0 {
+            self.copy_contents_warning_mb =
+                self.copy_contents_warning_mb.min(self.copy_contents_max_mb);
         }
         // 0 = unlimited; otherwise clamp to 1..=102_400 KB (100 MB)
         if self.session_content_max_kb > 0 {
@@ -639,6 +683,141 @@ mod tests {
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.max_file_size_mb, 256);
+    }
+
+    // ── Copy contents warning threshold tests ───────────────────────
+
+    #[test]
+    fn test_copy_contents_warning_mb_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.copy_contents_warning_mb, 5);
+    }
+
+    #[test]
+    fn test_copy_contents_warning_bytes_conversion() {
+        let config = AppConfig::default();
+        assert_eq!(config.copy_contents_warning_bytes(), 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_copy_contents_warning_bytes_zero_means_always_prompt() {
+        let config = AppConfig {
+            copy_contents_warning_mb: 0,
+            ..Default::default()
+        };
+        assert_eq!(config.copy_contents_warning_bytes(), 0);
+    }
+
+    #[test]
+    fn test_sanitize_copy_contents_warning_clamped_to_hard_cap() {
+        // The warning is clamped to the Copy Contents hard cap, NOT the
+        // editor open limit (`max_file_size_mb`).
+        let mut config = AppConfig {
+            copy_contents_max_mb: 10,
+            copy_contents_warning_mb: 50,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert_eq!(config.copy_contents_warning_mb, 10);
+    }
+
+    #[test]
+    fn test_sanitize_copy_contents_warning_independent_of_editor_limit() {
+        // A small editor open limit must NOT clamp the copy-contents warning.
+        let mut config = AppConfig {
+            max_file_size_mb: 1,
+            copy_contents_max_mb: 64,
+            copy_contents_warning_mb: 5,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert_eq!(config.copy_contents_warning_mb, 5);
+    }
+
+    #[test]
+    fn test_sanitize_copy_contents_warning_preserved_when_under_cap() {
+        let mut config = AppConfig {
+            copy_contents_max_mb: 100,
+            copy_contents_warning_mb: 5,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert_eq!(config.copy_contents_warning_mb, 5);
+    }
+
+    #[test]
+    fn test_sanitize_copy_contents_warning_zero_preserved() {
+        let mut config = AppConfig {
+            copy_contents_max_mb: 100,
+            copy_contents_warning_mb: 0,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert_eq!(config.copy_contents_warning_mb, 0);
+    }
+
+    #[test]
+    fn test_sanitize_copy_contents_warning_no_hard_cap_no_clamp() {
+        let mut config = AppConfig {
+            copy_contents_max_mb: 0,
+            copy_contents_warning_mb: 50_000,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert_eq!(config.copy_contents_warning_mb, 50_000);
+    }
+
+    #[test]
+    fn test_copy_contents_warning_missing_field_gets_default() {
+        let json = r#"{"current_theme": "Dark"}"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.copy_contents_warning_mb, 5);
+    }
+
+    #[test]
+    fn test_copy_contents_max_bytes_conversion() {
+        let config = AppConfig {
+            copy_contents_max_mb: 64,
+            ..Default::default()
+        };
+        assert_eq!(config.copy_contents_max_bytes(), Some(64 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_copy_contents_max_bytes_zero_means_no_limit() {
+        let config = AppConfig {
+            copy_contents_max_mb: 0,
+            ..Default::default()
+        };
+        assert_eq!(config.copy_contents_max_bytes(), None);
+    }
+
+    #[test]
+    fn test_sanitize_copy_contents_max_clamped() {
+        let mut config = AppConfig {
+            copy_contents_max_mb: 99_999,
+            ..Default::default()
+        };
+        config.sanitize();
+        assert_eq!(config.copy_contents_max_mb, 10_240);
+    }
+
+    #[test]
+    fn test_copy_contents_max_missing_field_gets_default() {
+        let json = r#"{"current_theme": "Dark"}"#;
+        let parsed: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.copy_contents_max_mb, 64);
+    }
+
+    #[test]
+    fn test_copy_contents_warning_serde_round_trip() {
+        let config = AppConfig {
+            copy_contents_warning_mb: 25,
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.copy_contents_warning_mb, 25);
     }
 
     // ── Workspace sidebar width tests ────────────────────────────────

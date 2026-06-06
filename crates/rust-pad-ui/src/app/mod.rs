@@ -33,7 +33,7 @@ pub use settings_dialog::SettingsTab;
 pub use split::SplitState;
 pub use theme_controller::ThemeController;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -49,6 +49,24 @@ use crate::tabs::TabManager;
 
 /// How often to flush undo history to disk (in seconds).
 const FLUSH_INTERVAL_SECS: u64 = 30;
+
+/// Formats a path for **display**, stripping the Windows extended-length
+/// (`\\?\`) prefix that `std::fs::canonicalize` returns. `\\?\UNC\server\share`
+/// collapses back to `\\server\share`; on non-Windows (and for already-clean
+/// paths) the input is returned unchanged.
+///
+/// Display-only: never feed the result back into filesystem APIs or security
+/// gates — the canonical `PathBuf` remains the source of truth for those.
+fn display_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    }
+}
 
 /// Arguments passed from the command line to the application.
 #[derive(Debug, Clone, Default)]
@@ -130,6 +148,23 @@ pub struct App {
     session_content_max_kb: usize,
     /// Maximum file size in bytes that can be opened, or `None` for no limit.
     max_file_size_bytes: Option<u64>,
+    /// Threshold in bytes above which "Copy file contents" prompts the user
+    /// before reading. `0` means "always prompt".
+    pub(crate) copy_contents_warning_bytes: u64,
+    /// Hard cap in bytes for "Copy file contents", or `None` for no limit.
+    /// Independent of `max_file_size_bytes` (the editor open limit): copying
+    /// to the clipboard is a distinct operation with its own size ceiling.
+    pub(crate) copy_contents_max_bytes: Option<u64>,
+    /// In-flight "Copy file contents" confirmation. `Some((canonical_path,
+    /// size_bytes))` while the confirm dialog is open; cleared when the
+    /// user resolves the dialog either way.
+    pub(crate) pending_copy_contents: Option<(std::path::PathBuf, u64)>,
+    /// Canonical paths of in-flight `ReadFileForClipboard` requests. Used to
+    /// route `IoResponse::Error` and `IoResponse::FileTooLarge` away from
+    /// the "open file in editor" prompt (which would offer to open a file
+    /// the user only wanted to copy) and into the clipboard-specific
+    /// `problem_log` channel. Cleared in every terminal response arm.
+    pub(crate) pending_clipboard_reads: Vec<std::path::PathBuf>,
     last_window_title: String,
     live_monitor: LiveMonitorController,
     pub settings_open: bool,
@@ -239,6 +274,13 @@ impl App {
         // Disable egui's built-in keyboard zoom so Ctrl+/- only affects the editor text
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
+        // Install the Phosphor icon font alongside egui's defaults so that
+        // every constant in `crate::icons` renders at the active text size
+        // and recolours with the active theme.
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        cc.egui_ctx.set_fonts(fonts);
+
         // Migrate config/data from legacy exe-relative paths to platform dirs
         if !args.portable {
             rust_pad_config::paths::migrate_legacy_paths();
@@ -312,6 +354,8 @@ impl App {
         Self::open_startup_files(&mut tabs, &args);
 
         let max_file_size_bytes = app_config.max_file_size_bytes();
+        let copy_contents_warning_bytes = app_config.copy_contents_warning_bytes();
+        let copy_contents_max_bytes = app_config.copy_contents_max_bytes();
         let ws_sidebar_visible = app_config.workspace_sidebar_visible;
         let ws_sidebar_width = app_config.workspace_sidebar_width;
         let ws_show_hidden = app_config.show_hidden_files;
@@ -357,6 +401,10 @@ impl App {
             session_store,
             session_content_max_kb: app_config.session_content_max_kb,
             max_file_size_bytes,
+            copy_contents_warning_bytes,
+            copy_contents_max_bytes,
+            pending_copy_contents: None,
+            pending_clipboard_reads: Vec::new(),
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -646,14 +694,38 @@ impl App {
                         self.io_activity.pending_saves.retain(|s| s.path != *p);
                         self.io_activity.pending_reads =
                             self.io_activity.pending_reads.saturating_sub(1);
+                        // A clipboard read with a matching path is dropped
+                        // here too — its failure mode is already surfaced
+                        // through the generic I/O-error problem entry.
+                        self.pending_clipboard_reads.retain(|p2| p2 != p);
                     }
                 }
                 IoResponse::FileTooLarge { path, message } => {
-                    tracing::warn!("File too large: {message}");
-                    if self.io_activity.dialog_open {
-                        self.io_activity.dialog_open = false;
+                    if let Some(pos) = self.pending_clipboard_reads.iter().position(|p| *p == path)
+                    {
+                        // Route to clipboard-specific channel instead of the
+                        // "open file" prompt (which would offer to open a
+                        // file the user only wanted to copy). See R-Obs-7.
+                        self.pending_clipboard_reads.remove(pos);
+                        self.io_activity.pending_reads =
+                            self.io_activity.pending_reads.saturating_sub(1);
+                        tracing::warn!(path = ?path, "[CC04] Copy Contents refused: {message}");
+                        crate::problem_log::warn_problem(&format!(
+                            "[CC04] Copy Contents refused: {message}"
+                        ));
+                    } else {
+                        tracing::warn!("File too large: {message}");
+                        if self.io_activity.dialog_open {
+                            self.io_activity.dialog_open = false;
+                        }
+                        self.dialog_state = DialogState::ConfirmLargeFile { path, message };
                     }
-                    self.dialog_state = DialogState::ConfirmLargeFile { path, message };
+                }
+                IoResponse::ClipboardFileRead { path, bytes } => {
+                    self.io_activity.pending_reads =
+                        self.io_activity.pending_reads.saturating_sub(1);
+                    self.pending_clipboard_reads.retain(|p| *p != path);
+                    self.complete_copy_contents(&path, &bytes);
                 }
             }
         }
@@ -692,6 +764,7 @@ impl App {
         self.show_confirm_close_dialog(ctx);
         self.show_confirm_reload_dialog(ctx);
         self.show_confirm_large_file_dialog(ctx);
+        self.show_confirm_large_copy_dialog(ctx);
         self.show_file_open_error_dialog(ctx);
         self.show_print_error_dialog(ctx);
         self.show_external_change_dialog(ctx);
@@ -807,6 +880,123 @@ impl App {
 
         if !open {
             self.dialog_state = DialogState::None;
+        }
+    }
+
+    /// Completes the Copy Contents pipeline once the worker has handed back
+    /// the file bytes:
+    ///
+    /// * encoding detection + decode (`encoding::detect_encoding` /
+    ///   `encoding::decode_bytes`),
+    /// * binary refusal on decode error or post-decode NUL,
+    /// * Trojan-Source bidi notice (information-only),
+    /// * LF normalisation (matches the paste path),
+    /// * clipboard write through the sanitising helper.
+    ///
+    /// Never logs the decoded text — only path and length. See the
+    /// module-level "observability" note in `app/clipboard.rs`.
+    fn complete_copy_contents(&mut self, path: &std::path::Path, bytes: &[u8]) {
+        tracing::debug!(
+            path = ?path,
+            bytes = bytes.len(),
+            "Copy Contents bytes received",
+        );
+
+        let encoding = rust_pad_core::encoding::detect_encoding(bytes);
+        let text = match rust_pad_core::encoding::decode_bytes(bytes, encoding) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    path = ?path,
+                    encoding = ?encoding,
+                    error = %e,
+                    "Copy Contents refused: decode error",
+                );
+                crate::problem_log::warn_problem(
+                    "[CC05] File appears to be binary; not copied to clipboard.",
+                );
+                return;
+            }
+        };
+
+        if text.contains('\0') {
+            tracing::warn!(
+                path = ?path,
+                "Copy Contents refused: NUL byte after decode",
+            );
+            crate::problem_log::warn_problem(
+                "[CC05] File appears to be binary; not copied to clipboard.",
+            );
+            return;
+        }
+
+        if clipboard::contains_bidi_override(&text) {
+            tracing::info!(path = ?path, "Copy Contents bidi-override notice emitted");
+            crate::problem_log::info_problem(
+                "[CC06] Copied text contains bidirectional override characters that can mask \
+                 code intent. Verify before pasting into code or commit messages.",
+            );
+        }
+
+        let normalized = rust_pad_core::encoding::normalize_line_endings(&text);
+        let chars = normalized.chars().count();
+        if self.copy_text_to_clipboard(&normalized, clipboard::ContentKind::FileContent) {
+            tracing::debug!(path = ?path, chars, "Copy Contents written to clipboard");
+        }
+    }
+
+    /// Shows the confirmation dialog for "Copy file contents" on files
+    /// larger than the warning threshold. Mirrors the shape of the
+    /// `ConfirmLargeFile` dialog but binds to `pending_copy_contents`
+    /// instead of `DialogState` because the two flows are independent —
+    /// users can have a pending "open file too large" prompt and a
+    /// "copy contents too large" prompt at the same time.
+    ///
+    /// Body content: canonical path, size in MB, clipboard-persistence
+    /// caveat, Cancel/Copy buttons.
+    fn show_confirm_large_copy_dialog(&mut self, ctx: &egui::Context) {
+        let Some((path, size_bytes)) = self.pending_copy_contents.clone() else {
+            return;
+        };
+        let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+
+        let mut open = true;
+        egui::Window::new("Copy file contents to clipboard?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(format!(
+                    "Copy {size_mb:.1} MB to the system clipboard from:"
+                ));
+                ui.monospace(display_path(&path));
+                ui.add_space(4.0);
+                ui.weak(
+                    "Clipboard contents may be retained by the OS (e.g., Windows \
+                     Clipboard History, macOS Universal Clipboard) and accessible to \
+                     other applications.",
+                );
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.button("  Copy  ").clicked() {
+                        tracing::debug!(path = ?path, size_bytes, "Copy Contents confirmed");
+                        self.pending_copy_contents = None;
+                        self.send_copy_contents_read(path.clone());
+                    }
+                    if ui.button("  Cancel  ").clicked() {
+                        tracing::debug!(path = ?path, size_bytes, "Copy Contents cancelled");
+                        self.pending_copy_contents = None;
+                    }
+                });
+            });
+
+        if !open {
+            tracing::debug!(path = ?path, size_bytes, "Copy Contents dialog dismissed");
+            self.pending_copy_contents = None;
         }
     }
 
@@ -975,6 +1165,25 @@ impl eframe::App for App {
         // Prevent egui's built-in Ctrl+scroll zoom — we handle zoom ourselves
         ctx.set_zoom_factor(1.0);
 
+        // macOS (New Bug 2): after the window regains focus (e.g. via
+        // Cmd+Tab), a stale `PointingHand` cursor from a tree row can persist
+        // until the pointer crosses a panel boundary, because winit doesn't
+        // re-push the icon until the pointer moves. Forcing a reset on the
+        // focus-gained event lets the normal per-frame hover logic re-assert
+        // the correct icon. macOS-only — the issue doesn't occur elsewhere,
+        // and scoping it keeps other platforms untouched.
+        #[cfg(target_os = "macos")]
+        {
+            let regained_focus = ctx.input(|i| {
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::WindowFocused(true)))
+            });
+            if regained_focus {
+                ctx.set_cursor_icon(egui::CursorIcon::Default);
+            }
+        }
+
         // Clear the one-frame rename confirmation flag from the previous frame.
         // Must happen before handle_global_shortcuts which checks rename_buffer.
         self.workspace_sidebar.rename_just_confirmed = false;
@@ -1063,6 +1272,11 @@ impl eframe::App for App {
                     return;
                 }
 
+                // When the sidebar owns keyboard input, suppress the editor's
+                // per-frame `auto_focus` so it releases egui focus and arrow
+                // keys reach the sidebar's tree navigation. A click in the
+                // editor reclaims ownership below.
+                let sidebar_kbd_active = self.workspace_sidebar.kbd_active;
                 let response = {
                     let doc = self.tabs.active_doc_mut();
                     let mut editor = EditorWidget::new(
@@ -1077,8 +1291,15 @@ impl eframe::App for App {
                     editor.modal_dialog_open = modal_dialog_open;
                     editor.max_zoom_level = self.theme_ctrl.max_zoom_level;
                     editor.bookmarks = Some(&self.bookmarks);
+                    editor.auto_focus = !sidebar_kbd_active;
                     editor.show(ui)
                 };
+
+                // A click in the editor returns keyboard ownership to it, so
+                // sidebar arrow navigation stops and the editor receives keys.
+                if response.clicked() {
+                    self.workspace_sidebar.kbd_active = false;
+                }
 
                 response.context_menu(|ui| {
                     self.show_editor_context_menu(ui);
@@ -1223,6 +1444,10 @@ impl eframe::App for App {
             recent_files_cleanup: self.recent_files.cleanup,
             recent_files: self.recent_files.to_config_strings(),
             max_file_size_mb: self.max_file_size_bytes.map_or(0, |b| b / (1024 * 1024)),
+            copy_contents_warning_mb: self.copy_contents_warning_bytes / (1024 * 1024),
+            copy_contents_max_mb: self
+                .copy_contents_max_bytes
+                .map_or(0, |b| b / (1024 * 1024)),
             session_content_max_kb: self.session_content_max_kb,
             print_show_line_numbers: self.print_show_line_numbers,
             sync_scroll_enabled: self.sync_scroll_enabled,
@@ -1247,6 +1472,38 @@ mod tests {
     use rust_pad_config::RecentFilesCleanup;
     use rust_pad_core::encoding::{LineEnding, TextEncoding};
     use rust_pad_core::line_ops::{CaseConversion, SortOrder, TrimMode};
+
+    #[test]
+    fn display_path_strips_verbatim_prefix() {
+        // Defect D: canonicalized Windows paths carry the `\\?\` prefix; the
+        // dialog must show the clean form. Pure string transform — runs on all
+        // platforms.
+        assert_eq!(
+            display_path(Path::new(r"\\?\Z:\tmp\rust-pad-demo\big.txt")),
+            r"Z:\tmp\rust-pad-demo\big.txt",
+        );
+    }
+
+    #[test]
+    fn display_path_collapses_verbatim_unc() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\file.txt")),
+            r"\\server\share\file.txt",
+        );
+    }
+
+    #[test]
+    fn display_path_passes_clean_paths_through() {
+        // No prefix (Windows drive path or any POSIX path) is returned as-is.
+        assert_eq!(
+            display_path(Path::new("/home/me/notes.md")),
+            "/home/me/notes.md"
+        );
+        assert_eq!(
+            display_path(Path::new(r"C:\Users\me\notes.md")),
+            r"C:\Users\me\notes.md"
+        );
+    }
 
     /// Helper: create an App for unit-testing (no rendering needed).
     pub(crate) fn test_app() -> App {
@@ -1293,6 +1550,10 @@ mod tests {
             session_store: None,
             session_content_max_kb: 10_240,
             max_file_size_bytes: Some(512 * 1024 * 1024),
+            copy_contents_warning_bytes: 5 * 1024 * 1024,
+            copy_contents_max_bytes: Some(64 * 1024 * 1024),
+            pending_copy_contents: None,
+            pending_clipboard_reads: Vec::new(),
             last_window_title: String::new(),
             live_monitor: LiveMonitorController::new(),
             settings_open: false,
@@ -3026,7 +3287,7 @@ mod tests {
         assert_eq!(app.tabs.active_doc().buffer.to_string(), "a\nb\nc");
     }
 
-    // ── Main-menu line ops auto-scope (ADR-005) ─────────────────────
+    // ── Main-menu line ops auto-scope ───────────────────────────────
 
     use super::editing::current_op_scope;
 
@@ -3155,7 +3416,7 @@ mod tests {
         );
     }
 
-    // ── Join Lines (ADR-006) ────────────────────────────────────────
+    // ── Join Lines ──────────────────────────────────────────────────
 
     #[test]
     fn join_lines_main_menu_no_selection_joins_whole_doc() {
@@ -4886,12 +5147,21 @@ mod tests {
 
     #[test]
     fn test_refresh_problem_count_without_store() {
+        // Originally asserted `problems_unread == 0` on the assumption that
+        // the global store was never initialised inside the test binary.
+        // The `complete_copy_contents_*` tests now call
+        // `problem_log::init_for_tests`, so a parallel test may have
+        // populated the store. The contract under test is simply that
+        // `refresh_problem_count` reads the count without panicking and
+        // overwrites the stale `problems_unread = 99` to whatever the
+        // store reports.
         let mut app = test_app();
         app.problems_unread = 99;
-        // Global store is not initialized in tests, so refresh should
-        // set count to 0 (the OnceLock is empty).
         app.refresh_problem_count();
-        assert_eq!(app.problems_unread, 0);
+        assert!(
+            app.problems_unread < 99,
+            "refresh must overwrite the stale sentinel (99) with the live count",
+        );
     }
 
     #[test]
@@ -4899,5 +5169,106 @@ mod tests {
         let app = test_app();
         assert!(!app.problems_open);
         assert_eq!(app.problems_unread, 0);
+    }
+
+    // ── complete_copy_contents direct tests ────────────────────────────
+    //
+    // The global problem-log singleton is a process-wide OnceLock, so we
+    // serialise these four tests on a dedicated mutex (no serial_test
+    // dep) and use snapshot/records_since to filter out noise from any
+    // other tests in the same binary. `init_for_tests` is idempotent —
+    // first call wins, later calls reuse the same temp-backed store.
+
+    use std::sync::Mutex;
+    static COPY_CONTENTS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn complete_copy_contents_plain_ascii_emits_no_problem_codes() {
+        let _g = COPY_CONTENTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::problem_log::init_for_tests();
+
+        let mut app = test_app();
+        let baseline = crate::problem_log::snapshot_record_count();
+        app.complete_copy_contents(std::path::Path::new("/tmp/test.txt"), b"hello world\n");
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            !new_records
+                .iter()
+                .any(|r| r.message.contains("[CC05]") || r.message.contains("[CC06]")),
+            "plain ASCII content must not emit [CC05] or [CC06], got: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn complete_copy_contents_nul_byte_emits_cc05() {
+        let _g = COPY_CONTENTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::problem_log::init_for_tests();
+
+        let mut app = test_app();
+        let baseline = crate::problem_log::snapshot_record_count();
+        // UTF-8 string that decodes cleanly but contains an embedded NUL
+        // — exercises the post-decode NUL gate in `complete_copy_contents`.
+        app.complete_copy_contents(std::path::Path::new("/tmp/nul.bin"), b"head\0tail");
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            new_records.iter().any(|r| r.message.contains("[CC05]")),
+            "embedded NUL must emit [CC05]; got: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn complete_copy_contents_bidi_override_emits_cc06_and_still_copies() {
+        let _g = COPY_CONTENTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::problem_log::init_for_tests();
+
+        let mut app = test_app();
+        let baseline = crate::problem_log::snapshot_record_count();
+        // U+202E RIGHT-TO-LEFT OVERRIDE — Trojan-Source class.
+        let bytes = "safe\u{202E}evil".as_bytes();
+        app.complete_copy_contents(std::path::Path::new("/tmp/bidi.txt"), bytes);
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            new_records.iter().any(|r| r.message.contains("[CC06]")),
+            "bidi override must emit [CC06]; got: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
+        // [CC05] would mean we refused to copy — must NOT be present.
+        assert!(
+            !new_records.iter().any(|r| r.message.contains("[CC05]")),
+            "bidi override is a notice, not a refusal; [CC05] must not appear",
+        );
+    }
+
+    #[test]
+    fn complete_copy_contents_invalid_utf8_emits_cc05() {
+        let _g = COPY_CONTENTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::problem_log::init_for_tests();
+
+        let mut app = test_app();
+        let baseline = crate::problem_log::snapshot_record_count();
+        // chardetng on this byte sequence will not produce valid UTF-8
+        // for the detected encoding (and even if it decodes, none of the
+        // common encodings produce safe text). The decode error or the
+        // post-decode NUL gate must surface as [CC05].
+        // UTF-16 LE BOM followed by an odd byte count — decode_bytes returns
+        // a hard error (cannot pair the remaining byte), which the decode
+        // gate at line 884 translates to a [CC05] refusal.
+        app.complete_copy_contents(std::path::Path::new("/tmp/binary.bin"), b"\xFF\xFE\xFD");
+        let new_records = crate::problem_log::records_since(baseline);
+        assert!(
+            new_records.iter().any(|r| r.message.contains("[CC05]")),
+            "binary input must emit [CC05]; got: {:?}",
+            new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
+        );
     }
 }

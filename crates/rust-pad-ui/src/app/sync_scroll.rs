@@ -13,8 +13,8 @@
 //!
 //! Drift mitigation: each pane's `scroll_y`/`scroll_x` is clamped by its own
 //! widget on the next frame, so deltas that would push one pane past its
-//! content boundary are silently capped. This is the documented "delta mode"
-//! behaviour from `12-synchronized-scrolling.md`.
+//! content boundary are silently capped. This is the intended "delta mode"
+//! behaviour.
 
 use rust_pad_core::document::ScrollOrigin;
 

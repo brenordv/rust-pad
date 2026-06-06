@@ -77,6 +77,64 @@ pub fn unread_count() -> usize {
     STORE.get().and_then(|s| s.unread_count().ok()).unwrap_or(0)
 }
 
+/// Returns the total number of records currently in the store. Used by
+/// tests as a baseline for [`records_since`].
+///
+/// Returns 0 when the store is unavailable so test assertions don't have
+/// to special-case the uninitialized state.
+pub fn snapshot_record_count() -> usize {
+    STORE
+        .get()
+        .and_then(|s| s.load_all().ok())
+        .map(|v| v.len())
+        .unwrap_or(0)
+}
+
+/// Returns the records that were appended after `baseline` was captured
+/// via [`snapshot_record_count`]. Records are returned newest-first to
+/// match the underlying `load_all` ordering.
+///
+/// Returns an empty vector when the store is unavailable.
+pub fn records_since(baseline: usize) -> Vec<rust_pad_config::problem_log::ProblemEntry> {
+    let Some(s) = STORE.get() else {
+        return Vec::new();
+    };
+    let Ok(all) = s.load_all() else {
+        return Vec::new();
+    };
+    let total = all.len();
+    if total <= baseline {
+        return Vec::new();
+    }
+    // `load_all` returns newest-first; the newest `total - baseline`
+    // entries are the ones added since the baseline.
+    all.into_iter().take(total - baseline).collect()
+}
+
+/// Initialises a temp-backed problem store for unit tests, ensuring
+/// later calls to [`warn_problem`] / [`info_problem`] actually persist.
+///
+/// Idempotent: subsequent calls are no-ops because the underlying
+/// `OnceLock` only accepts a single write. Tests that need an isolated
+/// store should not rely on this — they should construct a
+/// `ProblemStore` directly and inspect it. This helper exists so the
+/// `complete_copy_contents` tests can observe the `[CC05]` / `[CC06]`
+/// emissions in a shared process-wide log.
+#[cfg(test)]
+pub fn init_for_tests() {
+    use rust_pad_config::problem_log::ProblemStore;
+    if STORE.get().is_some() {
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "rust-pad-test-problems-{}.redb",
+        std::process::id()
+    ));
+    if let Ok(store) = ProblemStore::open(&tmp) {
+        let _ = STORE.set(Arc::new(store));
+    }
+}
+
 /// Extracts a human-readable message from a panic payload.
 ///
 /// Handles the two common payload types (`&str` and `String`) and falls
@@ -165,7 +223,7 @@ mod tests {
 
     #[test]
     fn format_panic_message_unknown_payload_with_location() {
-        let payload: f64 = 3.14;
+        let payload: f64 = 42.5;
         let msg = format_panic_message(&payload as &dyn std::any::Any, Some(("main.rs", 1, 1)));
         assert_eq!(msg, "Panic at main.rs:1:1: unknown panic");
     }

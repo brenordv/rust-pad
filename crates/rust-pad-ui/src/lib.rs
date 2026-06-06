@@ -1,6 +1,7 @@
 mod app;
 pub mod dialogs;
 mod editor;
+pub(crate) mod icons;
 pub mod io_worker;
 pub mod problem_log;
 mod tabs;

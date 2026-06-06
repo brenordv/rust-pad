@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(doc.buffer.to_string(), "X Y");
     }
 
-    // ── same-line multi-cursor selection replace (Bug #1 regression) ─
+    // ── same-line multi-cursor selection replace (regression) ────────
 
     /// Helper: adds a secondary cursor with a selection spanning [anchor_col, head_col].
     fn add_cursor_with_selection(
