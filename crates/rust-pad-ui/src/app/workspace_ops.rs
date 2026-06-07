@@ -200,6 +200,21 @@ fn render_relative_path(path: &std::path::Path, root: &std::path::Path) -> Strin
     }
 }
 
+/// Returns the open-workspace folder root that contains `file`, choosing the
+/// **longest** matching prefix when roots are nested (e.g. both `/proj` and
+/// `/proj/sub` are open and `file` is under `/proj/sub`).
+///
+/// Returns `None` when `file` is not under any root — the caller then disables
+/// the `Copy Path > Relative Path` item, since "relative to what?" is undefined
+/// for a tab opened outside every workspace folder.
+pub(crate) fn copy_path_root_for<'a>(roots: &'a [FolderRoot], file: &Path) -> Option<&'a Path> {
+    roots
+        .iter()
+        .map(|root| root.path.as_path())
+        .filter(|root| file.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
 /// Outcome of size-cap evaluation in the Copy-Contents flow.
 ///
 /// Distinguishes the three terminal states the caller needs to log:
@@ -2522,6 +2537,53 @@ mod tests {
             entries: Vec::new(),
             expanded: true,
         }
+    }
+
+    // ── copy_path_root_for (Relative-scope root resolution) ──
+
+    #[test]
+    fn copy_path_root_for_finds_single_containing_root() {
+        let roots = vec![dir_root("/ws/A"), dir_root("/ws/B")];
+        let got = copy_path_root_for(&roots, Path::new("/ws/A/src/main.rs"));
+        assert_eq!(got, Some(Path::new("/ws/A")));
+    }
+
+    #[test]
+    fn copy_path_root_for_prefers_longest_prefix_when_nested() {
+        // Both /ws/A and /ws/A/sub are open; a file under sub resolves to sub.
+        let roots = vec![dir_root("/ws/A"), dir_root("/ws/A/sub")];
+        let got = copy_path_root_for(&roots, Path::new("/ws/A/sub/file.txt"));
+        assert_eq!(got, Some(Path::new("/ws/A/sub")));
+    }
+
+    #[test]
+    fn copy_path_root_for_returns_none_when_outside_all_roots() {
+        let roots = vec![dir_root("/ws/A")];
+        let got = copy_path_root_for(&roots, Path::new("/etc/passwd"));
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn copy_path_root_for_empty_roots_is_none() {
+        let roots: Vec<FolderRoot> = Vec::new();
+        let got = copy_path_root_for(&roots, Path::new("/ws/A/x"));
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn copy_path_root_for_matches_root_path_exactly() {
+        // The file path *is* a root path (degenerate, but well-defined).
+        let roots = vec![dir_root("/ws/A")];
+        let got = copy_path_root_for(&roots, Path::new("/ws/A"));
+        assert_eq!(got, Some(Path::new("/ws/A")));
+    }
+
+    #[test]
+    fn copy_path_root_for_ignores_sibling_prefix() {
+        // `/ws/ab` is not under `/ws/a` (component-wise `starts_with`).
+        let roots = vec![dir_root("/ws/a")];
+        let got = copy_path_root_for(&roots, Path::new("/ws/ab/file.txt"));
+        assert_eq!(got, None);
     }
 
     #[test]
