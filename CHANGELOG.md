@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.10.0]
+
+### Added
+- **File-tab context menu: `Copy Path` submenu.** Right-clicking a file tab now exposes the same `Copy Path > {Name | Full Path | Relative Path}` submenu available in the workspace tree (single-pane and split-view tab bars alike). Relative paths are resolved against the open workspace folder that contains the file; the `Relative Path` item is disabled when the file lives outside every workspace folder, and the whole submenu is disabled for unsaved buffers that have no path yet. Copies go through the same control-character refusal gate as the workspace feature (LF, NUL, ANSI escape, DEL, C1: Trojan-filename clipboard-injection class, cf. CVE-2017-12424).
+
 ## [2.9.0]
 
 ### Added

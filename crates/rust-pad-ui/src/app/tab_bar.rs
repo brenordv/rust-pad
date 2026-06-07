@@ -4,13 +4,16 @@
 //! context menus, middle-click close, new tab creation, and horizontal
 //! scrolling when tabs overflow the available width.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use eframe::egui;
 use egui::{Color32, Galley, Rect, RichText, ScrollArea, Sense, Stroke, Vec2, Visuals};
 
 use super::App;
+use crate::app::workspace_ops::copy_path_root_for;
 use crate::tabs::PaneId;
+use crate::workspace::menus::{copy_path_menu, CopyPathRequest};
 use rust_pad_core::document::Document;
 use rust_pad_core::tab_color::TabColor;
 
@@ -48,6 +51,8 @@ enum DeferredTabAction {
     Unpin(usize),
     /// Set the tab color (or clear it when `None`) on the tab at the given index.
     SetTabColor(usize, Option<rust_pad_core::tab_color::TabColor>),
+    /// Copy a representation of the tab's file path to the clipboard.
+    CopyPath(CopyPathRequest),
 }
 
 /// Horizontal padding on each side of the tab content.
@@ -478,6 +483,30 @@ fn render_pin_color_menu_items(ui: &mut egui::Ui, is_pinned: bool) -> Option<Pin
     result
 }
 
+/// Renders the `Copy Path` submenu for a tab and emits the chosen request
+/// into `out`. Shared by the single-pane and per-pane tab context menus.
+///
+/// The submenu is rendered **disabled** when `file_path` is `None` (an unsaved
+/// scratch buffer has no path): the affordance stays visible and consistent
+/// across saved/unsaved tabs without offering a dead click. `relative_root` is
+/// `Some` only when the file lives under an open workspace folder, which gates
+/// the `Relative Path` item (see [`copy_path_menu`]).
+fn tab_copy_path_menu(
+    ui: &mut egui::Ui,
+    file_path: Option<&Path>,
+    relative_root: Option<&Path>,
+    out: &mut Option<CopyPathRequest>,
+) {
+    match file_path {
+        Some(path) => copy_path_menu(ui, path, relative_root, out),
+        None => {
+            ui.add_enabled_ui(false, |ui| {
+                copy_path_menu(ui, Path::new(""), None, out);
+            });
+        }
+    }
+}
+
 impl App {
     /// Renders the tab bar with active tab highlighting, close buttons,
     /// and horizontal scrolling when tabs overflow.
@@ -613,6 +642,9 @@ impl App {
                         if idx < self.tabs.documents.len() {
                             self.tabs.documents[idx].tab_color = color;
                         }
+                    }
+                    DeferredTabAction::CopyPath(req) => {
+                        self.handle_copy_path(&req.path, &req.root, req.scope);
                     }
                 }
             }
@@ -825,6 +857,13 @@ impl App {
         deferred_action: &mut Option<DeferredTabAction>,
     ) {
         let is_pinned = self.tabs.documents[idx].pinned;
+        // Capture path + relative root before the menu closure: computing the
+        // containing workspace root reads `self.workspace_sidebar`, which would
+        // conflict with the `&mut self` borrow held across `context_menu`.
+        let file_path = self.tabs.documents[idx].file_path.clone();
+        let relative_root = file_path.as_deref().and_then(|p| {
+            copy_path_root_for(&self.workspace_sidebar.tree, p).map(Path::to_path_buf)
+        });
         response.context_menu(|ui| {
             if ui.button("Close").clicked() {
                 *tab_to_close = Some(idx);
@@ -841,6 +880,17 @@ impl App {
             if ui.button("Close All").clicked() {
                 *deferred_action = Some(DeferredTabAction::All);
                 ui.close();
+            }
+            ui.separator();
+            let mut copy_path_req = None;
+            tab_copy_path_menu(
+                ui,
+                file_path.as_deref(),
+                relative_root.as_deref(),
+                &mut copy_path_req,
+            );
+            if let Some(req) = copy_path_req {
+                *deferred_action = Some(DeferredTabAction::CopyPath(req));
             }
             ui.separator();
             if let Some(result) = render_pin_color_menu_items(ui, is_pinned) {
@@ -1021,8 +1071,21 @@ impl App {
         // Context menu mirrors the single-pane tab bar's per-tab actions
         // plus "Move to Other Pane". Bulk-close actions are deliberately
         // omitted since they don't have an obvious pane scope in v1.
+        // Path + relative root captured here (with `&self`) so the free-fn
+        // menu builder needn't borrow `self`.
         let is_pinned = self.tabs.documents[doc_idx].pinned;
-        render_pane_tab_context_menu(doc_idx, is_pinned, &response, actions);
+        let file_path = self.tabs.documents[doc_idx].file_path.clone();
+        let relative_root = file_path.as_deref().and_then(|p| {
+            copy_path_root_for(&self.workspace_sidebar.tree, p).map(Path::to_path_buf)
+        });
+        render_pane_tab_context_menu(
+            doc_idx,
+            is_pinned,
+            file_path.as_deref(),
+            relative_root.as_deref(),
+            &response,
+            actions,
+        );
 
         tab_rect
     }
@@ -1041,6 +1104,7 @@ impl App {
             pin_action,
             color_action,
             new_tab_in_pane,
+            copy_path,
         } = actions;
 
         if let Some(idx) = switch_to {
@@ -1065,6 +1129,9 @@ impl App {
         if new_tab_in_pane {
             self.tabs.focus_pane(pane);
             self.new_tab();
+        }
+        if let Some(req) = copy_path {
+            self.handle_copy_path(&req.path, &req.root, req.scope);
         }
     }
 
@@ -1091,12 +1158,15 @@ struct PaneTabActions {
     pin_action: Option<(usize, bool)>,
     color_action: Option<(usize, Option<TabColor>)>,
     new_tab_in_pane: bool,
+    copy_path: Option<CopyPathRequest>,
 }
 
 /// Renders the right-click context menu for the per-pane tab bar.
 fn render_pane_tab_context_menu(
     doc_idx: usize,
     is_pinned: bool,
+    file_path: Option<&Path>,
+    relative_root: Option<&Path>,
     response: &egui::Response,
     actions: &mut PaneTabActions,
 ) {
@@ -1109,6 +1179,8 @@ fn render_pane_tab_context_menu(
             actions.move_to_other = Some(doc_idx);
             ui.close();
         }
+        ui.separator();
+        tab_copy_path_menu(ui, file_path, relative_root, &mut actions.copy_path);
         ui.separator();
         if let Some(result) = render_pin_color_menu_items(ui, is_pinned) {
             match result {
@@ -1478,6 +1550,7 @@ mod tests {
         assert!(a.pin_action.is_none());
         assert!(a.color_action.is_none());
         assert!(!a.new_tab_in_pane);
+        assert!(a.copy_path.is_none());
     }
 
     // ── auto_scroll_offset ─────────────────────────────────────────
@@ -1619,6 +1692,52 @@ mod tests {
         };
         app.apply_pane_tab_actions(PaneId::Right, actions);
         assert_eq!(app.tabs.tab_count(), before_count + 1);
+    }
+
+    #[test]
+    fn tab_copy_path_menu_renders_for_saved_and_unsaved_tabs() {
+        // Render-only (no clicks): exercises both branches of the helper —
+        // a saved tab (delegates to copy_path_menu) and an unsaved buffer
+        // (disabled wrapper). No interaction → no request emitted.
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(300.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            let mut out = None;
+            // Saved + under a workspace root → all items available.
+            tab_copy_path_menu(
+                ui,
+                Some(Path::new("/proj/a.rs")),
+                Some(Path::new("/proj")),
+                &mut out,
+            );
+            // Saved but outside any root → Relative disabled.
+            tab_copy_path_menu(ui, Some(Path::new("/x/a.rs")), None, &mut out);
+            // Unsaved buffer → whole submenu disabled.
+            tab_copy_path_menu(ui, None, None, &mut out);
+            assert!(out.is_none(), "no clicks → no request emitted");
+        });
+    }
+
+    #[test]
+    fn apply_pane_tab_actions_copy_path_runs_without_panic() {
+        let mut app = test_app();
+        // No clipboard handle in test_app — exercise the dispatch path and
+        // confirm `handle_copy_path` is reached cleanly via the drained action.
+        let actions = PaneTabActions {
+            copy_path: Some(CopyPathRequest {
+                path: std::path::PathBuf::from("/proj/src/main.rs"),
+                root: std::path::PathBuf::from("/proj"),
+                scope: crate::workspace::sidebar::CopyPathScope::Relative,
+            }),
+            ..Default::default()
+        };
+        app.apply_pane_tab_actions(PaneId::Left, actions);
     }
 
     // ── apply_pin_action ────────────────────────────────────────────
