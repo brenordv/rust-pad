@@ -485,9 +485,25 @@ impl<'a> EditorWidget<'a> {
             layout.char_width,
             wrap_map,
         );
-        if response.drag_started() && ui.input(|i| i.modifiers.shift) {
+        let shift = ui.input(|i| i.modifiers.shift);
+        self.apply_click_selection(click_pos, shift, response.clicked());
+    }
+
+    /// Applies a mouse press/click at `click_pos` to the primary cursor.
+    ///
+    /// * `shift` — extend the selection: anchor at the existing selection start
+    ///   (or the current caret if none, via the idempotent
+    ///   [`Cursor::start_selection`]), then move the caret (head) to
+    ///   `click_pos`. Never clears, so repeated shift+clicks extend from the
+    ///   original anchor.
+    /// * `is_click` — a true click (press+release, no drag). When `shift` is
+    ///   false, a true click clears any selection; a drag-start
+    ///   (`is_click == false`) does not, matching the drag handler's own
+    ///   selection bookkeeping.
+    fn apply_click_selection(&mut self, click_pos: Position, shift: bool, is_click: bool) {
+        if shift {
             self.doc.cursor.start_selection();
-        } else if response.clicked() {
+        } else if is_click {
             self.doc.cursor.clear_selection();
         }
         self.doc.cursor.move_to(click_pos, &self.doc.buffer);
@@ -2417,6 +2433,125 @@ mod tests {
         assert!(widget.is_position_in_selection(Position::new(1, 1)));
         // Position on line 2 should be outside
         assert!(!widget.is_position_in_selection(Position::new(2, 0)));
+    }
+
+    // ── apply_click_selection (shift+click) ─────────────────────────
+
+    /// Builds a single-line document with the caret at `col`.
+    fn doc_with_caret(text: &str, col: usize) -> Document {
+        let mut doc = Document {
+            buffer: text.into(),
+            ..Default::default()
+        };
+        doc.cursor.position = Position::new(0, col);
+        doc
+    }
+
+    #[test]
+    fn shift_click_forms_selection_from_caret() {
+        // Caret at A (col 2), no anchor; shift+click at B (col 7).
+        let mut doc = doc_with_caret("hello world", 2);
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.apply_click_selection(Position::new(0, 7), true, true);
+        let sel = widget.doc.cursor.selection().unwrap();
+        assert_eq!(sel.start(), Position::new(0, 2));
+        assert_eq!(sel.end(), Position::new(0, 7));
+        assert_eq!(widget.doc.cursor.position, Position::new(0, 7));
+    }
+
+    #[test]
+    fn shift_click_preserves_original_anchor() {
+        // Existing selection A(1)->B(4); a further shift+click at C(9) must
+        // extend from the ORIGINAL anchor A, not from B.
+        let mut doc = doc_with_caret("hello world foo", 1);
+        doc.cursor.start_selection(); // anchor at col 1
+        doc.cursor.position = Position::new(0, 4); // head at col 4
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.apply_click_selection(Position::new(0, 9), true, true);
+        let sel = widget.doc.cursor.selection().unwrap();
+        assert_eq!(sel.start(), Position::new(0, 1)); // anchor unchanged
+        assert_eq!(sel.end(), Position::new(0, 9));
+    }
+
+    #[test]
+    fn plain_click_clears_selection_and_moves() {
+        // Selection A(0)->B(5); a plain click at C(8) clears and moves.
+        let mut doc = doc_with_caret("hello world", 0);
+        doc.cursor.start_selection();
+        doc.cursor.position = Position::new(0, 5);
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.apply_click_selection(Position::new(0, 8), false, true);
+        assert!(widget.doc.cursor.selection_anchor.is_none());
+        assert_eq!(widget.doc.cursor.position, Position::new(0, 8));
+    }
+
+    #[test]
+    fn shift_click_then_plain_click_collapses() {
+        let mut doc = doc_with_caret("hello world", 2);
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.apply_click_selection(Position::new(0, 7), true, true);
+        assert!(widget.doc.cursor.selection_anchor.is_some());
+        widget.apply_click_selection(Position::new(0, 3), false, true);
+        assert!(widget.doc.cursor.selection_anchor.is_none());
+        assert_eq!(widget.doc.cursor.position, Position::new(0, 3));
+    }
+
+    #[test]
+    fn shift_click_backward_orders_selection() {
+        // Caret at col 8; shift+click before it at col 2.
+        let mut doc = doc_with_caret("hello world", 8);
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.apply_click_selection(Position::new(0, 2), true, true);
+        let sel = widget.doc.cursor.selection().unwrap();
+        assert_eq!(sel.start(), Position::new(0, 2));
+        assert_eq!(sel.end(), Position::new(0, 8));
+    }
+
+    #[test]
+    fn shift_click_at_same_position_is_empty_selection() {
+        let mut doc = doc_with_caret("hello world", 4);
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.apply_click_selection(Position::new(0, 4), true, true);
+        // An anchor is set, but the range is empty so nothing highlights.
+        let range = widget
+            .doc
+            .cursor
+            .selection_char_range(&widget.doc.buffer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(range.0, range.1);
+        assert!(widget.collect_selection_ranges().is_empty());
+    }
+
+    #[test]
+    fn drag_start_without_shift_does_not_clear() {
+        // is_click == false (drag start): a non-shift drag start must NOT clear
+        // an existing selection — the drag handler manages it from here.
+        let mut doc = doc_with_caret("hello world", 0);
+        doc.cursor.start_selection();
+        doc.cursor.position = Position::new(0, 5);
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.apply_click_selection(Position::new(0, 5), false, false);
+        assert!(widget.doc.cursor.selection_anchor.is_some());
+    }
+
+    #[test]
+    fn shift_drag_start_starts_selection() {
+        // shift + drag start (is_click == false) anchors at the caret.
+        let mut doc = doc_with_caret("hello world", 3);
+        let theme = EditorTheme::default();
+        let mut widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.apply_click_selection(Position::new(0, 9), true, false);
+        let sel = widget.doc.cursor.selection().unwrap();
+        assert_eq!(sel.start(), Position::new(0, 3));
+        assert_eq!(sel.end(), Position::new(0, 9));
     }
 
     // ── build_clipped_layout_job ───────────────────────────────────
