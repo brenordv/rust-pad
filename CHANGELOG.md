@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.11.0]
+
+### Added
+- **Shift+click to extend a selection.** Clicking to place the caret and then Shift+clicking elsewhere now selects the text in between, matching standard text-editor behavior. The anchor is taken from the caret's current position (or the existing selection's anchor), so repeated Shift+clicks keep extending from the *original* anchor rather than resetting to each new click. Works in both directions (forward and backward), and a Shift+click on the caret's own position leaves nothing highlighted. Plain click (clears selection and moves the caret) and Shift+drag selection are unchanged.
+
 ## [2.10.0]
 
 ### Added
