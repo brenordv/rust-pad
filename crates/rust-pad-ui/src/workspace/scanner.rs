@@ -1,5 +1,6 @@
 /// Directory scanning and incremental tree updates.
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -109,11 +110,102 @@ fn sort_entries(entries: &mut [TreeEntry]) {
     });
 }
 
+/// Outcome of reconciling a directory against disk.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReconcileSummary {
+    /// Entries newly discovered on disk and inserted into the tree.
+    pub added: usize,
+    /// Entries gone from disk and removed from the tree.
+    pub removed: usize,
+}
+
+/// Re-reads `dir_path` one level deep and reconciles the fresh listing into
+/// `existing`.
+///
+/// Entries that still exist keep their `expanded` flag and already-loaded
+/// `children`; newcomers are inserted; entries no longer on disk are dropped.
+/// The result is re-sorted into the canonical order.
+///
+/// # Errors
+/// Returns the underlying read error when `dir_path` cannot be scanned; in
+/// that case `existing` is left unchanged.
+pub fn reconcile_directory(
+    dir_path: &Path,
+    existing: &mut Vec<TreeEntry>,
+    show_hidden: bool,
+) -> Result<ReconcileSummary> {
+    let fresh = scan_directory(dir_path, show_hidden)?;
+
+    // Drop entries that vanished from disk.
+    let fresh_paths: HashSet<PathBuf> = fresh.iter().map(|e| e.path.clone()).collect();
+    let before = existing.len();
+    existing.retain(|e| fresh_paths.contains(&e.path));
+    let removed = before - existing.len();
+
+    // Insert newcomers, preserving the expansion state of survivors.
+    let existing_paths: HashSet<PathBuf> = existing.iter().map(|e| e.path.clone()).collect();
+    let mut added = 0;
+    for entry in fresh {
+        if !existing_paths.contains(&entry.path) {
+            existing.push(entry);
+            added += 1;
+        }
+    }
+
+    sort_entries(existing);
+    Ok(ReconcileSummary { added, removed })
+}
+
+/// Reconciles `entries` against `dir_path`, then recurses into every child
+/// that is still an expanded directory, refreshing the whole currently
+/// *visible* subtree.
+///
+/// This is what lets a reload pick up folders created deep inside an
+/// already-expanded tree — the case the one-level [`reconcile_directory`]
+/// alone would miss. Symlinks are classified as files by [`scan_directory`],
+/// so recursion never follows them (no cycles, no tree escape). A read
+/// failure on one nested directory is logged and skipped so it cannot abort
+/// the rest of the refresh.
+pub fn reconcile_tree_recursive(
+    dir_path: &Path,
+    entries: &mut Vec<TreeEntry>,
+    show_hidden: bool,
+) -> ReconcileSummary {
+    let mut summary = match reconcile_directory(dir_path, entries, show_hidden) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to reload directory {}: {e}", dir_path.display());
+            return ReconcileSummary::default();
+        }
+    };
+
+    for entry in entries.iter_mut() {
+        if entry.kind == EntryKind::Directory && entry.expanded {
+            let child_path = entry.path.clone();
+            let child = reconcile_tree_recursive(&child_path, &mut entry.children, show_hidden);
+            summary.added += child.added;
+            summary.removed += child.removed;
+        }
+    }
+
+    summary
+}
+
 /// Applies a filesystem event to the tree, updating it incrementally.
+///
+/// `Modified`/`Created` events whose path is itself an already-loaded
+/// directory are reconciled from disk rather than treated as a no-op. This
+/// is essential on macOS, where the `notify` FSEvents backend coalesces a
+/// burst of changes into a single event for the *containing directory*: a
+/// plain insert would find the directory already present and drop the newly
+/// created children. Leaf events (Windows `ReadDirectoryChangesW`, Linux
+/// `inotify`) fall through to the fast-path insert.
 pub fn apply_fs_event(roots: &mut [FolderRoot], event: &FsEvent, show_hidden: bool) {
     match event {
         FsEvent::Created(path) | FsEvent::Modified(path) => {
-            insert_entry_if_new(roots, path, show_hidden);
+            if !reconcile_if_loaded_dir(roots, path, show_hidden) {
+                insert_entry_if_new(roots, path, show_hidden);
+            }
         }
         FsEvent::Removed(path) => {
             if let Some(parent_entries) = find_parent_entries(roots, path) {
@@ -123,12 +215,54 @@ pub fn apply_fs_event(roots: &mut [FolderRoot], event: &FsEvent, show_hidden: bo
     }
 }
 
+/// If `path` is a directory already represented in the tree, reconcile it (and
+/// its expanded subtree) from disk and return `true`. Returns `false` when
+/// `path` is not a known directory node, so the caller can fall back to a
+/// leaf insert.
+fn reconcile_if_loaded_dir(roots: &mut [FolderRoot], path: &Path, show_hidden: bool) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+
+    for root in roots.iter_mut() {
+        if root.path == path {
+            let summary = reconcile_tree_recursive(path, &mut root.entries, show_hidden);
+            tracing::debug!(
+                path = %path.display(),
+                added = summary.added,
+                removed = summary.removed,
+                "fs event reconciled workspace root"
+            );
+            return true;
+        }
+        if let Some(entry) = find_entry_mut(&mut root.entries, path) {
+            if entry.kind == EntryKind::Directory {
+                let dir_path = entry.path.clone();
+                let summary = reconcile_tree_recursive(&dir_path, &mut entry.children, show_hidden);
+                tracing::debug!(
+                    path = %path.display(),
+                    added = summary.added,
+                    removed = summary.removed,
+                    "fs event reconciled directory"
+                );
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Inserts a new tree entry for `path` if it doesn't already exist.
 ///
 /// Used for both Created and Modified events — Modified events on existing
 /// entries are no-ops, while new paths are inserted and sorted.
 fn insert_entry_if_new(roots: &mut [FolderRoot], path: &Path, show_hidden: bool) {
     let Some(parent_entries) = find_parent_entries(roots, path) else {
+        // No parent node in the tree. On macOS this is the tell-tale of a
+        // canonicalised (symlink-resolved) event path that no longer matches
+        // the stored root path — see the FSEvents notes on `apply_fs_event`.
+        tracing::debug!(path = %path.display(), "fs event dropped: parent not in tree");
         return;
     };
 
@@ -182,6 +316,28 @@ pub fn find_parent_entries<'a>(
         }
     }
 
+    None
+}
+
+/// Walks `entries` recursively looking for the node at `target`, yielding a
+/// mutable reference so callers can reconcile that directory's own
+/// `children` in place. The mutable counterpart of `find_entry` in
+/// `sidebar.rs`; kept here so the reload handler reuses one locator instead
+/// of hand-rolling a recursive mutable walk.
+pub fn find_entry_mut<'a>(
+    entries: &'a mut [TreeEntry],
+    target: &Path,
+) -> Option<&'a mut TreeEntry> {
+    for entry in entries.iter_mut() {
+        if entry.path == target {
+            return Some(entry);
+        }
+        if entry.kind == EntryKind::Directory {
+            if let Some(hit) = find_entry_mut(&mut entry.children, target) {
+                return Some(hit);
+            }
+        }
+    }
     None
 }
 
@@ -889,6 +1045,215 @@ mod tests {
         let visible = dir.path().join("visible.txt");
         std::fs::write(&visible, "").expect("write");
         assert!(!is_hidden("visible.txt", &visible));
+    }
+
+    /// Builds a single expanded folder root over `path`, lazily empty.
+    fn empty_root(path: &Path) -> Vec<FolderRoot> {
+        vec![FolderRoot {
+            path: path.to_path_buf(),
+            entries: Vec::new(),
+            expanded: true,
+        }]
+    }
+
+    #[test]
+    fn test_reconcile_directory_adds_new_entry() {
+        let dir = TempDir::new().expect("create temp dir");
+        std::fs::write(dir.path().join("old.txt"), "").expect("write");
+        let mut entries = scan_directory(dir.path(), false).expect("scan");
+        assert_eq!(entries.len(), 1);
+
+        // A new file appears on disk after the initial scan.
+        std::fs::write(dir.path().join("new.txt"), "").expect("write");
+        let summary = reconcile_directory(dir.path(), &mut entries, false).expect("reconcile");
+
+        assert_eq!(
+            summary,
+            ReconcileSummary {
+                added: 1,
+                removed: 0
+            }
+        );
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.name == "new.txt"));
+    }
+
+    #[test]
+    fn test_reconcile_directory_removes_vanished_entry() {
+        let dir = TempDir::new().expect("create temp dir");
+        let gone = dir.path().join("gone.txt");
+        std::fs::write(&gone, "").expect("write");
+        std::fs::write(dir.path().join("keep.txt"), "").expect("write");
+        let mut entries = scan_directory(dir.path(), false).expect("scan");
+        assert_eq!(entries.len(), 2);
+
+        std::fs::remove_file(&gone).expect("remove");
+        let summary = reconcile_directory(dir.path(), &mut entries, false).expect("reconcile");
+
+        assert_eq!(
+            summary,
+            ReconcileSummary {
+                added: 0,
+                removed: 1
+            }
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "keep.txt");
+    }
+
+    #[test]
+    fn test_reconcile_directory_preserves_expansion_and_children() {
+        let dir = TempDir::new().expect("create temp dir");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).expect("mkdir");
+        let mut entries = scan_directory(dir.path(), false).expect("scan");
+
+        // Mark the subdir expanded with a loaded (synthetic) child.
+        entries[0].expanded = true;
+        entries[0].children.push(TreeEntry {
+            name: "loaded.rs".to_string(),
+            path: sub.join("loaded.rs"),
+            kind: EntryKind::File,
+            expanded: false,
+            children: Vec::new(),
+        });
+
+        // Add a sibling on disk, then reconcile the parent.
+        std::fs::write(dir.path().join("sibling.txt"), "").expect("write");
+        reconcile_directory(dir.path(), &mut entries, false).expect("reconcile");
+
+        let sub_entry = entries
+            .iter()
+            .find(|e| e.name == "sub")
+            .expect("sub survives");
+        assert!(sub_entry.expanded, "expansion flag preserved");
+        assert_eq!(sub_entry.children.len(), 1, "loaded children preserved");
+        assert_eq!(sub_entry.children[0].name, "loaded.rs");
+    }
+
+    #[test]
+    fn test_reconcile_directory_honours_hidden_flag() {
+        let dir = TempDir::new().expect("create temp dir");
+        std::fs::write(dir.path().join("visible.txt"), "").expect("write");
+        let mut entries = scan_directory(dir.path(), false).expect("scan");
+
+        std::fs::write(dir.path().join(".secret"), "").expect("write");
+        reconcile_directory(dir.path(), &mut entries, false).expect("reconcile");
+        assert!(
+            !entries.iter().any(|e| e.name == ".secret"),
+            "hidden entry must not surface when show_hidden is false"
+        );
+
+        reconcile_directory(dir.path(), &mut entries, true).expect("reconcile");
+        assert!(
+            entries.iter().any(|e| e.name == ".secret"),
+            "hidden entry appears when show_hidden is true"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_tree_recursive_picks_up_nested_new_dir() {
+        // The Phase-20 Stage-2 regression: a folder created inside an
+        // already-expanded subdirectory must surface after a recursive reload.
+        let dir = TempDir::new().expect("create temp dir");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).expect("mkdir sub");
+
+        let mut entries = scan_directory(dir.path(), false).expect("scan");
+        // Expand `sub` and load its (currently empty) children.
+        entries[0].expanded = true;
+        entries[0].children = scan_directory(&sub, false).expect("scan sub");
+        assert!(entries[0].children.is_empty());
+
+        // A new nested folder appears on disk inside the expanded subdir.
+        std::fs::create_dir(sub.join("nested")).expect("mkdir nested");
+        let summary = reconcile_tree_recursive(dir.path(), &mut entries, false);
+
+        assert_eq!(summary.added, 1, "nested addition counted");
+        assert_eq!(entries[0].children.len(), 1);
+        assert_eq!(entries[0].children[0].name, "nested");
+    }
+
+    #[test]
+    fn test_reconcile_tree_recursive_skips_collapsed_dirs() {
+        let dir = TempDir::new().expect("create temp dir");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).expect("mkdir");
+        let mut entries = scan_directory(dir.path(), false).expect("scan");
+        // Collapsed: children remain unloaded, recursion must not descend.
+        entries[0].expanded = false;
+
+        std::fs::create_dir(sub.join("nested")).expect("mkdir nested");
+        reconcile_tree_recursive(dir.path(), &mut entries, false);
+
+        assert!(
+            entries[0].children.is_empty(),
+            "collapsed directory must not be eagerly loaded"
+        );
+    }
+
+    #[test]
+    fn test_find_entry_mut_locates_nested_node() {
+        let mut entries = vec![TreeEntry {
+            name: "src".to_string(),
+            path: PathBuf::from("/p/src"),
+            kind: EntryKind::Directory,
+            expanded: true,
+            children: vec![TreeEntry {
+                name: "main.rs".to_string(),
+                path: PathBuf::from("/p/src/main.rs"),
+                kind: EntryKind::File,
+                expanded: false,
+                children: Vec::new(),
+            }],
+        }];
+
+        let hit = find_entry_mut(&mut entries, Path::new("/p/src/main.rs"));
+        assert!(hit.is_some());
+        assert_eq!(hit.expect("found").name, "main.rs");
+
+        assert!(find_entry_mut(&mut entries, Path::new("/p/missing")).is_none());
+    }
+
+    #[test]
+    fn test_apply_fs_event_dir_modified_reconciles_new_child() {
+        // Reproduces the macOS FSEvents behaviour: a directory-level Modified
+        // event (not a leaf event) must surface a newly created child.
+        let dir = TempDir::new().expect("create temp dir");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).expect("mkdir");
+
+        let mut roots = empty_root(dir.path());
+        roots[0].entries.push(TreeEntry {
+            name: "sub".to_string(),
+            path: sub.clone(),
+            kind: EntryKind::Directory,
+            expanded: true,
+            children: Vec::new(),
+        });
+
+        // New child created on disk; only a coalesced dir-level event arrives.
+        std::fs::write(sub.join("late.txt"), "").expect("write");
+        apply_fs_event(&mut roots, &FsEvent::Modified(sub.clone()), false);
+
+        assert_eq!(roots[0].entries[0].children.len(), 1);
+        assert_eq!(roots[0].entries[0].children[0].name, "late.txt");
+    }
+
+    #[test]
+    fn test_apply_fs_event_new_dir_still_inserts_via_leaf_path() {
+        // A brand-new directory (leaf event, Windows/Linux style) is not yet
+        // in the tree, so it must take the insert fast-path, not reconcile.
+        let dir = TempDir::new().expect("create temp dir");
+        let mut roots = empty_root(dir.path());
+
+        let new_dir = dir.path().join("fresh");
+        std::fs::create_dir(&new_dir).expect("mkdir");
+        apply_fs_event(&mut roots, &FsEvent::Created(new_dir.clone()), false);
+
+        assert_eq!(roots[0].entries.len(), 1);
+        assert_eq!(roots[0].entries[0].name, "fresh");
+        assert_eq!(roots[0].entries[0].kind, EntryKind::Directory);
     }
 
     #[cfg(windows)]

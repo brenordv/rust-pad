@@ -4,6 +4,10 @@
 
 ### Added
 - **Shift+click to extend a selection.** Clicking to place the caret and then Shift+clicking elsewhere now selects the text in between, matching standard text-editor behavior. The anchor is taken from the caret's current position (or the existing selection's anchor), so repeated Shift+clicks keep extending from the *original* anchor rather than resetting to each new click. Works in both directions (forward and backward), and a Shift+click on the caret's own position leaves nothing highlighted. Plain click (clears selection and moves the caret) and Shift+drag selection are unchanged.
+- **Workspace context menu: `Reload from disk` for folders.** Right-clicking a folder (including a workspace root) now offers a "Reload from disk" item that re-reads that directory and its currently-expanded sub-tree from the filesystem and reconciles the tree with on-disk changes — new entries appear, deleted ones disappear — while preserving which folders are expanded. It is a deterministic, cross-platform way to refresh the tree when the live filesystem watcher misses a change.
+
+### Fixed
+- **macOS: folders created while the workspace was open could stay unlisted.** The sidebar's tree was updated incrementally from filesystem-watcher events that assume each event names the exact file or folder that changed — true for the Windows and Linux backends, but not for macOS, where the `notify` FSEvents backend coalesces a burst of changes into a single event for the *containing* directory. Such an event found the directory already present and was treated as a no-op, so entries created inside it during the session never surfaced (most visible with a folder like `.mcp-vault` that is written to in the background). The watcher now re-reads and reconciles a directory (and its expanded sub-tree) when an event targets the directory itself, and the new `Reload from disk` context-menu item provides a guaranteed manual refresh in any remaining edge case. Windows and Linux keep their existing per-entry fast path unchanged.
 
 ## [2.10.0]
 

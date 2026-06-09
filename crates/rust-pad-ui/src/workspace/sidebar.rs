@@ -69,6 +69,10 @@ pub enum SidebarAction {
     /// Reveal a folder in the OS file explorer (Windows Explorer, macOS
     /// Finder, `xdg-open` on Linux).
     OpenInFileExplorer(PathBuf),
+    /// Re-read a directory (or workspace root) and its expanded subtree from
+    /// disk, reconciling the tree with on-disk changes the watcher may have
+    /// missed (notably on macOS, where FSEvents coalesces directory events).
+    ReloadFromDisk(PathBuf),
     /// Copy a representation of an entry path to the clipboard.
     ///
     /// `root` is the workspace-root path that contains `path`, used to
@@ -671,7 +675,7 @@ impl WorkspaceSidebar {
                 root.expanded = open;
                 return;
             }
-            if let Some(entry) = find_entry_mut(&mut root.entries, target) {
+            if let Some(entry) = super::scanner::find_entry_mut(&mut root.entries, target) {
                 if matches!(entry.kind, EntryKind::Directory) {
                     entry.expanded = open;
                 }
@@ -912,24 +916,6 @@ fn find_entry<'a>(entries: &'a [TreeEntry], target: &std::path::Path) -> Option<
         }
         if matches!(entry.kind, EntryKind::Directory) {
             if let Some(hit) = find_entry(&entry.children, target) {
-                return Some(hit);
-            }
-        }
-    }
-    None
-}
-
-/// Mutable counterpart of [`find_entry`].
-fn find_entry_mut<'a>(
-    entries: &'a mut [TreeEntry],
-    target: &std::path::Path,
-) -> Option<&'a mut TreeEntry> {
-    for entry in entries.iter_mut() {
-        if entry.path == target {
-            return Some(entry);
-        }
-        if matches!(entry.kind, EntryKind::Directory) {
-            if let Some(hit) = find_entry_mut(&mut entry.children, target) {
                 return Some(hit);
             }
         }
@@ -1423,6 +1409,8 @@ mod tests {
             SidebarAction::ToggleHiddenFiles,
             SidebarAction::ExpandAll,
             SidebarAction::CollapseAll,
+            SidebarAction::OpenInFileExplorer(PathBuf::from("/g")),
+            SidebarAction::ReloadFromDisk(PathBuf::from("/h")),
             SidebarAction::None,
         ];
 
@@ -1983,7 +1971,9 @@ mod tests {
             expanded: true,
         });
         let target = tmp.path().join("a").join("b").join("deep.rs");
-        let found = find_entry_mut(&mut sidebar.tree[0].entries, &target).expect("found");
+        let found =
+            crate::workspace::scanner::find_entry_mut(&mut sidebar.tree[0].entries, &target)
+                .expect("found");
         assert_eq!(found.name, "deep.rs");
         assert_eq!(found.kind, EntryKind::File);
     }
