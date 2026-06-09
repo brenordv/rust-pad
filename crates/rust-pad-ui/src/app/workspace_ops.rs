@@ -795,6 +795,9 @@ impl App {
             SidebarAction::OpenInFileExplorer(path) => {
                 self.handle_open_in_file_explorer(&path);
             }
+            SidebarAction::ReloadFromDisk(path) => {
+                self.reload_path_from_disk(&path);
+            }
             SidebarAction::CopyPath { path, root, scope } => {
                 self.handle_copy_path(&path, &root, scope);
             }
@@ -1078,6 +1081,59 @@ impl App {
     pub(crate) fn rescan_workspace_tree(&mut self) {
         for root in &mut self.workspace_sidebar.tree {
             root.entries = scan_dir_safe(&root.path, self.workspace_sidebar.show_hidden);
+        }
+    }
+
+    /// Reloads a workspace root (or a directory within one) and its expanded
+    /// subtree from disk, reconciling the tree with changes the filesystem
+    /// watcher may have missed. This is the "Reload from disk" context-menu
+    /// action and the deterministic, cross-platform recovery for stale trees —
+    /// notably on macOS, where the `notify` FSEvents backend coalesces
+    /// directory events and can leave nested folders unlisted.
+    ///
+    /// Only paths that are a known root or resolve to a directory node already
+    /// in the tree are reloaded, so the action cannot reach outside the
+    /// workspace.
+    pub(crate) fn reload_path_from_disk(&mut self, path: &Path) {
+        use crate::workspace::scanner::{find_entry_mut, reconcile_tree_recursive};
+        use crate::workspace::tree::EntryKind;
+
+        let show_hidden = self.workspace_sidebar.show_hidden;
+        let mut summary = None;
+
+        for root in &mut self.workspace_sidebar.tree {
+            if root.path == path {
+                summary = Some(reconcile_tree_recursive(
+                    path,
+                    &mut root.entries,
+                    show_hidden,
+                ));
+                break;
+            }
+            if let Some(entry) = find_entry_mut(&mut root.entries, path) {
+                if entry.kind == EntryKind::Directory {
+                    let dir_path = entry.path.clone();
+                    summary = Some(reconcile_tree_recursive(
+                        &dir_path,
+                        &mut entry.children,
+                        show_hidden,
+                    ));
+                }
+                break;
+            }
+        }
+
+        if let Some(summary) = summary {
+            self.invalidate_workspace_cache();
+            tracing::info!(
+                dir = %path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                added = summary.added,
+                removed = summary.removed,
+                "workspace reload from disk"
+            );
         }
     }
 }
@@ -1791,6 +1847,46 @@ mod tests {
 
         app.handle_sidebar_action(SidebarAction::RemoveFolder(folder.path().to_path_buf()));
         assert!(app.workspace_sidebar.tree.is_empty());
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_reload_from_disk_surfaces_new_dir() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        app.create_workspace("Reload Action");
+        app.add_folder_path_to_workspace(folder.path());
+        assert_eq!(app.workspace_sidebar.tree.len(), 1);
+        assert!(app.workspace_sidebar.tree[0].entries.is_empty());
+
+        // A folder appears on disk after the workspace was loaded — the case
+        // a coalesced macOS FSEvents notification can leave unlisted.
+        std::fs::create_dir(folder.path().join("appeared")).unwrap();
+        app.handle_sidebar_action(SidebarAction::ReloadFromDisk(folder.path().to_path_buf()));
+
+        assert_eq!(app.workspace_sidebar.tree[0].entries.len(), 1);
+        assert_eq!(app.workspace_sidebar.tree[0].entries[0].name, "appeared");
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_reload_from_disk_nested_directory() {
+        let (mut app, _dir) = app_with_workspace();
+        let folder = tempfile::tempdir().unwrap();
+        let sub = folder.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        app.create_workspace("Reload Nested");
+        app.add_folder_path_to_workspace(folder.path());
+
+        // `sub` is listed but its children are still lazily unloaded.
+        assert_eq!(app.workspace_sidebar.tree[0].entries[0].name, "sub");
+        assert!(app.workspace_sidebar.tree[0].entries[0].children.is_empty());
+
+        // Reloading the nested directory node surfaces its new content.
+        std::fs::create_dir(sub.join("deep")).unwrap();
+        app.handle_sidebar_action(SidebarAction::ReloadFromDisk(sub.clone()));
+
+        let sub_entry = &app.workspace_sidebar.tree[0].entries[0];
+        assert_eq!(sub_entry.children.len(), 1);
+        assert_eq!(sub_entry.children[0].name, "deep");
     }
 
     #[test]

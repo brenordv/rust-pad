@@ -202,6 +202,10 @@ pub(crate) fn show_directory_context_menu(
         *ctx.action = SidebarAction::OpenInFileExplorer(dir_path.to_path_buf());
         ui.close();
     }
+    if ui.button("Reload from disk").clicked() {
+        *ctx.action = SidebarAction::ReloadFromDisk(dir_path.to_path_buf());
+        ui.close();
+    }
     ui.separator();
     show_new_entry_menu(ui, dir_path, new_entry_request);
     ui.separator();
@@ -240,6 +244,10 @@ pub(crate) fn show_root_context_menu(
     if folder_exists {
         if ui.button("Open in File Explorer").clicked() {
             *context_action = SidebarAction::OpenInFileExplorer(root_path.to_path_buf());
+            ui.close();
+        }
+        if ui.button("Reload from disk").clicked() {
+            *context_action = SidebarAction::ReloadFromDisk(root_path.to_path_buf());
             ui.close();
         }
         ui.separator();
@@ -495,6 +503,17 @@ mod tests {
                 assert_eq!(p, PathBuf::from("/proj/src"));
             }
             _ => panic!("expected OpenInFileExplorer"),
+        }
+    }
+
+    #[test]
+    fn reload_from_disk_action_carries_path() {
+        let action = SidebarAction::ReloadFromDisk(PathBuf::from("/proj/src"));
+        match action {
+            SidebarAction::ReloadFromDisk(p) => {
+                assert_eq!(p, PathBuf::from("/proj/src"));
+            }
+            _ => panic!("expected ReloadFromDisk"),
         }
     }
 }
