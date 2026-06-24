@@ -62,8 +62,8 @@ fn raise_fd_limit() {
         lim.rlim_cur = target;
         if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
             tracing::info!(
-                from = previous as u64,
-                to = target as u64,
+                from = previous,
+                to = target,
                 "Raised open-file-descriptor soft limit"
             );
         } else {
