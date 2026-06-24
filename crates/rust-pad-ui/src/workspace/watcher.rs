@@ -181,9 +181,12 @@ mod tests {
             !events.is_empty(),
             "Should receive events after file creation"
         );
-        // The event should reference our file (as Modified since it exists now)
+        // The event should reference our file (as Modified since it exists now).
+        // Compare by file name, not full path: macOS FSEvents reports
+        // canonicalised paths (`/var` → `/private/var`), so the reported path
+        // won't equal the raw temp-dir path verbatim.
         let has_our_file = events.iter().any(|e| match e {
-            FsEvent::Modified(p) | FsEvent::Created(p) => p == &file_path,
+            FsEvent::Modified(p) | FsEvent::Created(p) => p.file_name() == file_path.file_name(),
             _ => false,
         });
         assert!(has_our_file, "Events should reference the created file");
@@ -342,9 +345,12 @@ mod tests {
         std::thread::sleep(Duration::from_millis(800));
 
         let events = watcher.poll_events();
+        // Compare by file name, not full path: macOS FSEvents reports
+        // canonicalised paths (`/var` → `/private/var`), so the reported path
+        // won't equal the raw temp-dir path verbatim.
         let has_removed = events
             .iter()
-            .any(|e| matches!(e, FsEvent::Removed(p) if p == &file_path));
+            .any(|e| matches!(e, FsEvent::Removed(p) if p.file_name() == file_path.file_name()));
         assert!(
             has_removed,
             "Should receive Removed event after file deletion, got: {events:?}"
