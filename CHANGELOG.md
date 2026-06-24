@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.12.0]
+
+### Added
+- **Find All results panel (Notepad++ style).** The Find/Replace dialog has a new **Find All** button that lists every match — in the current tab or across all open tabs, following the Scope selector — in a dockable results panel above the status bar. Each result shows `tab:line  text`; double-clicking a result activates its tab, selects the match, and hands keyboard focus to the editor. The panel stays in sync with the dialog's case/whole-word/regex options.
+- **"Dusk" theme — a low-glare light theme.** A warm, parchment-toned light theme (never pure white) paired with the Solarized-light syntax palette, for users who find the high-contrast `Light` theme harsh. Available in Settings → Appearance alongside Dark, Light, and Wacky, and auto-added to existing configurations on upgrade.
+- **Hide-sidebar button in the workspace toolbar.** The workspace sidebar header has a new collapse button that hides the panel without closing the workspace (reopen with `Ctrl+B` or the Workspace menu) — distinct from the existing "Close workspace" action.
+
+### Changed
+- **Dark theme contrast.** The dark theme's text selection and occurrence-highlight colors are brighter and more opaque so selected and highlighted text stays legible.
+
+### Fixed
+- **macOS: "Too many open files" (EMFILE) after opening several workspace files.** The filesystem watcher used the kqueue backend, which consumes one file descriptor per watched directory; on a large workspace this exhausted the low (256) descriptor limit that macOS `.app` bundles inherit, causing failures when opening files, auto-saving, or saving config on exit. The watcher now uses the FSEvents backend (a single descriptor for the whole recursive watch), and on Unix the descriptor soft limit is raised to the hard limit at startup. The FSEvents path-coalescing behavior is already handled by the directory-reconciling tree refresh and the "Reload from disk" action.
+- **Workspace sidebar kept the arrow keys after opening a file with Enter.** Pressing Enter on a file moved the cursor into the editor, but a pointer still resting over the sidebar reclaimed the arrow keys on the next press, so navigation drove the tree instead of the editor. The sidebar now only re-acquires keyboard ownership on a deliberate engagement (pointer movement within it, or a click), so focus stays with the editor after a file opens.
+
 ## [2.11.0]
 
 ### Added

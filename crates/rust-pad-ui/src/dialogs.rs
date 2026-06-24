@@ -243,6 +243,13 @@ impl FindReplaceDialog {
             if ui.button("  Find Prev  ").clicked() {
                 *action = Some(FindReplaceAction::FindPrev);
             }
+            if ui
+                .button("  Find All  ")
+                .on_hover_text("List every match (current tab or all tabs) in a results panel")
+                .clicked()
+            {
+                *action = Some(FindReplaceAction::FindAll);
+            }
             if ui.button("  Replace  ").clicked() {
                 *action = Some(FindReplaceAction::Replace);
             }
@@ -272,6 +279,8 @@ pub enum FindReplaceAction {
     FindPrev,
     Replace,
     ReplaceAll,
+    /// Collect every match in the current scope into the results panel.
+    FindAll,
 }
 
 /// Whether to search in the current tab or all open tabs.

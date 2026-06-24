@@ -759,6 +759,11 @@ impl App {
             SidebarAction::CloseWorkspace => {
                 self.close_workspace();
             }
+            SidebarAction::Hide => {
+                // Collapse the panel but keep the workspace loaded; Ctrl+B or
+                // the Workspace menu brings it back.
+                self.workspace_sidebar.visible = false;
+            }
             SidebarAction::CreateWorkspace => {
                 self.create_new_workspace();
             }
@@ -1752,6 +1757,19 @@ mod tests {
 
         app.handle_sidebar_action(SidebarAction::CloseWorkspace);
         assert!(!app.workspace_sidebar.visible);
+    }
+
+    #[test]
+    fn test_app_handle_sidebar_action_hide_keeps_workspace() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Action Hide");
+        assert!(app.workspace_sidebar.visible);
+        let ws_id = app.workspace_sidebar.workspace_id.clone();
+
+        app.handle_sidebar_action(SidebarAction::Hide);
+        // Panel hidden, but the workspace stays loaded (unlike CloseWorkspace).
+        assert!(!app.workspace_sidebar.visible);
+        assert_eq!(app.workspace_sidebar.workspace_id, ws_id);
     }
 
     #[test]

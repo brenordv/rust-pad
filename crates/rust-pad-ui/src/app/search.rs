@@ -3,13 +3,35 @@
 //! Handles find/replace within the current tab and across all open tabs,
 //! including match navigation and replace-all functionality.
 
+use rust_pad_core::buffer::TextBuffer;
 use rust_pad_core::cursor::{char_to_pos, pos_to_char};
 use rust_pad_core::document::Document;
-use rust_pad_core::search::{SearchEngine, SearchMatch};
+use rust_pad_core::search::{SearchEngine, SearchMatch, SearchOptions};
 
 use crate::dialogs::{FindReplaceAction, SearchScope};
 
+use super::find_results::FindAllResult;
 use super::App;
+
+/// Runs a one-shot search over `buffer`, returning every match (empty on error
+/// or empty query). Shared by Find All so each tab is searched identically
+/// without duplicating the engine setup.
+fn matches_for(buffer: &TextBuffer, options: &SearchOptions) -> Vec<SearchMatch> {
+    let mut engine = SearchEngine::new();
+    match engine.find_all(buffer, options) {
+        Ok(()) => engine.matches,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Returns the text of `line` with any trailing line break stripped, or an
+/// empty string when the line is out of range.
+fn line_text_for(buffer: &TextBuffer, line: usize) -> String {
+    match buffer.line(line) {
+        Ok(slice) => slice.to_string().trim_end_matches(['\n', '\r']).to_string(),
+        Err(_) => String::new(),
+    }
+}
 
 /// Navigates a document's cursor to select the given match.
 fn navigate_to_match(doc: &mut Document, mat: &SearchMatch) {
@@ -30,10 +52,17 @@ impl App {
             FindReplaceAction::FindNext
             | FindReplaceAction::FindPrev
             | FindReplaceAction::Replace
-            | FindReplaceAction::ReplaceAll => {
+            | FindReplaceAction::ReplaceAll
+            | FindReplaceAction::FindAll => {
                 self.find_replace.record_search();
             }
             FindReplaceAction::Search => {}
+        }
+        // Find All spans the chosen scope itself, so it is handled before the
+        // per-scope split below.
+        if action == FindReplaceAction::FindAll {
+            self.collect_find_all();
+            return;
         }
         match self.find_replace.scope {
             SearchScope::CurrentTab => self.handle_search_current_tab(action),
@@ -41,9 +70,80 @@ impl App {
         }
     }
 
+    /// Collects every match in the active scope (current tab or all open tabs)
+    /// into the Find Results panel and shows it.
+    pub(crate) fn collect_find_all(&mut self) {
+        let options = self.find_replace.options.clone();
+        let query = self.find_replace.find_text.clone();
+        let all_tabs = self.find_replace.scope == SearchScope::AllTabs;
+
+        let mut results = Vec::new();
+        if !query.trim().is_empty() {
+            let tab_indices: Vec<usize> = if all_tabs {
+                (0..self.tabs.tab_count()).collect()
+            } else {
+                vec![self.tabs.active]
+            };
+            for tab_index in tab_indices {
+                let doc = &self.tabs.documents[tab_index];
+                let title = doc.title.clone();
+                for m in matches_for(&doc.buffer, &options) {
+                    let pos = char_to_pos(&doc.buffer, m.start);
+                    results.push(FindAllResult {
+                        tab_index,
+                        tab_title: title.clone(),
+                        line: pos.line,
+                        col: pos.col,
+                        match_start: m.start,
+                        match_end: m.end,
+                        line_text: line_text_for(&doc.buffer, pos.line),
+                    });
+                }
+            }
+        }
+
+        let count = results.len();
+        self.find_results.set(query.clone(), all_tabs, results);
+        self.find_replace.status = if query.trim().is_empty() {
+            "Enter text to search".to_string()
+        } else if count == 0 {
+            "No matches".to_string()
+        } else {
+            format!("{count} matches")
+        };
+    }
+
+    /// Jumps to the Find Results entry at `idx`: activates its tab and selects
+    /// the match, clamping stale offsets to the live buffer.
+    pub(crate) fn navigate_to_find_result(&mut self, idx: usize) {
+        let (tab_index, start, end, line) = match self.find_results.result(idx) {
+            Some(r) => (r.tab_index, r.match_start, r.match_end, r.line),
+            None => return,
+        };
+        if tab_index >= self.tabs.tab_count() {
+            return;
+        }
+        self.tabs.active = tab_index;
+        let doc = &mut self.tabs.documents[tab_index];
+        let len = doc.buffer.len_chars();
+        if start > len {
+            return; // offset no longer valid after edits; skip rather than mis-select
+        }
+        let mat = SearchMatch {
+            start,
+            end: end.min(len),
+            line,
+        };
+        navigate_to_match(doc, &mat);
+        // Hand the keyboard to the editor so arrows move the cursor, not the tree.
+        self.workspace_sidebar.kbd_active = false;
+    }
+
     /// Handles search/replace within the active tab only.
     pub(crate) fn handle_search_current_tab(&mut self, action: FindReplaceAction) {
         match action {
+            // Handled in `handle_search_action` before scope dispatch.
+            FindReplaceAction::FindAll => {}
             FindReplaceAction::Search => {
                 let doc = self.tabs.active_doc_mut();
                 if let Err(e) = self.find_replace.engine.find_all_versioned(
@@ -127,6 +227,8 @@ impl App {
     /// Handles search/replace across all open tabs.
     pub(crate) fn handle_search_all_tabs(&mut self, action: FindReplaceAction) {
         match action {
+            // Handled in `handle_search_action` before scope dispatch.
+            FindReplaceAction::FindAll => {}
             FindReplaceAction::Search => {
                 // Count matches across all tabs
                 let mut total = 0usize;

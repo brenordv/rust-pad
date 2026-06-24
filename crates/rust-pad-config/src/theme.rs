@@ -63,7 +63,7 @@ impl Default for EditorColors {
             HexColor::rgb(30, 30, 30),          // bg
             HexColor::rgb(212, 212, 212),       // text
             HexColor::rgb(255, 255, 255),       // cursor
-            HexColor::rgba(50, 110, 200, 100),  // selection
+            HexColor::rgba(70, 130, 220, 140),  // selection — brighter + more opaque for contrast
             HexColor::rgb(120, 120, 120),       // line_number
             HexColor::rgb(37, 37, 37),          // line_number_bg
             HexColor::rgb(45, 45, 45),          // current_line_highlight
@@ -74,8 +74,8 @@ impl Default for EditorColors {
             HexColor::rgb(80, 80, 80),          // scrollbar_thumb_idle
             HexColor::rgb(110, 110, 110),       // scrollbar_thumb_hover
             HexColor::rgb(140, 140, 140),       // scrollbar_thumb_active
-            HexColor::rgba(100, 100, 50, 80),   // occurrence_highlight
-            HexColor::rgba(180, 160, 60, 90),   // matching_bracket
+            HexColor::rgba(150, 140, 50, 130),  // occurrence_highlight — brighter + more opaque
+            HexColor::rgba(190, 170, 70, 120),  // matching_bracket — stronger against selection
             HexColor::rgba(100, 100, 100, 180), // special_char
         ])
     }
@@ -258,6 +258,62 @@ pub fn sample_wacky() -> ThemeDefinition {
     )
 }
 
+/// Built-in "Dusk" theme: a low-glare light theme.
+///
+/// Uses a warm, parchment-like background (never pure white) and muted,
+/// desaturated colors so it is easy on the eyes for long sessions — the
+/// retina-friendly counterpart to the high-contrast `Light` theme.
+pub fn builtin_dusk() -> ThemeDefinition {
+    ThemeDefinition::from_palettes(
+        "Dusk",
+        false,
+        "Solarized (light)",
+        [
+            HexColor::rgb(237, 233, 224),       // bg — warm parchment
+            HexColor::rgb(60, 56, 50),          // text — dark warm gray
+            HexColor::rgb(40, 38, 34),          // cursor
+            HexColor::rgba(180, 165, 120, 120), // selection — soft muted gold
+            HexColor::rgb(150, 142, 128),       // line_number
+            HexColor::rgb(228, 223, 213),       // line_number_bg
+            HexColor::rgb(228, 222, 208),       // current_line_highlight
+            HexColor::rgb(190, 130, 40),        // modified_line — amber
+            HexColor::rgb(110, 150, 90),        // saved_line — muted green
+            HexColor::rgb(210, 203, 190),       // gutter_separator
+            HexColor::rgb(226, 220, 209),       // scrollbar_track
+            HexColor::rgb(195, 188, 174),       // scrollbar_thumb_idle
+            HexColor::rgb(170, 162, 147),       // scrollbar_thumb_hover
+            HexColor::rgb(150, 142, 126),       // scrollbar_thumb_active
+            HexColor::rgba(200, 175, 110, 100), // occurrence_highlight
+            HexColor::rgba(150, 130, 80, 120),  // matching_bracket
+            HexColor::rgba(160, 150, 130, 170), // special_char
+        ],
+        [
+            HexColor::rgb(228, 223, 213), // panel_fill
+            HexColor::rgb(233, 228, 219), // window_fill
+            HexColor::rgb(231, 226, 216), // faint_bg
+            HexColor::rgb(240, 236, 228), // extreme_bg
+            HexColor::rgb(228, 223, 213), // noninteractive_bg
+            HexColor::rgb(218, 212, 200), // inactive_bg
+            HexColor::rgb(208, 201, 187), // hovered_bg
+            HexColor::rgb(198, 190, 175), // active_bg
+            HexColor::rgb(160, 120, 70),  // accent — warm amber
+        ],
+    )
+}
+
+/// Returns every built-in theme in display order.
+///
+/// Single source of truth for the built-in set so the default config, the
+/// theme controller, and tests can't drift apart.
+pub fn all_builtin_themes() -> Vec<ThemeDefinition> {
+    vec![
+        builtin_dark(),
+        builtin_light(),
+        builtin_dusk(),
+        sample_wacky(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +332,28 @@ mod tests {
         let json = serde_json::to_string_pretty(&theme).unwrap();
         let parsed: ThemeDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, theme);
+    }
+
+    #[test]
+    fn test_builtin_dusk_round_trip() {
+        let theme = builtin_dusk();
+        let json = serde_json::to_string_pretty(&theme).unwrap();
+        let parsed: ThemeDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, theme);
+    }
+
+    #[test]
+    fn test_dusk_is_a_low_glare_light_theme() {
+        let theme = builtin_dusk();
+        assert!(!theme.dark_mode, "Dusk is a light theme");
+        // Never pure white: the whole point is to avoid retina-burning glare.
+        assert_ne!(theme.editor.bg_color, HexColor::rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn test_all_builtin_themes_contains_expected_set() {
+        let names: Vec<String> = all_builtin_themes().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["Dark", "Light", "Dusk", "Wacky"]);
     }
 
     #[test]

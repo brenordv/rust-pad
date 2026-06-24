@@ -183,10 +183,7 @@ mod tests {
         ThemeController {
             theme: EditorTheme::default(),
             theme_mode: ThemeMode::dark(),
-            available_themes: vec![
-                rust_pad_config::theme::builtin_dark(),
-                rust_pad_config::theme::builtin_light(),
-            ],
+            available_themes: rust_pad_config::theme::all_builtin_themes(),
             accent_color: Color32::from_rgb(80, 180, 200),
             syntax_highlighter: SyntaxHighlighter::new(),
             default_zoom_level: 1.0,
