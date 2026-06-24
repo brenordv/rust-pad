@@ -58,6 +58,8 @@ pub const CARET_DOUBLE_UP: &str = ph::CARET_DOUBLE_UP;
 pub const CARET_DOUBLE_DOWN: &str = ph::CARET_DOUBLE_DOWN;
 /// Active-workspace check marker.
 pub const CHECK: &str = ph::CHECK;
+/// Hide-sidebar button (collapses the panel without closing the workspace).
+pub const ARROW_LINE_LEFT: &str = ph::ARROW_LINE_LEFT;
 
 #[cfg(test)]
 mod tests {
@@ -85,6 +87,7 @@ mod tests {
         (CARET_DOUBLE_UP, "CARET_DOUBLE_UP"),
         (CARET_DOUBLE_DOWN, "CARET_DOUBLE_DOWN"),
         (CHECK, "CHECK"),
+        (ARROW_LINE_LEFT, "ARROW_LINE_LEFT"),
     ];
 
     /// Smoke test: every icon constant resolves to a non-empty string. If a

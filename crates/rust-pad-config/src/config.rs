@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::theme::{builtin_dark, builtin_light, sample_wacky, ThemeDefinition};
+use crate::theme::{
+    all_builtin_themes, builtin_dark, builtin_dusk, builtin_light, ThemeDefinition,
+};
 
 /// When to remove dead (non-existent) files from the recent files list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -119,7 +121,7 @@ impl Default for AppConfig {
             workspace_sidebar_visible: false,
             workspace_sidebar_width: 250.0,
             show_hidden_files: false,
-            themes: vec![builtin_dark(), builtin_light(), sample_wacky()],
+            themes: all_builtin_themes(),
         }
     }
 }
@@ -182,18 +184,20 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Ensures built-in Dark and Light themes are always present.
+    /// Ensures the built-in Dark, Light, and Dusk themes are always present.
     /// User-defined themes with matching names take priority over built-ins.
+    /// The deletable "Wacky" sample is intentionally not force-merged.
     pub fn with_builtins_merged(&mut self) {
-        let has_dark = self.themes.iter().any(|t| t.name == "Dark");
-        let has_light = self.themes.iter().any(|t| t.name == "Light");
-
-        if !has_dark {
+        if !self.themes.iter().any(|t| t.name == "Dark") {
             self.themes.insert(0, builtin_dark());
         }
-        if !has_light {
+        if !self.themes.iter().any(|t| t.name == "Light") {
             let insert_at = 1.min(self.themes.len());
             self.themes.insert(insert_at, builtin_light());
+        }
+        if !self.themes.iter().any(|t| t.name == "Dusk") {
+            let insert_at = 2.min(self.themes.len());
+            self.themes.insert(insert_at, builtin_dusk());
         }
     }
 
@@ -312,7 +316,7 @@ mod tests {
         assert!(!config.show_special_chars);
         assert!(config.restore_open_files);
         assert!((config.font_size - 16.0).abs() < f32::EPSILON);
-        assert_eq!(config.themes.len(), 3);
+        assert_eq!(config.themes.len(), 4);
     }
 
     #[test]
@@ -376,18 +380,19 @@ mod tests {
     fn test_theme_names() {
         let config = AppConfig::default();
         let names = config.theme_names();
-        assert_eq!(names, vec!["Dark", "Light", "Wacky"]);
+        assert_eq!(names, vec!["Dark", "Light", "Dusk", "Wacky"]);
     }
 
     #[test]
     fn test_with_builtins_merged_adds_missing() {
         let mut config = AppConfig {
-            themes: vec![sample_wacky()],
+            themes: vec![crate::theme::sample_wacky()],
             ..Default::default()
         };
         config.with_builtins_merged();
         assert!(config.find_theme("Dark").is_some());
         assert!(config.find_theme("Light").is_some());
+        assert!(config.find_theme("Dusk").is_some());
         assert!(config.find_theme("Wacky").is_some());
     }
 

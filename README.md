@@ -41,6 +41,7 @@ stable, and fast as possible.
 ### Editing
 - **Multi-tab interface** with session restore (reopen files from last session) and horizontal tab scrolling when tabs overflow
 - **Find/Replace** with regex support and search across all open tabs. Non-modal (keeps editing enabled, dims when it loses focus), auto-focuses the find field on open, pre-fills it with the current single-line selection, scrolls the viewport to the active match, and offers a session search-history dropdown
+- **Find All results panel**: the **Find All** button lists every match; in the current tab or across all open tabs, following the Scope selector, in a panel above the status bar. Each result shows `tab:line  text`; double-click a result to jump to that match in its tab
 - **Multi-cursor editing**: `Ctrl+Click` to add cursors, `Alt+Shift+Arrow` to add the cursors above/below (with shrink support), `Alt+Shift+Period` to select next occurrence
 - **Undo/Redo** with persistent history (survives application restart)
 - **Auto-indent**: pressing Enter inherits the leading whitespace from the current line
@@ -78,6 +79,7 @@ stable, and fast as possible.
 ### Workspace Sidebar
 - **Named workspaces** (`Ctrl+B` to toggle the sidebar): group project folders into named workspaces that persist across restarts in a dedicated database (`rust-pad-workspaces.redb`). Create, rename, switch, and delete workspaces
 - **Folder management**: add folders via the menu or sidebar toolbar; duplicate and overlapping (parent/child) folders are rejected with a message. Remove folders without deleting them from disk
+- **Hide button** in the sidebar toolbar collapses the panel without closing the workspace (reopen with `Ctrl+B` or the Workspace menu)
 - **File tree**: collapsible, lazy-loaded folder tree (directories before files, sorted case-insensitively, large directories capped at 10,000 entries). Optionally include hidden folders
 - **File operations from the sidebar**: double-click to open; right-click for New File, New Folder, Rename, and Delete (send to trash), with inline naming fields
 - **Drag-and-drop folders**: drop folders onto the window to add them to the active workspace (a workspace is created automatically if none exists)
@@ -107,7 +109,7 @@ stable, and fast as possible.
 - **Move to Recycle Bin** support via the `trash` crate
 
 ### View
-- **Customizable themes**: Dark, Light, and custom themes via JSON
+- **Customizable themes**: Dark, Light, Dusk (a low-glare light theme), and custom themes via JSON
 - **Settings dialog** with six tabs: General, Editor, File Dialogs, Auto-Save, History, Workspace
 - **Status bar** displaying: cursor position, encoding, line ending, indent style, character count, file size, zoom level, last saved time, and PDF generation indicator
 - **Split view**: divide the editor into two panes with a draggable divider, vertically (`Ctrl+Alt+V`) or horizontally (`Ctrl+Alt+H`). Each pane has its own tab strip and active tab. Double-click the divider to reset to 50/50. A 1px accent border highlights the focused pane. Layout (orientation, divider ratio, per-pane tab assignment, focused pane) is persisted across restarts. Use **View → Remove Split** to collapse back to a single pane
@@ -268,14 +270,14 @@ The config file is created automatically on the first launch with default values
 | `show_special_chars`      | bool   | `false`                       | Show whitespace and line-ending markers.                                                                              |
 | `sync_scroll_enabled`     | bool   | `false`                       | Mirror user-initiated scroll deltas between split-view panes.                                                         |
 | `sync_scroll_horizontal`  | bool   | `true`                        | Mirror horizontal scrolling in addition to vertical when synchronized scrolling is enabled.                           |
-| `themes`                  | array  | (built-in Dark, Light, Wacky) | Array of theme definitions. See below.                                                                                |
+| `themes`                  | array  | (built-in Dark, Light, Dusk, Wacky) | Array of theme definitions. See below.                                                                          |
 | `word_wrap`               | bool   | `false`                       | Whether long lines wrap at the view edge.                                                                             |
 | `workspace_sidebar_visible` | bool | `false`                       | Whether the workspace sidebar is shown on startup (restored from the last session).                                  |
 | `workspace_sidebar_width` | float  | `250.0`                       | Workspace sidebar width in pixels (resizable 150–500).                                                                |
 
 ### Custom Themes
 
-Themes are defined as JSON objects within the `themes` array. Each theme has a `name` and color definitions for the editor and UI elements. Built-in `Dark` and `Light` themes are always present; if removed from the config file they will be re-added automatically.
+Themes are defined as JSON objects within the `themes` array. Each theme has a `name` and color definitions for the editor and UI elements. Built-in `Dark`, `Light`, and `Dusk` themes are always present; if removed from the config file they will be re-added automatically.
 
 #### Syntax Theme
 

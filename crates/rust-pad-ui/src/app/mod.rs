@@ -9,6 +9,7 @@ mod editing;
 mod external_change_dialog;
 mod file_dialog_state;
 mod file_ops;
+mod find_results;
 mod live_monitor;
 mod menu_bar;
 mod print;
@@ -141,6 +142,8 @@ pub struct App {
     clipboard: Option<arboard::Clipboard>,
     dialog_state: DialogState,
     pub find_replace: FindReplaceDialog,
+    /// "Find All" results panel (Notepad++ style), populated on demand.
+    pub find_results: find_results::FindResultsPanel,
     pub go_to_line: GoToLineDialog,
     bookmarks: BookmarkManager,
     last_flush: Instant,
@@ -395,6 +398,7 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             dialog_state: DialogState::None,
             find_replace: FindReplaceDialog::new(),
+            find_results: find_results::FindResultsPanel::default(),
             go_to_line: GoToLineDialog::new(),
             bookmarks: BookmarkManager::new(),
             last_flush: Instant::now(),
@@ -1236,6 +1240,14 @@ impl eframe::App for App {
                 self.show_status_bar(ui);
             });
 
+        // Find Results panel (above the status bar). Declared before the
+        // central panel so it claims its bottom strip first.
+        match self.find_results.show_panel(ui) {
+            find_results::FindResultsAction::Navigate(idx) => self.navigate_to_find_result(idx),
+            find_results::FindResultsAction::Close => self.find_results.clear(),
+            find_results::FindResultsAction::None => {}
+        }
+
         // Workspace sidebar (left panel)
         let sidebar_action = if self.workspace_sidebar.is_visible() {
             // Populate workspace list from cache (refreshed only after mutations)
@@ -1514,11 +1526,7 @@ mod tests {
                 theme_mode: ThemeMode::dark(),
                 default_zoom_level: 1.0,
                 max_zoom_level: 15.0,
-                available_themes: vec![
-                    rust_pad_config::theme::builtin_dark(),
-                    rust_pad_config::theme::builtin_light(),
-                    rust_pad_config::theme::sample_wacky(),
-                ],
+                available_themes: rust_pad_config::theme::all_builtin_themes(),
                 accent_color: Color32::from_rgb(80, 180, 200),
                 syntax_highlighter: SyntaxHighlighter::new(),
             },
@@ -1544,6 +1552,7 @@ mod tests {
             clipboard: None,
             dialog_state: DialogState::None,
             find_replace: FindReplaceDialog::new(),
+            find_results: find_results::FindResultsPanel::default(),
             go_to_line: GoToLineDialog::new(),
             bookmarks: BookmarkManager::new(),
             last_flush: Instant::now(),
@@ -2445,6 +2454,89 @@ mod tests {
         app.find_replace.scope = SearchScope::AllTabs;
         app.handle_search_action(FindReplaceAction::Search);
         assert!(app.find_replace.status.contains("No matches"));
+    }
+
+    #[test]
+    fn test_find_all_current_tab_collects_matches_with_positions() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("alpha\nbeta alpha\n");
+        set_find_text(&mut app, "alpha");
+        app.find_replace.scope = SearchScope::CurrentTab;
+        app.handle_search_action(FindReplaceAction::FindAll);
+
+        assert!(app.find_results.visible);
+        assert_eq!(app.find_results.len(), 2);
+        let first = app.find_results.result(0).unwrap();
+        assert_eq!((first.tab_index, first.line, first.col), (0, 0, 0));
+        let second = app.find_results.result(1).unwrap();
+        assert_eq!((second.line, second.col), (1, 5));
+        assert_eq!(second.line_text, "beta alpha");
+        assert!(app.find_replace.status.contains("2 matches"));
+    }
+
+    #[test]
+    fn test_find_all_all_tabs_spans_every_tab() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello hello");
+        app.tabs.new_tab();
+        app.tabs.active_doc_mut().insert_text("hello");
+
+        set_find_text(&mut app, "hello");
+        app.find_replace.scope = SearchScope::AllTabs;
+        app.handle_search_action(FindReplaceAction::FindAll);
+
+        assert_eq!(app.find_results.len(), 3);
+        assert_eq!(app.find_results.result(2).unwrap().tab_index, 1);
+    }
+
+    #[test]
+    fn test_find_all_empty_query_shows_empty_panel() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("content");
+        set_find_text(&mut app, "");
+        app.handle_search_action(FindReplaceAction::FindAll);
+        assert!(app.find_results.visible);
+        assert!(app.find_results.is_empty());
+    }
+
+    #[test]
+    fn test_navigate_to_find_result_activates_tab_and_selects_match() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        app.tabs.new_tab();
+        app.tabs.active_doc_mut().insert_text("world hello");
+
+        set_find_text(&mut app, "hello");
+        app.find_replace.scope = SearchScope::AllTabs;
+        app.handle_search_action(FindReplaceAction::FindAll);
+
+        let idx = (0..app.find_results.len())
+            .find(|&i| app.find_results.result(i).unwrap().tab_index == 1)
+            .expect("a match in tab 1");
+        app.tabs.active = 0; // navigate away first to prove the jump
+        app.navigate_to_find_result(idx);
+
+        assert_eq!(app.tabs.active, 1);
+        let sel = app
+            .tabs
+            .active_doc()
+            .cursor
+            .selection()
+            .expect("match is selected");
+        assert_eq!(sel.start(), Position::new(0, 6));
+        // The editor (not the sidebar) should own the keyboard after a jump.
+        assert!(!app.workspace_sidebar.kbd_active);
+    }
+
+    #[test]
+    fn test_navigate_to_find_result_out_of_range_is_noop() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("hello");
+        set_find_text(&mut app, "hello");
+        app.handle_search_action(FindReplaceAction::FindAll);
+        // No result at index 99 — must not panic or change the active tab.
+        app.navigate_to_find_result(99);
+        assert_eq!(app.tabs.active, 0);
     }
 
     #[test]
