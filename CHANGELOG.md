@@ -14,9 +14,6 @@
 - **macOS: "Too many open files" (EMFILE) after opening several workspace files.** The filesystem watcher used the kqueue backend, which consumes one file descriptor per watched directory; on a large workspace this exhausted the low (256) descriptor limit that macOS `.app` bundles inherit, causing failures when opening files, auto-saving, or saving config on exit. The watcher now uses the FSEvents backend (a single descriptor for the whole recursive watch), and on Unix the descriptor soft limit is raised to the hard limit at startup. The FSEvents path-coalescing behavior is already handled by the directory-reconciling tree refresh and the "Reload from disk" action.
 - **Workspace sidebar kept the arrow keys after opening a file with Enter.** Pressing Enter on a file moved the cursor into the editor, but a pointer still resting over the sidebar reclaimed the arrow keys on the next press, so navigation drove the tree instead of the editor. The sidebar now only re-acquires keyboard ownership on a deliberate engagement (pointer movement within it, or a click), so focus stays with the editor after a file opens.
 
-### Known limitations
-- **External grammar tools (e.g. Grammarly) cannot inspect the editor.** rust-pad renders text with custom GPU primitives rather than a native OS text field, and exposes no accessibility text-edit surface for such tools to hook into. Making this work would require a full native-accessible editable-text implementation (and the third-party tool choosing to support it), so it is not offered as a setting.
-
 ## [2.11.0]
 
 ### Added
