@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/rust-pad", "crates/rust-pad-core", "crates/rust-pad-ui", "crates/rust-pad-mod-history", "crates/rust-pad-config"]
 
 [workspace.package]
-version = "2.12.0"
+version = "2.12.1"
 edition = "2021"
 license = "GPL-3.0-only"
 authors = ["Breno RdV"]
@@ -15,7 +15,7 @@ rust-pad-config = { path = "crates/rust-pad-config" }
 rust-pad-core = { path = "crates/rust-pad-core" }
 rust-pad-ui = { path = "crates/rust-pad-ui" }
 rust-pad-mod-history = { path = "crates/rust-pad-mod-history" }
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 arboard = "3.6.1"
 bincode = "=1.3.3" # Never update.
 chardetng = "1.0.0"
@@ -51,4 +51,4 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 trash = "5.2.6"
 ttf-parser = "0.25.1"
-uuid = { version = "1.23.3", features = ["v4"] }
+uuid = { version = "1.23.4", features = ["v4"] }

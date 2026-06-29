@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.12.1]
+
+### Fixed
+- **Unsaved tab content lost after an unexpected shutdown (power loss / hard kill).** Unsaved buffers were written to the session store only on a *clean* exit. The restore step then wiped the stored content — so if the app was killed (power loss, OOM, panic) before the next clean exit, tabs came back present but empty, with nothing reported in the Problems menu. The session is now persisted as a single **atomic snapshot** (tab list + unsaved content committed together) on a periodic timer while you edit, immediately after a restore, and on clean exit. A hard abort now loses at most the last autosave interval of edits instead of everything, and on the next launch a recovery is reported in the Problems menu ("Recovered N unsaved document(s) after an unexpected shutdown"). Note: unsaved content is now persisted continuously while editing (bounded by the existing session content size limit), not only between restarts.
+
 ## [2.12.0]
 
 ### Added

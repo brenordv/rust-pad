@@ -38,7 +38,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use rust_pad_config::session::{generate_session_id, SessionData, SessionStore, SessionTabEntry};
+use rust_pad_config::session::{
+    generate_session_id, SessionData, SessionSplit, SessionStore, SessionTabEntry,
+};
 use rust_pad_config::AppConfig;
 use rust_pad_core::bookmarks::BookmarkManager;
 use rust_pad_core::cursor::Position;
@@ -126,6 +128,14 @@ impl ThemeMode {
     }
 }
 
+/// An unsaved tab whose content exceeded `session_content_max_kb` and was
+/// therefore omitted from the persisted snapshot content (its metadata is
+/// still saved, so it restores as an empty tab — the documented cap behaviour).
+struct OverLimitTab {
+    session_id: String,
+    kb: usize,
+}
+
 /// The main application state.
 pub struct App {
     pub tabs: TabManager,
@@ -149,6 +159,16 @@ pub struct App {
     last_flush: Instant,
     session_store: Option<SessionStore>,
     session_content_max_kb: usize,
+    /// Fingerprint of the last persisted session snapshot. The crash-safe
+    /// autosave tick skips writing while the live tabs still hash to this,
+    /// so unchanged sessions don't rewrite redb every interval.
+    last_snapshot_sig: Option<u64>,
+    /// Consecutive session-snapshot failures, used to surface a persistent
+    /// failure to the user once (not every interval) and announce recovery.
+    consecutive_snapshot_failures: u32,
+    /// Session ids already warned about exceeding the content cap, so the
+    /// warning fires once per over-limit episode rather than every autosave.
+    session_over_limit_warned: std::collections::HashSet<String>,
     /// Maximum file size in bytes that can be opened, or `None` for no limit.
     max_file_size_bytes: Option<u64>,
     /// Threshold in bytes above which "Copy file contents" prompts the user
@@ -350,7 +370,8 @@ impl App {
         // needs `&mut self`.
         let mut restored_split: Option<rust_pad_config::session::SessionSplit> = None;
         if app_config.restore_open_files {
-            restored_split = Self::restore_session(&mut tabs, &session_store);
+            restored_split =
+                Self::restore_session(&mut tabs, &session_store, app_config.session_content_max_kb);
         }
 
         // Open files requested via CLI arguments
@@ -404,6 +425,9 @@ impl App {
             last_flush: Instant::now(),
             session_store,
             session_content_max_kb: app_config.session_content_max_kb,
+            last_snapshot_sig: None,
+            consecutive_snapshot_failures: 0,
+            session_over_limit_warned: std::collections::HashSet::new(),
             max_file_size_bytes,
             copy_contents_warning_bytes,
             copy_contents_max_bytes,
@@ -469,7 +493,8 @@ impl App {
     fn restore_session(
         tabs: &mut TabManager,
         session_store: &Option<SessionStore>,
-    ) -> Option<rust_pad_config::session::SessionSplit> {
+        max_kb: usize,
+    ) -> Option<SessionSplit> {
         let Some(store) = session_store else {
             return None;
         };
@@ -482,6 +507,12 @@ impl App {
         // `(pinned, tab_color)` for the tab that was successfully restored.
         let mut restored_metadata: Vec<(bool, Option<rust_pad_core::tab_color::TabColor>)> =
             Vec::with_capacity(session_data.tabs.len());
+
+        // Tally recovery outcomes for the post-restore notices below. A
+        // missing content *row* (key absent) means an unsaved buffer was lost
+        // — distinct from a present-but-empty row (a genuinely blank tab).
+        let mut recovered_nonempty = 0usize;
+        let mut missing_content = 0usize;
 
         for entry in &session_data.tabs {
             match entry {
@@ -510,11 +541,13 @@ impl App {
                     pinned,
                     tab_color,
                 } => {
-                    let content = store
-                        .load_content(session_id)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default();
+                    let loaded = store.load_content(session_id).ok().flatten();
+                    match &loaded {
+                        Some(c) if !c.is_empty() => recovered_nonempty += 1,
+                        None => missing_content += 1,
+                        Some(_) => {} // present but empty: a normal blank tab
+                    }
+                    let content = loaded.unwrap_or_default();
                     let mut doc = rust_pad_core::document::Document::new();
                     doc.title = title.clone();
                     if !content.is_empty() {
@@ -548,12 +581,236 @@ impl App {
                 tabs.documents[i].tab_color = color;
             }
         }
-        let _ = store.clear_all_content();
-        // Caller will reapply the split layout once the App is built.
-        if any_restored {
-            session_data.split
+        // Detect whether the previous run ended cleanly *before* we overwrite
+        // the flag with the post-restore snapshot below.
+        let was_clean = store.was_clean_shutdown().unwrap_or(true);
+
+        // Write a consistent snapshot under the freshly-assigned session ids so
+        // on-disk `session_meta` and `session_content` agree from the first
+        // frame. This subsumes the old `clear_all_content()` (the snapshot
+        // rewrites the content table, dropping pre-restore orphans) and closes
+        // the launch window the clear-then-wait approach left open.
+        let split = if any_restored {
+            session_data.split.clone()
         } else {
             None
+        };
+        let (meta, content, _over_limit) =
+            Self::build_session_snapshot(tabs, split.clone(), max_kb);
+        if let Err(e) = store.save_snapshot(&meta, &content, false) {
+            tracing::warn!("post-restore session snapshot failed: {e:#}");
+        }
+
+        // Surface recovery outcomes (counts only — never tab titles/content).
+        if !was_clean && recovered_nonempty > 0 {
+            crate::problem_log::info_problem(&format!(
+                "Recovered {recovered_nonempty} unsaved document(s) after an unexpected shutdown."
+            ));
+        }
+        // Only after an *unclean* shutdown is a missing content row a genuine
+        // loss. On a clean restart an absent row is expected — it belongs to an
+        // over-cap tab that was intentionally not persisted (and already warned
+        // about at autosave time), so reporting it here would be a false alarm.
+        if !was_clean && missing_content > 0 {
+            crate::problem_log::warn_problem(&format!(
+                "{missing_content} unsaved tab(s) could not be recovered."
+            ));
+        }
+
+        // Caller will reapply the split layout once the App is built.
+        if any_restored {
+            split
+        } else {
+            None
+        }
+    }
+
+    /// Builds the full session snapshot from the live tabs: the metadata (tab
+    /// list, active index, split) and the bounded unsaved-buffer contents.
+    ///
+    /// This is the single source of truth for what gets persisted, shared by
+    /// the clean-exit, post-restore, and periodic-autosave paths so the
+    /// snapshot-building (and the `session_content_max_kb` cap) live in exactly
+    /// one place. Unsaved tabs lacking a `session_id` are assigned one here so
+    /// their identity — and thus the content key and the dirty fingerprint —
+    /// stays stable across snapshots (hence `&mut tabs`). Tabs whose content
+    /// exceeds the cap are omitted from `content` and reported in the returned
+    /// over-limit list (still listed in metadata, so they restore empty).
+    fn build_session_snapshot(
+        tabs: &mut TabManager,
+        split: Option<SessionSplit>,
+        max_kb: usize,
+    ) -> (SessionData, Vec<(String, String)>, Vec<OverLimitTab>) {
+        let mut entries = Vec::with_capacity(tabs.documents.len());
+        let mut content = Vec::new();
+        let mut over_limit = Vec::new();
+        let limit_bytes = max_kb * 1024;
+
+        for doc in &mut tabs.documents {
+            let tab_color = doc.tab_color.map(|c| c.as_serde_str().to_string());
+            if let Some(path) = &doc.file_path {
+                entries.push(SessionTabEntry::File {
+                    path: path.to_string_lossy().into_owned(),
+                    pinned: doc.pinned,
+                    tab_color,
+                });
+                continue;
+            }
+
+            // Unsaved tab: ensure a stable session id, then collect content.
+            let sid = match &doc.session_id {
+                Some(s) => s.clone(),
+                None => {
+                    let s = generate_session_id();
+                    doc.session_id = Some(s.clone());
+                    s
+                }
+            };
+            let text = doc.buffer.to_string();
+            if max_kb > 0 && text.len() > limit_bytes {
+                over_limit.push(OverLimitTab {
+                    session_id: sid.clone(),
+                    kb: text.len() / 1024,
+                });
+            } else {
+                content.push((sid.clone(), text));
+            }
+            entries.push(SessionTabEntry::Unsaved {
+                session_id: sid,
+                title: doc.title.clone(),
+                pinned: doc.pinned,
+                tab_color,
+            });
+        }
+
+        let meta = SessionData {
+            tabs: entries,
+            active_tab_index: tabs.active,
+            split,
+        };
+        (meta, content, over_limit)
+    }
+
+    /// Fingerprint of everything that goes into a session snapshot, used to
+    /// skip redundant autosaves. Hashes the ordered tab identities plus each
+    /// unsaved buffer's `content_version` (a robust change signal that, unlike
+    /// summing versions, is immune to membership and undo/redo aliasing),
+    /// along with pin/colour, the active index, and the split layout.
+    fn session_snapshot_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for doc in &self.tabs.documents {
+            match &doc.file_path {
+                Some(p) => {
+                    0u8.hash(&mut h);
+                    p.hash(&mut h);
+                }
+                None => {
+                    1u8.hash(&mut h);
+                    doc.session_id.hash(&mut h);
+                    doc.content_version.hash(&mut h);
+                }
+            }
+            doc.pinned.hash(&mut h);
+            doc.tab_color.map(|c| c.as_serde_str()).hash(&mut h);
+        }
+        self.tabs.active.hash(&mut h);
+        // `SessionSplit` holds an `f32`, so hash its `Debug` form rather than
+        // deriving `Hash`; the split changes rarely and this runs at most once
+        // per flush interval.
+        format!("{:?}", self.build_session_split()).hash(&mut h);
+        h.finish()
+    }
+
+    /// Autosave entry point for the periodic flush: snapshots the session only
+    /// when the live tabs differ from the last persisted fingerprint.
+    fn maybe_autosave_session(&mut self) {
+        if self.session_store.is_none() {
+            return;
+        }
+        if self.last_snapshot_sig == Some(self.session_snapshot_sig()) {
+            tracing::trace!("session snapshot skipped: unchanged");
+            return;
+        }
+        self.run_session_snapshot(false);
+    }
+
+    /// Builds and atomically persists the session snapshot, then surfaces
+    /// over-limit tabs (de-duplicated) and any failure (rate-limited). Updates
+    /// the stored fingerprint so the next autosave can skip unchanged state.
+    ///
+    /// `clean_shutdown` marks whether this is the final snapshot of a clean
+    /// exit; the next launch reads it to detect crashes.
+    fn run_session_snapshot(&mut self, clean_shutdown: bool) {
+        if self.session_store.is_none() {
+            return;
+        }
+        let split = self.build_session_split();
+        let (meta, content, over_limit) =
+            Self::build_session_snapshot(&mut self.tabs, split, self.session_content_max_kb);
+        self.warn_over_limit_tabs(&over_limit);
+
+        let total_bytes: usize = content.iter().map(|(_, c)| c.len()).sum();
+        // Scope the store borrow so the failure counters (also on `self`) can
+        // be mutated afterwards without a borrow conflict.
+        let result = match &self.session_store {
+            Some(store) => store.save_snapshot(&meta, &content, clean_shutdown),
+            None => return,
+        };
+        match result {
+            Ok(()) => {
+                if self.consecutive_snapshot_failures > 0 {
+                    tracing::info!(
+                        failures = self.consecutive_snapshot_failures,
+                        "session autosave recovered"
+                    );
+                    crate::problem_log::info_problem(
+                        "Session autosave recovered; unsaved tabs are being persisted again.",
+                    );
+                    self.consecutive_snapshot_failures = 0;
+                }
+                tracing::debug!(
+                    tabs = meta.tabs.len(),
+                    bytes = total_bytes,
+                    "session snapshot persisted"
+                );
+            }
+            Err(e) => {
+                // Detail to the log; keep the user-facing Problem free of any
+                // error text that could carry a path.
+                tracing::warn!("session snapshot failed: {e:#}");
+                if self.consecutive_snapshot_failures == 0 {
+                    crate::problem_log::warn_problem(
+                        "Session autosave failed; unsaved tabs may not be recoverable until this resolves.",
+                    );
+                }
+                self.consecutive_snapshot_failures =
+                    self.consecutive_snapshot_failures.saturating_add(1);
+            }
+        }
+        // Recompute after the build (which may have assigned new session ids)
+        // so the next tick sees a stable, matching fingerprint.
+        self.last_snapshot_sig = Some(self.session_snapshot_sig());
+    }
+
+    /// Emits a one-time, count-only warning for each unsaved tab whose content
+    /// exceeds the session cap, clearing tabs that drop back under the limit so
+    /// a later breach warns again. Never includes titles or content.
+    fn warn_over_limit_tabs(&mut self, over_limit: &[OverLimitTab]) {
+        let current: std::collections::HashSet<&str> =
+            over_limit.iter().map(|o| o.session_id.as_str()).collect();
+        self.session_over_limit_warned
+            .retain(|sid| current.contains(sid.as_str()));
+        for tab in over_limit {
+            if self
+                .session_over_limit_warned
+                .insert(tab.session_id.clone())
+            {
+                crate::problem_log::warn_problem(&format!(
+                    "An unsaved tab's content ({} KB) exceeds the session limit ({} KB) and will not be auto-saved.",
+                    tab.kb, self.session_content_max_kb,
+                ));
+            }
         }
     }
 
@@ -1343,9 +1600,13 @@ impl eframe::App for App {
         // Workspace filesystem watcher: apply pending events to the tree
         self.tick_workspace_watcher();
 
-        // Periodic flush of undo history to disk
+        // Periodic flush of undo history + crash-safe session autosave. The
+        // autosave snapshots unsaved-buffer content (when it changed) so a
+        // hard abort before the next clean exit loses at most one interval of
+        // edits, instead of everything since the last clean exit.
         if self.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
             self.tabs.flush_all_history();
+            self.maybe_autosave_session();
             self.last_flush = Instant::now();
         }
 
@@ -1380,53 +1641,10 @@ impl eframe::App for App {
             self.persist_view_state(doc);
         }
 
-        // Save session state (tab list + unsaved content) to redb
-        if let Some(store) = &self.session_store {
-            let mut tabs_list = Vec::new();
-            for doc in &self.tabs.documents {
-                let tab_color_str = doc.tab_color.map(|c| c.as_serde_str().to_string());
-                if let Some(path) = &doc.file_path {
-                    tabs_list.push(SessionTabEntry::File {
-                        path: path.to_string_lossy().into_owned(),
-                        pinned: doc.pinned,
-                        tab_color: tab_color_str,
-                    });
-                } else {
-                    let sid = doc.session_id.clone().unwrap_or_else(generate_session_id);
-                    let content = doc.buffer.to_string();
-                    let content_bytes = content.len();
-                    let limit_bytes = self.session_content_max_kb * 1024;
-
-                    if self.session_content_max_kb > 0 && content_bytes > limit_bytes {
-                        let actual_kb = content_bytes / 1024;
-                        crate::problem_log::warn_problem(&format!(
-                            "Tab '{}' content ({} KB) exceeds session limit ({} KB), skipping content save",
-                            doc.title, actual_kb, self.session_content_max_kb,
-                        ));
-                    } else if let Err(e) = store.save_content(&sid, &content) {
-                        crate::problem_log::warn_problem(&format!(
-                            "Failed to save session content: {e}"
-                        ));
-                    }
-
-                    tabs_list.push(SessionTabEntry::Unsaved {
-                        session_id: sid,
-                        title: doc.title.clone(),
-                        pinned: doc.pinned,
-                        tab_color: tab_color_str,
-                    });
-                }
-            }
-            let split = self.build_session_split();
-            let session_data = SessionData {
-                tabs: tabs_list,
-                active_tab_index: self.tabs.active,
-                split,
-            };
-            if let Err(e) = store.save_session(&session_data) {
-                crate::problem_log::warn_problem(&format!("Failed to save session: {e}"));
-            }
-        }
+        // Persist the session (tab list + bounded unsaved content) as one
+        // atomic snapshot, flagged as a clean shutdown. Shares the exact path
+        // used by the periodic autosave and post-restore snapshot.
+        self.run_session_snapshot(true);
 
         // Save current preferences to config file
         let config = AppConfig {
@@ -1558,6 +1776,9 @@ mod tests {
             last_flush: Instant::now(),
             session_store: None,
             session_content_max_kb: 10_240,
+            last_snapshot_sig: None,
+            consecutive_snapshot_failures: 0,
+            session_over_limit_warned: std::collections::HashSet::new(),
             max_file_size_bytes: Some(512 * 1024 * 1024),
             copy_contents_warning_bytes: 5 * 1024 * 1024,
             copy_contents_max_bytes: Some(64 * 1024 * 1024),
@@ -4048,6 +4269,202 @@ mod tests {
         assert!(store.load_content("tab-large").unwrap().is_none());
         let session = store.load_session().unwrap().unwrap();
         assert_eq!(session.tabs.len(), 2);
+    }
+
+    // ── session snapshot / crash recovery (Phase 23 P2) ─────────────────
+
+    #[test]
+    fn test_build_session_snapshot_assigns_id_and_collects_content() {
+        let mut app = test_app();
+        app.session_content_max_kb = 0; // unlimited
+        app.tabs.active_doc_mut().insert_text("draft text");
+        assert!(app.tabs.active_doc().session_id.is_none());
+
+        let split = app.build_session_split();
+        let (meta, content, over) =
+            App::build_session_snapshot(&mut app.tabs, split, app.session_content_max_kb);
+
+        assert!(over.is_empty());
+        assert_eq!(content.len(), 1);
+        // A stable session id was assigned back to the document.
+        let sid = app
+            .tabs
+            .active_doc()
+            .session_id
+            .clone()
+            .expect("id assigned");
+        assert_eq!(content[0].0, sid);
+        assert_eq!(content[0].1, "draft text");
+        assert_eq!(meta.tabs.len(), 1);
+        assert!(matches!(meta.tabs[0], SessionTabEntry::Unsaved { .. }));
+    }
+
+    #[test]
+    fn test_build_session_snapshot_excludes_over_limit() {
+        let mut app = test_app();
+        app.session_content_max_kb = 1;
+        app.tabs.active_doc_mut().insert_text(&"z".repeat(2048));
+
+        let (meta, content, over) =
+            App::build_session_snapshot(&mut app.tabs, None, app.session_content_max_kb);
+
+        // Over-limit content omitted but still listed in metadata.
+        assert!(content.is_empty());
+        assert_eq!(over.len(), 1);
+        assert_eq!(meta.tabs.len(), 1);
+    }
+
+    #[test]
+    fn test_session_snapshot_sig_tracks_content_changes() {
+        let mut app = test_app();
+        let sig0 = app.session_snapshot_sig();
+        app.tabs.active_doc_mut().insert_text("a");
+        let sig1 = app.session_snapshot_sig();
+        assert_ne!(sig0, sig1, "editing must change the fingerprint");
+        // Stable when nothing changed.
+        assert_eq!(sig1, app.session_snapshot_sig());
+    }
+
+    #[test]
+    fn test_maybe_autosave_gates_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app_with_session(dir.path());
+        app.session_content_max_kb = 0;
+        app.tabs.active_doc_mut().insert_text("first");
+
+        // First autosave persists content and records the fingerprint.
+        app.maybe_autosave_session();
+        let sid = app.tabs.active_doc().session_id.clone().expect("id");
+        assert!(app.last_snapshot_sig.is_some());
+        let store = app.session_store.as_ref().unwrap();
+        assert_eq!(store.load_content(&sid).unwrap().as_deref(), Some("first"));
+
+        // Delete the row out-of-band; an unchanged autosave must SKIP and
+        // therefore not rewrite it.
+        app.session_store
+            .as_ref()
+            .unwrap()
+            .delete_content(&sid)
+            .unwrap();
+        app.maybe_autosave_session();
+        assert!(
+            app.session_store
+                .as_ref()
+                .unwrap()
+                .load_content(&sid)
+                .unwrap()
+                .is_none(),
+            "unchanged session must not be re-persisted"
+        );
+
+        // After an edit the fingerprint changes and the autosave runs again.
+        app.tabs.active_doc_mut().insert_text(" second");
+        app.maybe_autosave_session();
+        assert_eq!(
+            app.session_store
+                .as_ref()
+                .unwrap()
+                .load_content(&sid)
+                .unwrap()
+                .as_deref(),
+            Some("first second"),
+        );
+    }
+
+    #[test]
+    fn test_autosave_then_crash_recovers_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test-session.redb");
+        let sid;
+        {
+            // Running app autosaves, then is killed (no on_exit / clean exit).
+            let mut app = test_app_with_session(dir.path());
+            app.session_content_max_kb = 0;
+            app.tabs.active_doc_mut().insert_text("unsaved work");
+            app.maybe_autosave_session();
+            sid = app.tabs.active_doc().session_id.clone().expect("id");
+        }
+        // Next launch: content survives and the crash is detectable.
+        let store = SessionStore::open(&db_path).expect("reopen");
+        assert!(!store.was_clean_shutdown().unwrap(), "autosave = unclean");
+        assert_eq!(
+            store.load_content(&sid).unwrap().as_deref(),
+            Some("unsaved work")
+        );
+    }
+
+    #[test]
+    fn test_restore_session_rehydrates_and_resnapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test-session.redb");
+        // Seed a clean session with one unsaved tab + content.
+        {
+            let store = SessionStore::open(&db_path).unwrap();
+            let meta = SessionData {
+                tabs: vec![SessionTabEntry::Unsaved {
+                    session_id: "old".to_string(),
+                    title: "Draft".to_string(),
+                    pinned: false,
+                    tab_color: None,
+                }],
+                active_tab_index: 0,
+                split: None,
+            };
+            store
+                .save_snapshot(
+                    &meta,
+                    &[("old".to_string(), "recovered!".to_string())],
+                    true,
+                )
+                .unwrap();
+        }
+
+        // Restore into a fresh TabManager.
+        let store = Some(SessionStore::open(&db_path).unwrap());
+        let mut tabs = TabManager::new();
+        let _ = App::restore_session(&mut tabs, &store, 0);
+
+        assert_eq!(tabs.documents.len(), 1);
+        assert_eq!(tabs.active_doc().buffer.to_string(), "recovered!");
+        assert!(tabs.active_doc().modified);
+        let new_sid = tabs.active_doc().session_id.clone().expect("new id");
+        assert_ne!(new_sid, "old", "restore reassigns a fresh session id");
+
+        // The post-restore snapshot is consistent: content lives under the new
+        // id and the clean flag was reset (so a crash now is detectable).
+        // Reopen from disk to read what restore persisted.
+        drop(store);
+        let store = SessionStore::open(&db_path).unwrap();
+        assert!(
+            !store.was_clean_shutdown().unwrap(),
+            "post-restore snapshot is unclean"
+        );
+        assert_eq!(
+            store.load_content(&new_sid).unwrap().as_deref(),
+            Some("recovered!")
+        );
+    }
+
+    #[test]
+    fn test_warn_over_limit_tabs_dedup() {
+        let mut app = test_app();
+        app.session_content_max_kb = 1;
+        let over = vec![OverLimitTab {
+            session_id: "big".to_string(),
+            kb: 4,
+        }];
+        app.warn_over_limit_tabs(&over);
+        app.warn_over_limit_tabs(&over);
+        assert_eq!(
+            app.session_over_limit_warned.len(),
+            1,
+            "warned once per episode"
+        );
+
+        // When the tab drops back under the limit it is forgotten, so a later
+        // breach can warn again.
+        app.warn_over_limit_tabs(&[]);
+        assert!(app.session_over_limit_warned.is_empty());
     }
 
     // ── file_ops: open_file_dialog ──────────────────────────────────────

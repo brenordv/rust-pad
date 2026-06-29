@@ -16,6 +16,18 @@ use crate::db_helpers::{deserialize_record, open_or_create_db, read_table, write
 /// 10 MB is generous for tab metadata; anything larger is likely corrupt.
 const MAX_SESSION_META_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Hard ceiling on a single stored content row read from disk. The content
+/// table is recovery-critical and read on every cold start from a
+/// user-writable file, so a corrupt/tampered row must not be able to force an
+/// unbounded allocation. 100 MB mirrors the config-side content clamp ceiling.
+const MAX_SESSION_CONTENT_BYTES: usize = 100 * 1024 * 1024;
+
+/// Sibling key in [`SESSION_META`] holding the clean-shutdown flag (`[1]` =
+/// clean, `[0]` = an autosave snapshot that was not yet followed by a clean
+/// exit). Stored as a separate key rather than a [`SessionData`] field so it
+/// does not break the bincode format of existing sessions.
+const CLEAN_SHUTDOWN_KEY: &str = "clean_shutdown";
+
 /// Session metadata table: `"data"` → bincode(`SessionData`).
 const SESSION_META: TableDefinition<&str, &[u8]> = TableDefinition::new("session_meta");
 
@@ -148,15 +160,86 @@ impl SessionStore {
         Ok(Self { db })
     }
 
-    /// Saves the session tab list and active index.
-    pub fn save_session(&self, data: &SessionData) -> Result<()> {
-        let bytes = bincode::serialize(data).context("Failed to serialize session data")?;
+    /// Atomically persists the whole session in a single write transaction:
+    /// the content table is cleared and rewritten from `content`, and the
+    /// metadata + clean-shutdown flag are written, all committed together.
+    ///
+    /// Because redb is ACID per transaction, a crash mid-commit leaves the
+    /// previous consistent snapshot intact — `session_meta` and
+    /// `session_content` can never disagree on disk. This replaces the older
+    /// `save_session` + per-tab `save_content` + `clear_all_content` trio.
+    ///
+    /// `clean_shutdown` records whether this is the final snapshot of a clean
+    /// exit (`true`) or an in-flight autosave (`false`); the next launch reads
+    /// it via [`SessionStore::was_clean_shutdown`] to detect crashes.
+    ///
+    /// The two tables are deliberately opened with a hand-rolled transaction
+    /// rather than the single-table `write_table!` macro: atomicity across
+    /// both tables is the whole point and the macro scopes one table per
+    /// commit.
+    pub fn save_snapshot(
+        &self,
+        meta: &SessionData,
+        content: &[(String, String)],
+        clean_shutdown: bool,
+    ) -> Result<()> {
+        let bytes = bincode::serialize(meta).context("Failed to serialize session data")?;
 
-        write_table!(self.db, SESSION_META, |table| {
-            table
+        let write_txn = self
+            .db
+            .begin_write()
+            .context("Failed to begin session snapshot transaction")?;
+        {
+            // Rewrite the content table from scratch so closed/renamed tabs
+            // and pre-restore orphans (under old session ids) leave no residue.
+            let mut content_table = write_txn
+                .open_table(SESSION_CONTENT)
+                .context("Failed to open session_content table")?;
+            let stale: Vec<String> = content_table
+                .iter()
+                .context("Failed to iterate session_content")?
+                .filter_map(|entry| entry.ok().map(|(k, _)| k.value().to_string()))
+                .collect();
+            for key in &stale {
+                content_table
+                    .remove(key.as_str())
+                    .context("Failed to clear stale session content")?;
+            }
+            for (session_id, text) in content {
+                content_table
+                    .insert(session_id.as_str(), text.as_str())
+                    .context("Failed to insert session content")?;
+            }
+
+            let mut meta_table = write_txn
+                .open_table(SESSION_META)
+                .context("Failed to open session_meta table")?;
+            meta_table
                 .insert("data", bytes.as_slice())
                 .context("Failed to insert session data")?;
-            Ok(())
+            let flag = [u8::from(clean_shutdown)];
+            meta_table
+                .insert(CLEAN_SHUTDOWN_KEY, flag.as_slice())
+                .context("Failed to insert clean-shutdown flag")?;
+        }
+        write_txn
+            .commit()
+            .context("Failed to commit session snapshot")?;
+        Ok(())
+    }
+
+    /// Returns whether the previous run recorded a clean shutdown. An absent
+    /// flag (no prior session, or one predating the flag) is treated as clean
+    /// so first launches never report a false recovery.
+    pub fn was_clean_shutdown(&self) -> Result<bool> {
+        read_table!(self.db, SESSION_META, |table| {
+            match table
+                .get(CLEAN_SHUTDOWN_KEY)
+                .context("Failed to read clean-shutdown flag")?
+            {
+                Some(guard) => Ok(guard.value().first().copied().unwrap_or(1) != 0),
+                None => Ok(true),
+            }
         })
     }
 
@@ -175,24 +258,31 @@ impl SessionStore {
         })
     }
 
-    /// Saves the content of an unsaved tab.
-    pub fn save_content(&self, session_id: &str, content: &str) -> Result<()> {
-        write_table!(self.db, SESSION_CONTENT, |table| {
-            table
-                .insert(session_id, content)
-                .context("Failed to insert session content")?;
-            Ok(())
-        })
-    }
-
     /// Loads the content of an unsaved tab, or `None` if not found.
+    ///
+    /// Enforces [`MAX_SESSION_CONTENT_BYTES`] on the stored value *before*
+    /// materializing it, so a corrupt or tampered row cannot force an
+    /// unbounded allocation on startup. An oversized row is skipped (treated
+    /// as absent) with a count-only `tracing::warn!` — never echoing content.
     pub fn load_content(&self, session_id: &str) -> Result<Option<String>> {
         read_table!(self.db, SESSION_CONTENT, |table| {
             match table
                 .get(session_id)
                 .context("Failed to read session content")?
             {
-                Some(guard) => Ok(Some(guard.value().to_string())),
+                Some(guard) => {
+                    let len = guard.value().len();
+                    if len > MAX_SESSION_CONTENT_BYTES {
+                        tracing::warn!(
+                            len,
+                            limit = MAX_SESSION_CONTENT_BYTES,
+                            "Skipping oversized session content row (possible corruption)"
+                        );
+                        Ok(None)
+                    } else {
+                        Ok(Some(guard.value().to_string()))
+                    }
+                }
                 None => Ok(None),
             }
         })
@@ -202,22 +292,6 @@ impl SessionStore {
     pub fn delete_content(&self, session_id: &str) -> Result<()> {
         write_table!(self.db, SESSION_CONTENT, |table| {
             let _ = table.remove(session_id);
-            Ok(())
-        })
-    }
-
-    /// Wipes all stored content entries (used on startup after restoring).
-    pub fn clear_all_content(&self) -> Result<()> {
-        write_table!(self.db, SESSION_CONTENT, |table| {
-            let keys: Vec<String> = table
-                .iter()
-                .context("Failed to iterate session_content")?
-                .filter_map(|entry| entry.ok().map(|(k, _)| k.value().to_string()))
-                .collect();
-
-            for key in &keys {
-                let _ = table.remove(key.as_str());
-            }
             Ok(())
         })
     }
@@ -264,7 +338,7 @@ mod tests {
             split: None,
         };
 
-        store.save_session(&data).expect("save");
+        store.save_snapshot(&data, &[], true).expect("save");
         let loaded = store.load_session().expect("load").expect("some");
 
         assert_eq!(loaded.tabs.len(), 2);
@@ -298,13 +372,34 @@ mod tests {
         }
     }
 
+    /// Builds a `SessionData` of `n` unsaved tabs named `sess-0..sess-n`.
+    fn unsaved_session(ids: &[&str]) -> SessionData {
+        SessionData {
+            tabs: ids
+                .iter()
+                .map(|id| SessionTabEntry::Unsaved {
+                    session_id: (*id).to_string(),
+                    title: format!("Tab {id}"),
+                    pinned: false,
+                    tab_color: None,
+                })
+                .collect(),
+            active_tab_index: 0,
+            split: None,
+        }
+    }
+
     #[test]
-    fn test_save_and_load_content() {
+    fn test_snapshot_persists_content() {
         let (store, _dir) = open_test_store();
 
-        store
-            .save_content("sess-1", "Hello, world!\nLine 2\n\tTabbed")
-            .expect("save");
+        let meta = unsaved_session(&["sess-1"]);
+        let content = vec![(
+            "sess-1".to_string(),
+            "Hello, world!\nLine 2\n\tTabbed".to_string(),
+        )];
+        store.save_snapshot(&meta, &content, false).expect("save");
+
         let loaded = store.load_content("sess-1").expect("load").expect("some");
         assert_eq!(loaded, "Hello, world!\nLine 2\n\tTabbed");
     }
@@ -313,26 +408,106 @@ mod tests {
     fn test_delete_content() {
         let (store, _dir) = open_test_store();
 
-        store.save_content("sess-2", "some text").expect("save");
+        let meta = unsaved_session(&["sess-2"]);
+        store
+            .save_snapshot(
+                &meta,
+                &[("sess-2".to_string(), "some text".to_string())],
+                false,
+            )
+            .expect("save");
         assert!(store.load_content("sess-2").expect("load").is_some());
 
         store.delete_content("sess-2").expect("delete");
         assert!(store.load_content("sess-2").expect("load").is_none());
     }
 
+    /// Regression for the reported data-loss bug: a snapshot must atomically
+    /// drop content for session ids no longer present (closed tabs, or the
+    /// old ids assigned before a restore) so `session_meta` and
+    /// `session_content` never reference stale/missing rows.
     #[test]
-    fn test_clear_all_content() {
+    fn test_snapshot_drops_stale_content() {
         let (store, _dir) = open_test_store();
 
-        store.save_content("a", "content-a").expect("save a");
-        store.save_content("b", "content-b").expect("save b");
-        store.save_content("c", "content-c").expect("save c");
+        let first = unsaved_session(&["a", "b", "c"]);
+        let first_content = vec![
+            ("a".to_string(), "content-a".to_string()),
+            ("b".to_string(), "content-b".to_string()),
+            ("c".to_string(), "content-c".to_string()),
+        ];
+        store
+            .save_snapshot(&first, &first_content, false)
+            .expect("first");
 
-        store.clear_all_content().expect("clear");
+        // Second snapshot keeps only `b` (a/c "closed") under a fresh id `d`.
+        let second = unsaved_session(&["b", "d"]);
+        let second_content = vec![
+            ("b".to_string(), "content-b2".to_string()),
+            ("d".to_string(), "content-d".to_string()),
+        ];
+        store
+            .save_snapshot(&second, &second_content, false)
+            .expect("second");
 
-        assert!(store.load_content("a").expect("load").is_none());
-        assert!(store.load_content("b").expect("load").is_none());
-        assert!(store.load_content("c").expect("load").is_none());
+        assert!(
+            store.load_content("a").expect("load").is_none(),
+            "a must be dropped"
+        );
+        assert!(
+            store.load_content("c").expect("load").is_none(),
+            "c must be dropped"
+        );
+        assert_eq!(
+            store.load_content("b").expect("load").as_deref(),
+            Some("content-b2")
+        );
+        assert_eq!(
+            store.load_content("d").expect("load").as_deref(),
+            Some("content-d")
+        );
+    }
+
+    /// Every `Unsaved` meta entry must have matching content after a snapshot —
+    /// the invariant whose violation caused the reported bug.
+    #[test]
+    fn test_snapshot_meta_and_content_consistent() {
+        let (store, _dir) = open_test_store();
+
+        let meta = unsaved_session(&["x", "y"]);
+        let content = vec![
+            ("x".to_string(), "x-text".to_string()),
+            ("y".to_string(), "y-text".to_string()),
+        ];
+        store.save_snapshot(&meta, &content, false).expect("save");
+
+        let loaded = store.load_session().expect("load").expect("some");
+        for tab in &loaded.tabs {
+            if let SessionTabEntry::Unsaved { session_id, .. } = tab {
+                assert!(
+                    store.load_content(session_id).expect("load").is_some(),
+                    "every Unsaved entry must have content: {session_id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_clean_shutdown_flag_roundtrip() {
+        let (store, _dir) = open_test_store();
+
+        // Absent flag → treated as clean (no false recovery on first launch).
+        assert!(store.was_clean_shutdown().expect("read"));
+
+        let meta = unsaved_session(&["s"]);
+        store.save_snapshot(&meta, &[], false).expect("autosave");
+        assert!(
+            !store.was_clean_shutdown().expect("read"),
+            "autosave is unclean"
+        );
+
+        store.save_snapshot(&meta, &[], true).expect("clean exit");
+        assert!(store.was_clean_shutdown().expect("read"), "clean exit");
     }
 
     #[test]
@@ -389,7 +564,14 @@ mod tests {
 
         // Test with unicode, quotes, backslashes, null-like patterns
         let content = "Hello 🌍\n\"quotes\" and \\backslash\n\t\ttabs\nline with \0 null";
-        store.save_content("special", content).expect("save");
+        let meta = unsaved_session(&["special"]);
+        store
+            .save_snapshot(
+                &meta,
+                &[("special".to_string(), content.to_string())],
+                false,
+            )
+            .expect("save");
         let loaded = store.load_content("special").expect("load").expect("some");
         assert_eq!(loaded, content);
     }
@@ -419,7 +601,7 @@ mod tests {
             active_tab_index: 0,
             split: None,
         };
-        store.save_session(&data).expect("save");
+        store.save_snapshot(&data, &[], true).expect("save");
         assert!(store.load_session().expect("load").is_some());
 
         // Corrupt the session metadata by writing garbage
