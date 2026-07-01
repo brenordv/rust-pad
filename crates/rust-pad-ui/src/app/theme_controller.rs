@@ -241,8 +241,10 @@ mod tests {
 
     #[test]
     fn test_doc_zoom_reset() {
-        let mut doc = Document::default();
-        doc.zoom_level = 5.0;
+        let mut doc = Document {
+            zoom_level: 5.0,
+            ..Default::default()
+        };
         doc.zoom_level = 1.0;
         assert!((doc.zoom_level - 1.0).abs() < f32::EPSILON);
     }
@@ -250,8 +252,10 @@ mod tests {
     #[test]
     fn test_doc_zoom_in_respects_custom_max() {
         let ctrl = test_theme_ctrl();
-        let mut doc = Document::default();
-        doc.zoom_level = 1.95;
+        let mut doc = Document {
+            zoom_level: 1.95,
+            ..Default::default()
+        };
         let max = 2.0_f32;
         doc.zoom_level = (doc.zoom_level + 0.1).min(max);
         assert!((doc.zoom_level - 2.0).abs() < 0.01);

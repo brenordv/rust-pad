@@ -2144,8 +2144,10 @@ mod tests {
 
     #[test]
     fn editor_widget_defaults() {
-        let mut doc = Document::default();
-        doc.zoom_level = 1.5;
+        let mut doc = Document {
+            zoom_level: 1.5,
+            ..Default::default()
+        };
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, None);
         assert!((widget.doc.zoom_level - 1.5).abs() < f32::EPSILON);

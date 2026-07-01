@@ -189,21 +189,15 @@ pub struct WorkspaceSidebar {
     /// user actually clicked. Survives lazy-load expansion; the selection is
     /// cleared when its row is no longer visible.
     pub(crate) selected: Option<SelectedNode>,
-    /// Whether the sidebar currently owns keyboard input. Set when the user
-    /// clicks a tree row or navigates with the pointer over the sidebar;
-    /// cleared by `App` when the editor is clicked. The keyboard-nav gate and
-    /// the single-pane editor's `auto_focus` both read this so arrow/Enter/F2
-    /// keys route to whichever panel the user last engaged — independent of
-    /// egui's implicit widget focus.
+    /// Whether the sidebar currently owns keyboard input. Set only when the
+    /// user clicks a tree row; cleared by `App` when the editor (or another
+    /// panel) is clicked. The keyboard-nav gate and the single-pane editor's
+    /// `auto_focus` both read this so arrow/Enter/F2 keys route to whichever
+    /// panel the user last *clicked* — click-to-focus, independent of egui's
+    /// implicit widget focus. Pointer hover deliberately does not affect it, so
+    /// a mouse merely resting over the tree can never steal keys from the
+    /// focused editor.
     pub(crate) kbd_active: bool,
-    /// Set when the sidebar hands keyboard ownership to the editor by opening a
-    /// file via Enter. While true, a *stationary* pointer merely resting over
-    /// the sidebar must not re-grab the arrow keys — otherwise the very first
-    /// arrow press after opening a file would steal navigation back from the
-    /// editor (the pointer is still over the sidebar after the keystroke).
-    /// Cleared by a deliberate re-engagement: pointer motion within the sidebar
-    /// or a row click.
-    pub(crate) yielded_to_editor: bool,
 }
 
 impl Default for WorkspaceSidebar {
@@ -233,7 +227,6 @@ impl WorkspaceSidebar {
             workspace_rename_select_pending: false,
             selected: None,
             kbd_active: false,
-            yielded_to_editor: false,
         }
     }
 
@@ -260,9 +253,8 @@ impl WorkspaceSidebar {
         // Keyboard navigation runs first so that a key press can produce
         // an `OpenFile` action this frame without being preempted by the
         // double-click handler in the file row.
-        let sidebar_rect = ui.max_rect();
         let mut action = self
-            .handle_tree_kbd_nav(ui.ctx(), sidebar_rect)
+            .handle_tree_kbd_nav(ui.ctx())
             .unwrap_or(SidebarAction::None);
 
         // Header: workspace name + toolbar
@@ -613,10 +605,8 @@ impl WorkspaceSidebar {
             self.selected = Some(req);
             // A row click hands keyboard ownership to the sidebar so arrow
             // navigation works regardless of pointer position until the user
-            // clicks another panel. It is also a deliberate re-engagement, so
-            // it clears any pending hand-off to the editor.
+            // clicks another panel (click-to-focus).
             self.kbd_active = true;
-            self.yielded_to_editor = false;
         }
     }
 
@@ -725,63 +715,24 @@ impl WorkspaceSidebar {
 
     /// Handles arrow / Enter / F2 keystrokes for the sidebar tree.
     ///
-    /// Activation rules — keyboard nav fires when the pointer is over the
-    /// sidebar OR when a selection exists AND the sidebar holds keyboard
-    /// ownership ([`kbd_active`](Self::kbd_active)). The latter lets the user
-    /// navigate after moving the mouse away; ownership is released when the
-    /// editor is clicked, so keys never bleed across panels — independent of
-    /// egui's implicit widget focus (which the editor monopolises via its
-    /// per-frame `auto_focus`). Returns `Some(action)` only when Enter on a
-    /// file should open it. Inline rename / new-entry editing suspends nav.
-    pub(crate) fn handle_tree_kbd_nav(
-        &mut self,
-        ctx: &egui::Context,
-        sidebar_rect: egui::Rect,
-    ) -> Option<SidebarAction> {
+    /// Activation is **click-to-focus**: nav fires only when a row is selected
+    /// AND the sidebar holds keyboard ownership ([`kbd_active`](Self::kbd_active)),
+    /// which is latched by a deliberate row click and released when another panel
+    /// is clicked (`App` clears it). Pointer position is irrelevant — a mouse
+    /// resting over the tree never routes keys here, so it cannot steal
+    /// navigation from the focused editor. This is independent of egui's implicit
+    /// widget focus (which the editor monopolises via its per-frame
+    /// `auto_focus`). Returns `Some(action)` only when Enter on a file should
+    /// open it. Inline rename / new-entry editing suspends nav.
+    pub(crate) fn handle_tree_kbd_nav(&mut self, ctx: &egui::Context) -> Option<SidebarAction> {
         // Skip if any inline edit is active — the TextEdit owns the keys.
         if self.rename_buffer.is_some() || self.rename_entry.is_some() || self.new_entry.is_some() {
             return None;
         }
-        let pointer_in_sidebar = ctx.input(|i| {
-            i.pointer
-                .latest_pos()
-                .is_some_and(|p| sidebar_rect.contains(p))
-        });
-        // Moving the pointer within the sidebar is a deliberate re-engagement
-        // gesture: it re-arms pointer-based keyboard latching after a previous
-        // handoff to the editor (e.g. Enter-to-open). A *stationary* pointer
-        // resting over the sidebar must not re-arm, or it would silently steal
-        // arrow keys back from the editor the instant a file is opened.
-        // `delta()` is the exact per-frame motion (zero for a resting pointer),
-        // a sharper signal than velocity-based `is_moving()` which lingers as
-        // it decays.
-        if pointer_in_sidebar && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
-            self.yielded_to_editor = false;
-        }
-        // The sidebar processes nav keys when the pointer is actively engaging
-        // it (over it and not in a post-handoff "yielded" state) or when
-        // ownership was latched earlier and not yet released.
-        let pointer_engaged = pointer_in_sidebar && !self.yielded_to_editor;
-        if !(pointer_engaged || (self.selected.is_some() && self.kbd_active)) {
+        // Click-to-focus gate: own the keyboard only after a row click latched
+        // ownership with a live selection. No pointer-hover activation.
+        if !(self.selected.is_some() && self.kbd_active) {
             return None;
-        }
-        // Pressing a navigation key while actively engaging the sidebar latches
-        // keyboard ownership so navigation keeps working after the pointer
-        // leaves, until another panel is clicked. (A stationary post-handoff
-        // hover is not "engaged", so it cannot latch.)
-        if pointer_engaged {
-            use egui::Key;
-            let nav_key_pressed = ctx.input(|i| {
-                i.key_pressed(Key::ArrowDown)
-                    || i.key_pressed(Key::ArrowUp)
-                    || i.key_pressed(Key::ArrowLeft)
-                    || i.key_pressed(Key::ArrowRight)
-                    || i.key_pressed(Key::Enter)
-                    || i.key_pressed(Key::F2)
-            });
-            if nav_key_pressed {
-                self.kbd_active = true;
-            }
         }
 
         let nodes = self.visible_nodes();
@@ -852,11 +803,11 @@ impl WorkspaceSidebar {
     fn kbd_nav_activate(&mut self, node: SelectedNode) -> Option<SidebarAction> {
         match self.entry_kind_for(&node.path)? {
             EntryKind::File => {
+                // Opening a file hands the arrow keys to the editor by releasing
+                // sidebar ownership. Under click-to-focus the keys stay with the
+                // editor until the user clicks a row again, so no hover can
+                // reclaim them.
                 self.kbd_active = false;
-                // Hand the arrow keys to the editor and keep them there until
-                // the user deliberately re-engages the sidebar — a stationary
-                // pointer still over the sidebar must not reclaim them.
-                self.yielded_to_editor = true;
                 Some(SidebarAction::OpenFile(node.path))
             }
             EntryKind::Directory => {
@@ -2287,18 +2238,12 @@ mod tests {
     // These drive `handle_tree_kbd_nav` end-to-end so the activation gate,
     // ownership latch, and key dispatch lines are exercised too.
 
-    /// Runs one frame of `handle_tree_kbd_nav` with `key` pressed and the
-    /// pointer parked at `pointer`. The sidebar rect is a fixed 200×600 box
-    /// at the origin.
-    fn drive_kbd_nav_with(
-        sidebar: &mut WorkspaceSidebar,
-        key: egui::Key,
-        pointer: egui::Pos2,
-    ) -> Option<SidebarAction> {
+    /// Runs one frame of `handle_tree_kbd_nav` with `key` pressed. Pointer
+    /// position is irrelevant under click-to-focus, so the caller sets
+    /// `kbd_active` / `selected` to model a prior row click.
+    fn drive_kbd_nav(sidebar: &mut WorkspaceSidebar, key: egui::Key) -> Option<SidebarAction> {
         let ctx = egui::Context::default();
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 600.0));
         let mut raw = egui::RawInput::default();
-        raw.events.push(egui::Event::PointerMoved(pointer));
         raw.events.push(egui::Event::Key {
             key,
             physical_key: None,
@@ -2308,40 +2253,34 @@ mod tests {
         });
         let mut out = None;
         let _ = ctx.run_ui(raw, |ui| {
-            out = sidebar.handle_tree_kbd_nav(ui.ctx(), rect);
+            out = sidebar.handle_tree_kbd_nav(ui.ctx());
         });
         out
     }
 
-    /// Pointer parked at the centre of the sidebar rect.
-    fn drive_kbd_nav(sidebar: &mut WorkspaceSidebar, key: egui::Key) -> Option<SidebarAction> {
-        drive_kbd_nav_with(sidebar, key, egui::pos2(100.0, 300.0))
+    /// Models a row click: `render_tree` sets both fields when a row is clicked.
+    fn click_row(sidebar: &mut WorkspaceSidebar, path: &std::path::Path) {
+        sidebar.selected = Some(SelectedNode {
+            root_index: 0,
+            path: path.to_path_buf(),
+        });
+        sidebar.kbd_active = true;
     }
 
     #[test]
-    fn dispatch_arrow_down_selects_first_then_advances() {
+    fn dispatch_arrow_down_advances_selection() {
         let (mut sidebar, _tmp, root) = sidebar_with_tree();
-        assert!(sidebar.selected.is_none());
+        click_row(&mut sidebar, &root);
 
         let action = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
         assert!(action.is_none());
-        assert_eq!(sidebar.selected.as_ref().unwrap().path, root);
-        assert!(
-            sidebar.kbd_active,
-            "a nav key over the sidebar latches ownership"
-        );
-
-        drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
         assert_eq!(sidebar.selected.as_ref().unwrap().path, root.join("sub"));
     }
 
     #[test]
     fn dispatch_arrow_up_moves_back() {
         let (mut sidebar, _tmp, root) = sidebar_with_tree();
-        sidebar.selected = Some(SelectedNode {
-            root_index: 0,
-            path: root.join("sub"),
-        });
+        click_row(&mut sidebar, &root.join("sub"));
         drive_kbd_nav(&mut sidebar, egui::Key::ArrowUp);
         assert_eq!(sidebar.selected.as_ref().unwrap().path, root);
     }
@@ -2349,151 +2288,105 @@ mod tests {
     #[test]
     fn dispatch_enter_on_file_returns_open_action() {
         let (mut sidebar, _tmp, root) = sidebar_with_tree();
-        sidebar.selected = Some(SelectedNode {
-            root_index: 0,
-            path: root.join("a.txt"),
-        });
+        click_row(&mut sidebar, &root.join("a.txt"));
         let action = drive_kbd_nav(&mut sidebar, egui::Key::Enter);
         assert_eq!(action, Some(SidebarAction::OpenFile(root.join("a.txt"))));
     }
 
-    /// Builds a key-press `RawInput`, optionally moving the pointer to `pos`
-    /// first. Omitting `pos` leaves the pointer wherever the persistent context
-    /// last saw it — a *stationary* hover, which is the crux of the focus bug.
-    fn key_frame(key: egui::Key, pos: Option<egui::Pos2>) -> egui::RawInput {
-        let mut raw = egui::RawInput::default();
-        if let Some(p) = pos {
-            raw.events.push(egui::Event::PointerMoved(p));
-        }
-        raw.events.push(egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        raw
-    }
-
-    /// Regression test for the post-Enter focus bug: opening a file via Enter
-    /// hands the arrow keys to the editor, and a *stationary* pointer still
-    /// resting over the sidebar must NOT steal them back on the next arrow.
+    /// The brief's exact repro: the user clicked in the editor (so the sidebar
+    /// does NOT own the keyboard) and their mouse merely rests over the tree.
+    /// A stale selection may linger. Arrow keys must go to the editor, never
+    /// move the tree selection.
     #[test]
-    fn open_via_enter_yields_arrows_to_editor_under_static_hover() {
+    fn hover_without_ownership_does_not_capture_arrows() {
         let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        // Stale selection from an earlier click, but the editor now owns keys.
         sidebar.selected = Some(SelectedNode {
             root_index: 0,
-            path: root.join("a.txt"),
+            path: root.clone(),
         });
-        sidebar.kbd_active = true; // sidebar currently owns the keyboard
+        sidebar.kbd_active = false;
 
-        let ctx = egui::Context::default();
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 600.0));
-        let inside = egui::pos2(100.0, 300.0);
+        let action = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
+        assert!(
+            action.is_none(),
+            "the arrow goes to the editor, not the tree"
+        );
+        assert_eq!(
+            sidebar.selected.as_ref().unwrap().path,
+            root,
+            "tree selection is unchanged by a hover-only arrow press"
+        );
+        assert!(!sidebar.kbd_active, "hover never latches ownership");
+    }
 
-        // Frame 1: pointer over the sidebar, press Enter → opens the file.
-        let mut action = None;
-        let _ = ctx.run_ui(key_frame(egui::Key::Enter, Some(inside)), |ui| {
-            action = sidebar.handle_tree_kbd_nav(ui.ctx(), rect);
-        });
+    /// Opening a file via Enter releases ownership, so the very next arrow —
+    /// regardless of pointer position — is left for the editor.
+    #[test]
+    fn open_via_enter_releases_ownership_so_arrows_go_to_editor() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        click_row(&mut sidebar, &root.join("a.txt"));
+
+        let action = drive_kbd_nav(&mut sidebar, egui::Key::Enter);
         assert_eq!(action, Some(SidebarAction::OpenFile(root.join("a.txt"))));
         assert!(
             !sidebar.kbd_active,
             "Enter-to-open releases sidebar ownership"
         );
-        assert!(sidebar.yielded_to_editor, "handoff to editor is recorded");
 
-        // Frame 2: pointer has NOT moved (still over the sidebar); press Down.
-        // The sidebar must ignore it so the focused editor receives the arrow.
         let selected_before = sidebar.selected.clone();
-        let mut action2 = Some(SidebarAction::None);
-        let _ = ctx.run_ui(key_frame(egui::Key::ArrowDown, None), |ui| {
-            action2 = sidebar.handle_tree_kbd_nav(ui.ctx(), rect);
-        });
+        let action2 = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
         assert!(
             action2.is_none(),
-            "stationary hover yields the key to the editor"
-        );
-        assert!(
-            !sidebar.kbd_active,
-            "static hover must not re-grab ownership after a handoff"
-        );
-        assert!(
-            sidebar.yielded_to_editor,
-            "still yielded until deliberate re-engagement"
+            "ownership released — arrow ignored by tree"
         );
         assert_eq!(
             sidebar.selected, selected_before,
-            "selection unchanged — the arrow went to the editor, not the tree"
+            "selection unchanged — the arrow went to the editor"
         );
     }
 
-    /// Counterpart to the static-hover test: once the user *moves* the pointer
-    /// back over the sidebar, a deliberate re-engagement, arrow keys drive the
-    /// tree again.
+    /// Once the user clicks a row again, ownership is re-latched and arrows
+    /// drive the tree — re-engagement is by click, not by hover.
     #[test]
-    fn moving_pointer_over_sidebar_reengages_after_handoff() {
+    fn row_click_reengages_after_editor_took_focus() {
         let (mut sidebar, _tmp, root) = sidebar_with_tree();
-        sidebar.selected = Some(SelectedNode {
-            root_index: 0,
-            path: root.clone(),
-        });
-        sidebar.yielded_to_editor = true; // pretend we just handed off to the editor
+        // Editor currently owns the keyboard.
         sidebar.kbd_active = false;
+        sidebar.selected = None;
 
-        let ctx = egui::Context::default();
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 600.0));
-
-        // Settle the pointer inside the sidebar without a key, so the next frame
-        // registers genuine motion.
-        let mut settle = egui::RawInput::default();
-        settle
-            .events
-            .push(egui::Event::PointerMoved(egui::pos2(100.0, 100.0)));
-        let _ = ctx.run_ui(settle, |_ui| {});
-
-        // Move the pointer (within the sidebar) and press Down: re-engages.
-        let _ = ctx.run_ui(
-            key_frame(egui::Key::ArrowDown, Some(egui::pos2(100.0, 320.0))),
-            |ui| {
-                let _ = sidebar.handle_tree_kbd_nav(ui.ctx(), rect);
-            },
-        );
-        assert!(
-            !sidebar.yielded_to_editor,
-            "pointer motion clears the yield"
-        );
-        assert!(
-            sidebar.kbd_active,
-            "moving over the sidebar + nav key re-latches ownership"
-        );
+        // A row click re-latches ownership and selection (as `render_tree` does).
+        click_row(&mut sidebar, &root);
+        let _ = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
         assert_eq!(
             sidebar.selected.as_ref().unwrap().path,
             root.join("sub"),
-            "arrow now advances the tree selection"
+            "arrow advances the tree once a click re-latches ownership"
         );
     }
 
     #[test]
-    fn dispatch_ignored_when_pointer_outside_and_no_selection() {
+    fn dispatch_ignored_without_ownership() {
         let (mut sidebar, _tmp, _root) = sidebar_with_tree();
-        let action = drive_kbd_nav_with(
-            &mut sidebar,
-            egui::Key::ArrowDown,
-            egui::pos2(1000.0, 1000.0),
-        );
+        // No click ever happened: no selection, no ownership.
+        let action = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
         assert!(action.is_none());
         assert!(
             sidebar.selected.is_none(),
-            "keys are ignored with no selection and the pointer away from the sidebar"
+            "keys are ignored until a row click latches ownership"
         );
     }
 
     #[test]
     fn dispatch_empty_tree_returns_none() {
         let mut sidebar = WorkspaceSidebar::new();
+        // Own the keyboard with a stale selection, but the tree has no rows.
+        sidebar.selected = Some(SelectedNode {
+            root_index: 0,
+            path: PathBuf::from("/gone"),
+        });
+        sidebar.kbd_active = true;
         let action = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
         assert!(action.is_none());
-        assert!(sidebar.selected.is_none());
     }
 }
