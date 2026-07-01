@@ -660,10 +660,22 @@ impl Document {
             let w = style.indent_text().chars().count() as isize;
             (w, w)
         } else {
-            let a =
-                -(line_ops::leading_indent_removable(&self.buffer, anchor_line, &style) as isize);
-            let p =
-                -(line_ops::leading_indent_removable(&self.buffer, position_line, &style) as isize);
+            // Dedent is per-line and, for Spaces, block-aware — read the exact
+            // removal each cursor line will see so the endpoints track the edit.
+            let a = -(line_ops::dedent_removed_for_line(
+                &self.buffer,
+                anchor_line,
+                start_line,
+                end_line,
+                &style,
+            ) as isize);
+            let p = -(line_ops::dedent_removed_for_line(
+                &self.buffer,
+                position_line,
+                start_line,
+                end_line,
+                &style,
+            ) as isize);
             (a, p)
         };
 
@@ -2055,16 +2067,20 @@ mod tests {
 
     #[test]
     fn dedent_selection_shrinks_with_text_mixed_leading_whitespace() {
-        // Line 1 (middle) has only 2 leading spaces, but anchor/position sit on
-        // lines 0 and 2, which both have 4 removable spaces.
+        // Block dedent: the middle line's 2 leading spaces set the common
+        // minimum, so every line loses 2 (relative gaps preserved) rather than
+        // each line collapsing independently to column 0.
         let mut doc = doc_with_text("    a\n  b\n    c");
         doc.indent_style = IndentStyle::Spaces(4);
         doc.cursor.selection_anchor = Some(Position::new(0, 4));
         doc.cursor.position = Position::new(2, 5);
         assert!(doc.indent_or_dedent_selection(false));
-        assert_eq!(doc.buffer.to_string(), "a\nb\nc");
+        assert_eq!(doc.buffer.to_string(), "  a\nb\n  c");
+        // Multiline dedent pins the top endpoint (anchor) to col 0 so whole
+        // lines stay selected; the bottom endpoint tracks its block delta of
+        // -2 (5 - 2 = 3).
         assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
-        assert_eq!(doc.cursor.position, Position::new(2, 1));
+        assert_eq!(doc.cursor.position, Position::new(2, 3));
     }
 
     #[test]

@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.12.2]
+
+### Fixed
+- **Hovering the workspace sidebar stole the arrow keys from the editor.** After clicking into a document, moving the mouse over the workspace panel — without clicking anything — caused the next arrow-key press to move the selection in the file tree instead of the caret in the text. Keyboard ownership was tied to the pointer *hovering* the sidebar; it is now strictly **click-to-focus** — the sidebar only takes the arrow/Enter/F2 keys after you click one of its rows, and releases them the moment you click back in the editor. Pointer position no longer affects where keystrokes go. (This supersedes the narrower 2.12.1 fix, which only covered the arrow press immediately after opening a file with Enter.)
+- **`Shift+Tab` flattened unevenly indented lines to the left margin.** Dedenting a multi-line selection removed "a tab's worth" of spaces from every line independently, so lines indented with fewer spaces than the tab width collapsed all the way to column 0 and their relative indentation was lost. Dedent is now a **block operation**: it removes the smallest common amount of leading whitespace (capped at one indent level) from every selected line at once, preserving the relative indentation between them, and repeated presses march the block left until it reaches the margin. Tab-indented files and single-line dedent are unchanged.
+
 ## [2.12.1]
 
 ### Fixed

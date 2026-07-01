@@ -369,8 +369,18 @@ pub fn indent_lines(
     Ok(())
 }
 
-/// Returns the number of leading-whitespace chars that [`dedent_lines`] would
+/// Counts the leading ASCII spaces on `line_str`.
+fn leading_space_count(line_str: &str) -> usize {
+    line_str.chars().take_while(|c| *c == ' ').count()
+}
+
+/// Returns the number of leading-whitespace chars a *single-line* dedent would
 /// remove from `line_idx` under `style`. Reads the buffer without mutating it.
+///
+/// This is the per-line rule used for the `Tabs` style and for single-line
+/// dedent (no selection). Multi-line selection dedent goes through
+/// [`dedent_removed_for_line`], which for `Spaces` applies a block rule that
+/// preserves relative indentation.
 ///
 /// Returns `0` when the line index is out of bounds.
 pub fn leading_indent_removable(
@@ -388,23 +398,107 @@ pub fn leading_indent_removable(
                 1
             } else {
                 // Fall back: remove up to 4 leading spaces for mixed content
-                line_str.chars().take_while(|c| *c == ' ').count().min(4)
+                leading_space_count(&line_str).min(4)
             }
         }
-        IndentStyle::Spaces(n) => line_str.chars().take_while(|c| *c == ' ').count().min(*n),
+        IndentStyle::Spaces(n) => leading_space_count(&line_str).min(*n),
     }
 }
 
+/// Uniform number of leading spaces a `Spaces(w)` **block** dedent removes from
+/// every line in `[start_line, end_line)`.
+///
+/// Returns `0` for [`IndentStyle::Tabs`] (tabs dedent per line, not as a block)
+/// and when no line in the range is *constraining* — i.e. no line has both
+/// non-whitespace content and at least one leading space. Otherwise the amount
+/// is the smallest leading-space count among constraining lines, capped at the
+/// indent width `w`.
+///
+/// Blank / whitespace-only lines and already-flush lines are excluded from the
+/// minimum so they never freeze progress toward column 0. Reads the buffer
+/// without mutating it.
+pub fn block_dedent_amount(
+    buffer: &TextBuffer,
+    start_line: usize,
+    end_line: usize,
+    style: &IndentStyle,
+) -> usize {
+    let IndentStyle::Spaces(w) = *style else {
+        return 0;
+    };
+    let mut min_lead: Option<usize> = None;
+    for line_idx in start_line..end_line.min(buffer.len_lines()) {
+        let Ok(line) = buffer.line(line_idx) else {
+            continue;
+        };
+        let line_str = line.to_string();
+        let lead = leading_space_count(&line_str);
+        if lead > 0 && !line_str.trim().is_empty() {
+            min_lead = Some(min_lead.map_or(lead, |m| m.min(lead)));
+        }
+    }
+    min_lead.map_or(0, |m| m.min(w))
+}
+
+/// Per-line removal for a block dedent of `[start_line, end_line)`, given the
+/// already-computed block amount `k`. Kept private so [`dedent_lines`] and
+/// [`dedent_removed_for_line`] share one formula.
+fn removed_for_line_with_k(
+    buffer: &TextBuffer,
+    line: usize,
+    k: usize,
+    style: &IndentStyle,
+) -> usize {
+    match style {
+        IndentStyle::Spaces(_) => {
+            if k == 0 {
+                return 0;
+            }
+            buffer
+                .line(line)
+                .map_or(0, |l| k.min(leading_space_count(&l.to_string())))
+        }
+        IndentStyle::Tabs => leading_indent_removable(buffer, line, style),
+    }
+}
+
+/// Number of leading-whitespace chars a dedent of the block `[start_line,
+/// end_line)` removes from `line`.
+///
+/// For [`IndentStyle::Spaces`] this is `min(block amount, leading spaces on the
+/// line)`, a uniform block outdent that preserves the relative indentation
+/// between lines (see [`block_dedent_amount`]). For [`IndentStyle::Tabs`] it is
+/// the unchanged per-line [`leading_indent_removable`].
+///
+/// Returns `0` when `line` is out of bounds. Callers editing many lines should
+/// prefer [`dedent_lines`] (which computes the block amount once); this helper
+/// recomputes it per call and is intended for the few cursor lines whose
+/// columns must track the edit.
+pub fn dedent_removed_for_line(
+    buffer: &TextBuffer,
+    line: usize,
+    start_line: usize,
+    end_line: usize,
+    style: &IndentStyle,
+) -> usize {
+    let k = block_dedent_amount(buffer, start_line, end_line, style);
+    removed_for_line_with_k(buffer, line, k, style)
+}
+
 /// Dedents lines in the given range using the specified indent style.
+///
+/// `Spaces` uses the block rule from [`block_dedent_amount`] (relative
+/// indentation preserved); `Tabs` removes one leading tab per line.
 pub fn dedent_lines(
     buffer: &mut TextBuffer,
     start_line: usize,
     end_line: usize,
     style: &IndentStyle,
 ) -> Result<()> {
-    // Process from last to first to maintain char positions
+    let k = block_dedent_amount(buffer, start_line, end_line, style);
+    // Process from last to first to maintain char positions.
     for line_idx in (start_line..end_line.min(buffer.len_lines())).rev() {
-        let to_remove = leading_indent_removable(buffer, line_idx, style);
+        let to_remove = removed_for_line_with_k(buffer, line_idx, k, style);
         if to_remove > 0 {
             let line_start = buffer.line_to_char(line_idx)?;
             buffer.remove(line_start, line_start + to_remove)?;
@@ -659,12 +753,13 @@ mod tests {
 
     #[test]
     fn test_dedent_spaces_partial() {
-        // When line has fewer leading spaces than the indent width,
-        // dedent removes only what's available.
+        // Block dedent removes the common minimum (2), capped at width (4), from
+        // every line — preserving the 2-space gap between the lines rather than
+        // smushing both to column 0.
         let style = IndentStyle::Spaces(4);
         let mut buf = TextBuffer::from("  a\n    b");
         dedent_lines(&mut buf, 0, 2, &style).unwrap();
-        assert_eq!(buf.to_string(), "a\nb");
+        assert_eq!(buf.to_string(), "a\n  b");
     }
 
     #[test]
@@ -963,6 +1058,94 @@ mod tests {
         let mut buf = TextBuffer::from("abc\ndef");
         dedent_lines(&mut buf, 0, 2, &style).unwrap();
         assert_eq!(buf.to_string(), "abc\ndef");
+    }
+
+    // ── block dedent (relative-indentation preserving) ───────────────
+
+    #[test]
+    fn block_dedent_preserves_relative_gaps() {
+        // The brief's JSON: leading spaces (1, 2, 3, 1). Each Shift+Tab removes
+        // the common minimum, capped at width, preserving the ff/cc gap and
+        // marching to column 0.
+        let style = IndentStyle::Spaces(4);
+        let mut buf = TextBuffer::from(" {\n  \"ff\":23,\n   \"cc\":32\n }");
+
+        dedent_lines(&mut buf, 0, 4, &style).unwrap();
+        assert_eq!(buf.to_string(), "{\n \"ff\":23,\n  \"cc\":32\n}");
+
+        dedent_lines(&mut buf, 0, 4, &style).unwrap();
+        assert_eq!(buf.to_string(), "{\n\"ff\":23,\n \"cc\":32\n}");
+
+        dedent_lines(&mut buf, 0, 4, &style).unwrap();
+        assert_eq!(buf.to_string(), "{\n\"ff\":23,\n\"cc\":32\n}");
+
+        // Fully flush: a further dedent is a no-op.
+        dedent_lines(&mut buf, 0, 4, &style).unwrap();
+        assert_eq!(buf.to_string(), "{\n\"ff\":23,\n\"cc\":32\n}");
+    }
+
+    #[test]
+    fn block_dedent_uniform_indent_strips_full_level() {
+        // Consistently-indented code still loses a whole level per press, and
+        // the deeper line keeps its +4 nesting.
+        let style = IndentStyle::Spaces(4);
+        let mut buf = TextBuffer::from("    a\n        b\n    c");
+        dedent_lines(&mut buf, 0, 3, &style).unwrap();
+        assert_eq!(buf.to_string(), "a\n    b\nc");
+    }
+
+    #[test]
+    fn block_dedent_ignores_blank_and_flush_lines() {
+        // A blank line and an already-flush content line must not freeze the
+        // block amount at 0 — the indented lines still dedent by their common
+        // minimum (4), preserving the 2-space gap between them.
+        let style = IndentStyle::Spaces(4);
+        let mut buf = TextBuffer::from("flush\n\n    a\n      b");
+        dedent_lines(&mut buf, 0, 4, &style).unwrap();
+        assert_eq!(buf.to_string(), "flush\n\na\n  b");
+    }
+
+    #[test]
+    fn block_dedent_amount_reports_capped_minimum() {
+        let buf = TextBuffer::from("  a\n      b\nc");
+        // min leading among constraining lines is 2, width caps at 4 → 2.
+        assert_eq!(block_dedent_amount(&buf, 0, 3, &IndentStyle::Spaces(4)), 2);
+        // Width 1 caps the amount below the minimum.
+        assert_eq!(block_dedent_amount(&buf, 0, 3, &IndentStyle::Spaces(1)), 1);
+    }
+
+    #[test]
+    fn block_dedent_amount_zero_without_constraining_lines() {
+        // A flush content line plus a blank line contribute no constraint.
+        let buf = TextBuffer::from("a\n   \nb");
+        assert_eq!(block_dedent_amount(&buf, 0, 3, &IndentStyle::Spaces(4)), 0);
+        // Tabs never report a block amount (per-line rule).
+        let tabbed = TextBuffer::from("\ta\n\t\tb");
+        assert_eq!(block_dedent_amount(&tabbed, 0, 2, &IndentStyle::Tabs), 0);
+    }
+
+    #[test]
+    fn block_dedent_tabs_unchanged() {
+        // Tabs dedent one tab per line — deeper lines stay deeper.
+        let style = IndentStyle::Tabs;
+        let mut buf = TextBuffer::from("\ta\n\t\tb\n\t\t\tc");
+        dedent_lines(&mut buf, 0, 3, &style).unwrap();
+        assert_eq!(buf.to_string(), "a\n\tb\n\t\tc");
+    }
+
+    #[test]
+    fn dedent_removed_for_line_matches_block_edit() {
+        // The per-line helper the cursor-delta math uses must agree with what
+        // dedent_lines actually removes.
+        let style = IndentStyle::Spaces(4);
+        let buf = TextBuffer::from(" {\n  \"ff\":23,\n   \"cc\":32\n }");
+        // k = min(1,2,3) capped at 4 = 1; every constraining line loses 1.
+        assert_eq!(dedent_removed_for_line(&buf, 0, 0, 4, &style), 1);
+        assert_eq!(dedent_removed_for_line(&buf, 1, 0, 4, &style), 1);
+        assert_eq!(dedent_removed_for_line(&buf, 2, 0, 4, &style), 1);
+        assert_eq!(dedent_removed_for_line(&buf, 3, 0, 4, &style), 1);
+        // Out-of-bounds line removes nothing.
+        assert_eq!(dedent_removed_for_line(&buf, 99, 0, 4, &style), 0);
     }
 
     // ── trim_lines ───────────────────────────────────────────────────
