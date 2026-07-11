@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.12.3]
+
+### Changed
+1. Updated regex dependency;
+2. Bumped the app version to 2.12.3. (Forgot to do this in the previous release)
+
 ## [2.12.2]
 
 ### Fixed
