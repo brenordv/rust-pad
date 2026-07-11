@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/rust-pad", "crates/rust-pad-core", "crates/rust-pad-ui", "crates/rust-pad-mod-history", "crates/rust-pad-config"]
 
 [workspace.package]
-version = "2.12.1"
+version = "2.12.3"
 edition = "2021"
 license = "GPL-3.0-only"
 authors = ["Breno RdV"]
@@ -33,14 +33,14 @@ libc = "0.2.186"
 # macOS backend: FSEvents (one fd for the whole recursive watch) rather than
 # kqueue (one fd PER watched dir), which exhausted the macOS .app 256-fd
 # RLIMIT_NOFILE on large workspaces (EMFILE / "Too many open files"). The
-# FSEvents path-canonicalisation/coalescing quirks are handled by the
+# FSEvents path-canonicalization/coalescing quirks are handled by the
 # reconciled rescan in workspace/scanner.rs + the "Reload from disk" action.
 notify = { version = "8.2.0", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.7.0"
 opener = { version = "0.8.5", features = ["reveal"] }
 pdf-writer = "0.15.0"
 redb = "4.1.0"
-regex = "1.12.4"
+regex = "1.13.0"
 rfd = "0.17.2"
 ropey = "1.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
