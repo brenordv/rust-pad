@@ -18,8 +18,12 @@ use egui_phosphor::regular as ph;
 
 // ── Tree entries ──────────────────────────────────────────────────────
 
-/// Folder icon used for both collapsed and expanded directory entries.
+/// Folder icon for collapsed directory entries.
 pub const FOLDER: &str = ph::FOLDER;
+/// Folder icon for expanded directory entries.
+pub const FOLDER_OPEN: &str = ph::FOLDER_OPEN;
+/// Chevron for an expanded tree row (collapsed rows reuse [`CARET_RIGHT`]).
+pub const CARET_DOWN: &str = ph::CARET_DOWN;
 /// Generic file icon (default fallback for unknown extensions).
 pub const FILE: &str = ph::FILE;
 /// Code file (`.rs`, etc.).
@@ -42,53 +46,73 @@ pub const FILE_PLUS: &str = ph::FILE_PLUS;
 /// Inline "new folder" prompt icon.
 pub const FOLDER_PLUS: &str = ph::FOLDER_PLUS;
 
-// ── Sidebar toolbar ──────────────────────────────────────────────────
+// ── Sidebar header ───────────────────────────────────────────────────
 
-/// Close button (workspace close).
-pub const X: &str = ph::X;
-/// Add button (add folder).
-pub const PLUS: &str = ph::PLUS;
-/// Hidden files visible state.
-pub const EYE: &str = ph::EYE;
-/// Hidden files hidden state.
-pub const EYE_SLASH: &str = ph::EYE_SLASH;
 /// Collapse-all caret.
 pub const CARET_DOUBLE_UP: &str = ph::CARET_DOUBLE_UP;
-/// Expand-all caret.
-pub const CARET_DOUBLE_DOWN: &str = ph::CARET_DOUBLE_DOWN;
 /// Active-workspace check marker.
 pub const CHECK: &str = ph::CHECK;
-/// Hide-sidebar button (collapses the panel without closing the workspace).
-pub const ARROW_LINE_LEFT: &str = ph::ARROW_LINE_LEFT;
+/// Overflow ("more actions") menu button in the sidebar header.
+pub const DOTS_THREE: &str = ph::DOTS_THREE;
+
+// ── Tab strip ────────────────────────────────────────────────────────
+
+/// Pinned-tab indicator.
+pub const PUSH_PIN: &str = ph::PUSH_PIN;
+/// Tab overflow scroll-left arrow.
+pub const CARET_LEFT: &str = ph::CARET_LEFT;
+/// Tab overflow scroll-right arrow.
+pub const CARET_RIGHT: &str = ph::CARET_RIGHT;
+
+// ── Activity bar ─────────────────────────────────────────────────────
+
+/// Files item (toggles the workspace panel).
+pub const FILES: &str = ph::FILES;
+/// Search item (opens Find & Replace).
+pub const MAGNIFYING_GLASS: &str = ph::MAGNIFYING_GLASS;
+/// Problems item (opens the Problems dialog).
+pub const WARNING: &str = ph::WARNING;
+/// Settings item (opens the Settings dialog).
+pub const SLIDERS: &str = ph::SLIDERS;
+
+// ── Shared chrome ────────────────────────────────────────────────────
+
+/// Close button (dialog headers, find-results panel).
+pub const CLOSE: &str = ph::X;
+
+/// Every icon constant currently referenced by the application. The single
+/// source of truth for the smoke tests below and for the merged-font glyph
+/// coverage test in `tests/fonts.rs`; if a future call site adds a new icon,
+/// append it here so the coverage stays honest.
+pub const ALL: &[(&str, &str)] = &[
+    (FOLDER, "FOLDER"),
+    (FOLDER_OPEN, "FOLDER_OPEN"),
+    (CARET_DOWN, "CARET_DOWN"),
+    (DOTS_THREE, "DOTS_THREE"),
+    (FILE, "FILE"),
+    (FILE_CODE, "FILE_CODE"),
+    (FILE_TEXT, "FILE_TEXT"),
+    (FILE_IMAGE, "FILE_IMAGE"),
+    (GEAR, "GEAR"),
+    (LOCK, "LOCK"),
+    (WARNING_CIRCLE, "WARNING_CIRCLE"),
+    (FILE_PLUS, "FILE_PLUS"),
+    (FOLDER_PLUS, "FOLDER_PLUS"),
+    (CARET_DOUBLE_UP, "CARET_DOUBLE_UP"),
+    (CHECK, "CHECK"),
+    (PUSH_PIN, "PUSH_PIN"),
+    (CARET_LEFT, "CARET_LEFT"),
+    (CARET_RIGHT, "CARET_RIGHT"),
+    (FILES, "FILES"),
+    (MAGNIFYING_GLASS, "MAGNIFYING_GLASS"),
+    (WARNING, "WARNING"),
+    (SLIDERS, "SLIDERS"),
+    (CLOSE, "CLOSE"),
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every icon constant currently referenced by the application. Kept as
-    /// the single source of truth for the two smoke tests below; if a
-    /// future call site adds a new icon, append it here so the coverage
-    /// stays honest.
-    const ALL: &[(&str, &str)] = &[
-        (FOLDER, "FOLDER"),
-        (FILE, "FILE"),
-        (FILE_CODE, "FILE_CODE"),
-        (FILE_TEXT, "FILE_TEXT"),
-        (FILE_IMAGE, "FILE_IMAGE"),
-        (GEAR, "GEAR"),
-        (LOCK, "LOCK"),
-        (WARNING_CIRCLE, "WARNING_CIRCLE"),
-        (FILE_PLUS, "FILE_PLUS"),
-        (FOLDER_PLUS, "FOLDER_PLUS"),
-        (X, "X"),
-        (PLUS, "PLUS"),
-        (EYE, "EYE"),
-        (EYE_SLASH, "EYE_SLASH"),
-        (CARET_DOUBLE_UP, "CARET_DOUBLE_UP"),
-        (CARET_DOUBLE_DOWN, "CARET_DOUBLE_DOWN"),
-        (CHECK, "CHECK"),
-        (ARROW_LINE_LEFT, "ARROW_LINE_LEFT"),
-    ];
 
     /// Smoke test: every icon constant resolves to a non-empty string. If a
     /// Phosphor rename ever removes one of the upstream constants this

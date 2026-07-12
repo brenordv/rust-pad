@@ -7,6 +7,7 @@
 use eframe::egui;
 
 use super::App;
+use crate::app::chrome::{self, DialogOptions};
 
 impl App {
     /// Renders the Problems dialog window.
@@ -17,23 +18,38 @@ impl App {
 
         let mut open = true;
         let mut action = ProblemAction::None;
+        let chrome_theme = self.theme_ctrl.chrome.clone();
+        let metrics = self.theme_ctrl.metrics.clone();
 
-        egui::Window::new("Problems")
-            .collapsible(false)
-            .resizable(true)
-            .default_width(520.0)
-            .default_height(400.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
-            .show(ctx, |ui| {
+        chrome::show_dialog(
+            ctx,
+            "Problems",
+            &mut open,
+            &chrome_theme,
+            &metrics,
+            DialogOptions {
+                resizable: true,
+                default_width: 520.0,
+                default_height: Some(400.0),
+                center: true,
+                ..Default::default()
+            },
+            |ui| {
                 let entries = crate::problem_log::store()
                     .and_then(|s| s.load_all().ok())
                     .unwrap_or_default();
 
-                // Toolbar
+                // Toolbar: totals on the left (unread count in accent),
+                // bulk actions on the right.
                 ui.horizontal(|ui| {
                     let unread = entries.iter().filter(|e| !e.read).count();
-                    ui.label(format!("{} total, {} unread", entries.len(), unread));
+                    ui.label(format!("{} total,", entries.len()));
+                    let unread_color = if unread > 0 {
+                        chrome_theme.accent
+                    } else {
+                        chrome_theme.text_muted
+                    };
+                    ui.label(egui::RichText::new(format!("{unread} unread")).color(unread_color));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add_enabled(!entries.is_empty(), egui::Button::new("Clear All"))
@@ -83,10 +99,7 @@ impl App {
                                 frame.show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         if !entry.read {
-                                            ui.colored_label(
-                                                ui.visuals().warn_fg_color,
-                                                "\u{25CF}",
-                                            );
+                                            ui.colored_label(chrome_theme.accent, "\u{25CF}");
                                         }
 
                                         ui.vertical(|ui| {
@@ -126,7 +139,8 @@ impl App {
                             }
                         });
                 }
-            });
+            },
+        );
 
         // Process actions after the UI pass to avoid borrow conflicts.
         match action {

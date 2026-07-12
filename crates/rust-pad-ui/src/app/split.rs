@@ -341,6 +341,7 @@ impl App {
                     editor.bookmarks = Some(&self.bookmarks);
                     editor.show(ui)
                 };
+                self.editor_kbd_focus |= response.has_focus();
                 response.context_menu(|ui| {
                     self.show_editor_context_menu(ui);
                 });

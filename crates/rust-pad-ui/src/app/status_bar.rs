@@ -4,9 +4,15 @@
 //! file size, zoom level, match count, bookmark count, last saved time, and file path.
 
 use eframe::egui;
-use egui::{Color32, RichText};
+use egui::RichText;
 
 use super::App;
+use crate::app::resolved_theme::ChromeTheme;
+
+/// Status bar text size from the design spec (chrome floor is 11px).
+const STATUS_FONT_SIZE: f32 = 11.5;
+/// Diameter of the green "saved" dot next to the Auto-Save indicator.
+const SAVED_DOT_DIAMETER: f32 = 6.0;
 
 /// Formats a byte count as a human-readable size (B, KB, MB, GB, TB).
 fn format_file_size(bytes: usize) -> String {
@@ -139,9 +145,24 @@ impl App {
     /// Renders the status bar at the bottom of the application window.
     pub(crate) fn show_status_bar(&mut self, ui: &mut egui::Ui) {
         let data = self.collect_status_bar_data();
+        let chrome = self.theme_ctrl.chrome.clone();
+        let cursor_filled = self.theme_ctrl.metrics.status_cursor_filled;
+        let legacy = self.theme_ctrl.is_legacy_style();
 
-        ui.horizontal(|ui| {
-            Self::status_bar_cursor_info(ui, &data);
+        // 1px top border separating the bar from the content above.
+        let bar_rect = ui.max_rect();
+        ui.painter().line_segment(
+            [bar_rect.left_top(), bar_rect.right_top()],
+            egui::Stroke::new(1.0, chrome.border),
+        );
+
+        // Status text renders small and muted; individual segments override
+        // color where the design gives them emphasis.
+        ui.style_mut().override_font_id = Some(egui::FontId::proportional(STATUS_FONT_SIZE));
+        ui.visuals_mut().override_text_color = Some(chrome.text_muted);
+
+        ui.horizontal_centered(|ui| {
+            Self::status_bar_cursor_info(ui, &data, &chrome, cursor_filled, legacy);
             ui.separator();
             self.status_bar_encoding_selector(ui, &data);
             ui.separator();
@@ -150,7 +171,7 @@ impl App {
             self.status_bar_indent_selector(ui, &data);
             ui.separator();
             Self::status_bar_document_stats(ui, &data);
-            Self::status_bar_indicators(ui, &data);
+            Self::status_bar_indicators(ui, &data, &chrome);
             Self::status_bar_right_section(ui, &data);
         });
     }
@@ -193,15 +214,42 @@ impl App {
     }
 
     /// Renders the cursor position (line and column).
-    fn status_bar_cursor_info(ui: &mut egui::Ui, data: &StatusBarData) {
-        ui.add(
-            egui::Label::new(format!(
-                "Ln {}, Col {}",
-                data.cursor_line + 1,
-                data.cursor_col + 1
-            ))
-            .selectable(false),
-        );
+    ///
+    /// Per-direction emphasis: sharp themes paint the segment as a filled
+    /// accent rect with on-accent text, soft themes color the text with the
+    /// accent, and legacy themes render it like every other segment.
+    fn status_bar_cursor_info(
+        ui: &mut egui::Ui,
+        data: &StatusBarData,
+        chrome: &ChromeTheme,
+        filled: bool,
+        legacy: bool,
+    ) {
+        let text = format!("Ln {}, Col {}", data.cursor_line + 1, data.cursor_col + 1);
+        if filled {
+            let galley = ui.painter().layout_no_wrap(
+                text.clone(),
+                egui::FontId::proportional(STATUS_FONT_SIZE),
+                chrome.on_accent,
+            );
+            let (rect, response) = ui.allocate_exact_size(
+                galley.size() + egui::Vec2::new(12.0, 6.0),
+                egui::Sense::hover(),
+            );
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::ZERO, chrome.accent);
+            let pos = rect.center() - galley.size() / 2.0;
+            ui.painter().galley(pos, galley, chrome.on_accent);
+        } else {
+            let rich = if legacy {
+                RichText::new(text)
+            } else {
+                RichText::new(text).color(chrome.accent)
+            };
+            ui.add(egui::Label::new(rich).selectable(false));
+        }
     }
 
     /// Renders the clickable encoding selector popup.
@@ -294,30 +342,30 @@ impl App {
     }
 
     /// Renders conditional indicators: I/O status, match count, bookmarks, live monitoring, auto-save.
-    fn status_bar_indicators(ui: &mut egui::Ui, data: &StatusBarData) {
+    fn status_bar_indicators(ui: &mut egui::Ui, data: &StatusBarData, chrome: &ChromeTheme) {
         if let Some(ref status) = data.io_status {
             ui.separator();
-            ui.add(
-                egui::Label::new(RichText::new(status).color(Color32::from_rgb(255, 200, 50)))
-                    .selectable(false),
-            );
+            ui.add(egui::Label::new(RichText::new(status).color(chrome.warn)).selectable(false));
             ui.spinner();
         }
 
         if data.print_in_progress {
             ui.separator();
             ui.add(
-                egui::Label::new(
-                    RichText::new("Generating PDF…").color(Color32::from_rgb(255, 200, 50)),
-                )
-                .selectable(false),
+                egui::Label::new(RichText::new("Generating PDF…").color(chrome.warn))
+                    .selectable(false),
             );
             ui.spinner();
         }
 
         if let Some((current, total)) = data.match_info {
             ui.separator();
-            ui.add(egui::Label::new(format!("Match {current}/{total}")).selectable(false));
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!("Match {current}/{total}")).color(chrome.accent),
+                )
+                .selectable(false),
+            );
         }
 
         if data.bookmark_count > 0 {
@@ -334,9 +382,11 @@ impl App {
 
         if data.auto_save {
             ui.separator();
-            ui.add(
-                egui::Label::new(RichText::new("Auto-Save").color(Color32::GRAY)).selectable(false),
-            );
+            let (dot_rect, _) =
+                ui.allocate_exact_size(egui::Vec2::splat(SAVED_DOT_DIAMETER), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(dot_rect.center(), SAVED_DOT_DIAMETER / 2.0, chrome.saved);
+            ui.add(egui::Label::new("Auto-Save").selectable(false));
         }
     }
 
@@ -344,10 +394,7 @@ impl App {
     fn status_bar_right_section(ui: &mut egui::Ui, data: &StatusBarData) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(ref path_str) = data.file_path_display {
-                ui.add(
-                    egui::Label::new(RichText::new(path_str).small().color(Color32::GRAY))
-                        .selectable(false),
-                );
+                ui.add(egui::Label::new(RichText::new(path_str).small()).selectable(false));
             }
 
             if let Some(saved_at) = data.last_saved {
@@ -356,9 +403,7 @@ impl App {
                 }
                 ui.add(
                     egui::Label::new(
-                        RichText::new(format!("Saved: {}", format_saved_time(&saved_at)))
-                            .small()
-                            .color(Color32::GRAY),
+                        RichText::new(format!("Saved: {}", format_saved_time(&saved_at))).small(),
                     )
                     .selectable(false),
                 );

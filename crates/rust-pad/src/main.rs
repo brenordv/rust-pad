@@ -99,20 +99,57 @@ fn main() -> Result<()> {
     // crash information in Help > Problems after a restart.
     rust_pad_ui::problem_log::install_panic_hook();
 
-    let startup_args = rust_pad_ui::StartupArgs {
-        files: cli.files,
-        new_file_text: cli.new_file,
-        portable: cli.portable,
+    // Peek the saved window geometry with a pure read; the App owns the real
+    // config load (with its create/backup side effects) later.
+    let config_path = if cli.portable {
+        rust_pad_config::paths::portable_config_file_path()
+    } else {
+        rust_pad_config::AppConfig::config_path()
     };
+    let geometry = rust_pad_config::AppConfig::peek_window_geometry(&config_path);
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/logo2.png"))
         .map_err(|e| anyhow::anyhow!("failed to load app icon: {e}"))?;
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1200.0, 800.0])
+        .with_min_inner_size([400.0, 300.0])
+        .with_icon(icon);
+    let mut restored_position = false;
+    if let Some(g) = geometry {
+        let (w, h, clamped) = g.restore_inner_size();
+        if clamped {
+            tracing::warn!(
+                saved = ?(g.inner_w, g.inner_h),
+                applied = ?(w, h),
+                "Saved window size clamped to the plausible range"
+            );
+        }
+        viewport = viewport.with_inner_size([w, h]).with_maximized(g.maximized);
+        match g.restore_position() {
+            Some((x, y)) => {
+                viewport = viewport.with_position([x, y]);
+                restored_position = true;
+            }
+            None => {
+                tracing::warn!(
+                    saved = ?(g.x, g.y),
+                    monitor = ?(g.monitor_w, g.monitor_h),
+                    "Saved window position discarded: title bar would be off the saved monitor"
+                );
+            }
+        }
+    }
+
+    let startup_args = rust_pad_ui::StartupArgs {
+        files: cli.files,
+        new_file_text: cli.new_file,
+        portable: cli.portable,
+        restored_position,
+    };
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([400.0, 300.0])
-            .with_icon(icon),
+        viewport,
         ..Default::default()
     };
 

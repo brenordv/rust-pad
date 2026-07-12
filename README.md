@@ -48,11 +48,11 @@ stable, and fast as possible.
 - **Bracket matching**: highlights matching `()`, `[]`, `{}` pairs when the cursor is adjacent to a bracket
 - **Bookmarks**: toggle (`Ctrl+F2`), navigate (`F2 / Shift+F2`), clear all. Bookmarked lines display a blue circle indicator in the gutter
 - **Context menu**: right-click for clipboard actions, selection operations, case conversion, and line operations scoped to selection or entire document
+- **Syntax highlighting** (via syntect) with a per-theme color scheme; see the `syntax_theme` setting below
 - **Go to Line** dialog (`Ctrl+G`)
-- **Delete current line** (`Ctrl+D`)
 
 ### Tab Management
-- **Pin tabs**: right-click → "Pin Tab" to anchor important tabs to the left of the bar (marked with 📌). Pinned tabs are skipped by bulk close operations
+- **Pin tabs**: right-click → "Pin Tab" to anchor important tabs to the left of the bar (marked with a pin icon). Pinned tabs are skipped by bulk close operations
 - **Tab coloring**: right-click → "Set Tab Color" to assign one of 9 accent colors (Red, Orange, Yellow, Green, Cyan, Blue, Purple, Pink, Gray) for visual grouping. Persisted across restarts
 - **Drag-and-drop reordering**: click and drag any tab horizontally to reorder it. A vertical accent indicator shows the drop target. `Escape` cancels an in-progress drag. Drags are clamped to the pinned/unpinned section
 - **Bulk close operations**: "Close Unchanged Tabs", "Close Others", and "Close All" available from the File menu and tab context menu. All bulk operations skip pinned tabs and prompt for unsaved changes
@@ -63,7 +63,7 @@ stable, and fast as possible.
 - Remove duplicate lines
 - Remove empty lines
 - Move line up/down (Alt+Up / Alt+Down)
-- Duplicate line
+- Duplicate line (`Ctrl+D`)
 - Increase/Decrease indent (Tab / Shift+Tab) — applies to every line covered by a multi-line selection, preserving the selection
 - **Join Lines**: collapse the selected lines into one, with exactly one space at each junction (whitespace at the joins is stripped)
 - **Trim Whitespace**: trim trailing, leading, or both from every line in the selection (or the current line when there is no selection)
@@ -78,8 +78,10 @@ stable, and fast as possible.
 
 ### Workspace Sidebar
 - **Named workspaces** (`Ctrl+B` to toggle the sidebar): group project folders into named workspaces that persist across restarts in a dedicated database (`rust-pad-workspaces.redb`). Create, rename, switch, and delete workspaces
-- **Folder management**: add folders via the menu or sidebar toolbar; duplicate and overlapping (parent/child) folders are rejected with a message. Remove folders without deleting them from disk
-- **Hide button** in the sidebar toolbar collapses the panel without closing the workspace (reopen with `Ctrl+B` or the Workspace menu)
+- **Folder management**: add folders via the menu or the sidebar; exact duplicates are rejected, while overlapping (parent/child) folders are allowed. Remove folders without deleting them from disk
+- **Hide Sidebar** (in the sidebar header's overflow menu) collapses the panel without closing the workspace (reopen with `Ctrl+B` or the Workspace menu)
+- **Selection and keyboard navigation**: single click selects a row, double click opens it; with the tree engaged, arrow keys move/expand/collapse, `Enter` opens, and `F2` renames
+- **Context-menu utilities**: Copy Path (Name / Full Path / Relative Path), Copy Contents for files, Open in File Explorer and Reload from Disk for folders
 - **File tree**: collapsible, lazy-loaded folder tree (directories before files, sorted case-insensitively, large directories capped at 10,000 entries). Optionally include hidden folders
 - **File operations from the sidebar**: double-click to open; right-click for New File, New Folder, Rename, and Delete (send to trash), with inline naming fields
 - **Drag-and-drop folders**: drop folders onto the window to add them to the active workspace (a workspace is created automatically if none exists)
@@ -87,7 +89,7 @@ stable, and fast as possible.
 - **Inaccessible folders** (unmounted drives, deleted directories) are shown with a warning icon and "(unavailable)" label instead of crashing
 
 ### Diagnostics
-- **Problems panel** (Help → Problems): lists application errors and warnings (newest first) in a crash-safe database (`rust-pad-problems.redb`) that survives unexpected termination. Mark entries read, copy a message, or clear the log. The Help menu shows a `⚠` indicator and unread count when there are unread entries. Captured failures include file open, auto-save, live reload, print/export, encoding, reload-from-disk, recovery, database open, session restore, and CLI open. Uncaught panics are also recorded via a custom panic hook so crash info survives a restart
+- **Problems panel** (Help → Problems): lists application errors and warnings (newest first) in a crash-safe database (`rust-pad-problems.redb`) that survives unexpected termination. Mark entries read, copy a message, or clear the log. The Help menu shows a dot when there are unread entries, and the activity bar's Problems item carries an unread-count badge. Captured failures include file open, auto-save, live reload, print/export, encoding, reload-from-disk, recovery, database open, session restore, and CLI open. Uncaught panics are also recorded via a custom panic hook so crash info survives a restart
 
 ### File Handling
 - **Recent files**: quick reopen from the File > Open Recent submenu (configurable max count and cleanup strategy)
@@ -109,7 +111,10 @@ stable, and fast as possible.
 - **Move to Recycle Bin** support via the `trash` crate
 
 ### View
-- **Customizable themes**: Dark, Light, Dusk (a low-glare light theme), and custom themes via JSON
+- **Customizable themes**: four 3.0 themes (Aurora Dark, Aurora Light, Graphite Dark, Graphite Light) plus the legacy Dark, Light, Dusk (a low-glare light theme), and Wacky themes, and custom themes via JSON. The `System` mode resolves to Aurora and follows the OS light/dark setting live
+- **Activity bar**: vertical icon bar on the left edge with Workspace Explorer, Find & Replace, Problems (with unread badge), and Preferences
+- **Breadcrumb strip** above the editor showing the active file's workspace-relative path (toggle via View → Show Breadcrumb)
+- **Window geometry persistence**: size, position, and maximized state are restored on launch, with off-screen correction
 - **Settings dialog** with six tabs: General, Editor, File Dialogs, Auto-Save, History, Workspace
 - **Status bar** displaying: cursor position, encoding, line ending, indent style, character count, file size, zoom level, last saved time, and PDF generation indicator
 - **Split view**: divide the editor into two panes with a draggable divider, vertically (`Ctrl+Alt+V`) or horizontally (`Ctrl+Alt+H`). Each pane has its own tab strip and active tab. Double-click the divider to reset to 50/50. A 1px accent border highlights the focused pane. Layout (orientation, divider ratio, per-pane tab assignment, focused pane) is persisted across restarts. Use **View → Remove Split** to collapse back to a single pane
@@ -121,6 +126,7 @@ stable, and fast as possible.
 
 ### Platform & CLI
 - **Cross-platform**: Windows, macOS, Linux
+- **Bundled fonts**: IBM Plex Sans (UI) and JetBrains Mono (editor) are compiled in, so the app looks the same on every platform; DejaVu Sans Mono is bundled for PDF export. All licenses in `THIRD_PARTY_LICENSES.md` and under Help → About → Third-Party Notices
 - **CLI support**: open files from the command line, `--new-file` flag to create a tab with given text
 - **Portable mode** (`--portable` flag): store all config and data next to the executable for USB/portable installs
 - **Platform-standard directories**: config and data stored in OS-standard locations (`%APPDATA%`, `~/.config`, `~/Library/Application Support`) with automatic migration from older versions
@@ -227,7 +233,7 @@ rust-pad stores its configuration in a `rust-pad.json` file in the platform-stan
 | macOS    | `~/Library/Application Support/rust-pad/` |
 | Linux    | `~/.config/rust-pad/`                     |
 
-Data files (`history.redb`, `rust-pad-session.redb`, `rust-pad-workspaces.redb`, `rust-pad-problems.redb`) are stored in the platform-standard data directory (same as config on Windows/macOS; `~/.local/share/rust-pad/` on Linux).
+Data files (`history.redb`, `rust-pad-session.redb`, `rust-pad-workspaces.redb`, `rust-pad-problems.redb`, `rust-pad-view-state.redb`) are stored in the platform-standard data directory (same as config on Windows/macOS; `~/.local/share/rust-pad/` on Linux).
 
 When running with `--portable`, all files are stored next to the executable instead. See the [Environment Variables](#environment-variables) section below for variables that override these locations.
 
@@ -247,7 +253,7 @@ The config file is created automatically on the first launch with default values
 |---------------------------|--------|-------------------------------|-----------------------------------------------------------------------------------------------------------------------|
 | `auto_save_enabled`       | bool   | `false`                       | Enable periodic auto-save for file-backed documents.                                                                  |
 | `auto_save_interval_secs` | int    | `30`                          | Seconds between auto-saves (minimum 5).                                                                               |
-| `current_theme`           | string | `"System"`                    | Active theme name. `"System"` follows OS dark/light preference. Can be `"Dark"`, `"Light"`, or any custom theme name. |
+| `current_theme`           | string | `"System"`                    | Active theme name. `"System"` follows the OS dark/light preference (resolving to Aurora Dark/Light). Can be any built-in or custom theme name. |
 | `current_zoom_level`      | float  | `1.0`                         | Current zoom multiplier (0.5 to `max_zoom_level`).                                                                    |
 | `default_extension`       | string | `""`                          | Default file extension for new untitled tabs (e.g. `"txt"`, `"md"`). Empty means none.                                |
 | `default_line_ending`     | string | `"system"`                    | Line ending for new documents: `"system"` (OS default), `"lf"` (Unix), or `"crlf"` (Windows). Loaded files keep their detected ending. |
@@ -264,20 +270,22 @@ The config file is created automatically on the first launch with default values
 | `remember_last_folder`    | bool   | `true`                        | Remember the last folder used in open/save dialogs.                                                                   |
 | `restore_open_files`      | bool   | `true`                        | Reopen files from the previous session on startup.                                                                    |
 | `session_content_max_kb`  | int    | `10240`                       | Maximum KB of unsaved content to persist per tab (0 = unlimited). Tabs exceeding this are restored empty.             |
+| `show_breadcrumb`         | bool   | `true`                        | Show the breadcrumb strip above the editor (View → Show Breadcrumb).                                                  |
 | `show_full_path_in_title` | bool   | `true`                        | Show the full file path in the window title bar.                                                                      |
 | `show_hidden_files`       | bool   | `false`                       | Show hidden files/folders (names starting with `.`) in the workspace tree.                                           |
 | `show_line_numbers`       | bool   | `true`                        | Display the line number gutter.                                                                                       |
 | `show_special_chars`      | bool   | `false`                       | Show whitespace and line-ending markers.                                                                              |
 | `sync_scroll_enabled`     | bool   | `false`                       | Mirror user-initiated scroll deltas between split-view panes.                                                         |
 | `sync_scroll_horizontal`  | bool   | `true`                        | Mirror horizontal scrolling in addition to vertical when synchronized scrolling is enabled.                           |
-| `themes`                  | array  | (built-in Dark, Light, Dusk, Wacky) | Array of theme definitions. See below.                                                                          |
+| `themes`                  | array  | (the 8 built-in themes)       | Array of theme definitions (Aurora Dark/Light, Graphite Dark/Light, Dark, Light, Dusk, Wacky). See below.             |
+| `window_geometry`         | object | (unset)                       | Last window size, position, and maximized state (managed automatically).                                              |
 | `word_wrap`               | bool   | `false`                       | Whether long lines wrap at the view edge.                                                                             |
 | `workspace_sidebar_visible` | bool | `false`                       | Whether the workspace sidebar is shown on startup (restored from the last session).                                  |
 | `workspace_sidebar_width` | float  | `250.0`                       | Workspace sidebar width in pixels (resizable 150–500).                                                                |
 
 ### Custom Themes
 
-Themes are defined as JSON objects within the `themes` array. Each theme has a `name` and color definitions for the editor and UI elements. Built-in `Dark`, `Light`, and `Dusk` themes are always present; if removed from the config file they will be re-added automatically.
+Themes are defined as JSON objects within the `themes` array. Each theme has a `name` and color definitions for the editor and UI elements. Since 3.0 a theme can also define window-chrome colors (`chrome`) and a `chrome_style`; themes without a `chrome` block (like the legacy built-ins) render with the classic egui look. Built-in themes are re-added automatically if removed from the config file, with one exception: a deleted `Wacky` stays deleted.
 
 #### Syntax Theme
 
@@ -397,7 +405,6 @@ The following features are planned for future releases, inspired by Notepad++ fu
 - [ ] Column editor (insert text/numbers into column selections)
 - [ ] Smart backspace (remove full indent level)
 - [ ] Edge/ruler line at a configurable column
-- [ ] Syntax highlighting
 
 ### View
 - [ ] Document map (minimap overview of the file)
@@ -407,7 +414,7 @@ The following features are planned for future releases, inspired by Notepad++ fu
 - [ ] Hide lines (temporarily collapse lines without deleting)
 
 ### File
-- [ ] Open containing folder / open in terminal
+- [ ] Open containing folder for the active tab / open in terminal (folders in the workspace tree already offer "Open in File Explorer")
 - [ ] Find in Files (search across files in a directory)
 
 ### Macro Support
@@ -436,15 +443,15 @@ The CI runs [`safedep/vet`](https://github.com/safedep/vet) on every pull reques
 
 | Direct dependency | Flagged transitive crates | Status                                         |
 |-------------------|---------------------------|------------------------------------------------|
-| `opener 0.8.4`    | 1 (`normpath`)            | Already on the latest published version        |
+| `opener 0.8.5`    | 1 (`normpath`)            | On the latest version at the time of review    |
 
-### Why `opener 0.8.4` is kept
+### Why `opener` is kept
 
 `opener` is used (with the `reveal` feature) to open files in the system default app and to "show in folder/Finder/Explorer" from inside the editor. It pulls in exactly one flagged crate, `normpath`: a small, stable Windows-path helper from the `dunce` family with no RustSec advisory.
 
 The obvious alternative, the [`open` crate](https://crates.io/crates/open), does **not** ship a reveal-in-file-manager equivalent. Re-implementing it cross-platform would mean writing the D-Bus dance against `org.freedesktop.portal.OpenURI` and `org.freedesktop.FileManager1` ourselves (which is exactly what `opener` already does), pulling in a D-Bus client crate (`zbus` and its own dependency tree), and still degrading to a "open the parent folder" fallback on minimal Linux desktops where no compliant file manager is installed. The cost-to-benefit ratio for chasing a single popularity warning on a stable helper crate does not justify the swap.
 
-**Decision: keep `opener 0.8.4` and accept the single `normpath` warning.**
+**Decision: keep `opener` and accept the single `normpath` warning.**
 
 ### Re-evaluation triggers
 

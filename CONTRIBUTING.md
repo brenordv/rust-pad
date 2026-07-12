@@ -52,21 +52,78 @@ your changes build and pass tests on all platforms.
 
 ## Project Structure
 
-rust-pad is a Cargo workspace with five crates under `crates/`:
+rust-pad is a Cargo workspace with five crates under `crates/`. Each crate owns a domain; when you add
+code, the sections below tell you which crate it belongs in and what must never land there.
 
-| Crate                  | Role                                                                                                                             |
-|------------------------|----------------------------------------------------------------------------------------------------------------------------------|
-| `rust-pad`             | Binary crate. Thin entry point: parses CLI args, initializes logging, launches the app.                                          |
-| `rust-pad-core`        | Core library. Text buffer (`ropey::Rope` wrapper), cursor, document model, encoding detection, search engine. No GUI dependency. |
-| `rust-pad-ui`          | UI layer. egui/eframe application, editor widget, tabs, dialogs, menus, syntax highlighting.                                     |
-| `rust-pad-config`      | Configuration, theme management, session persistence, permissions.                                                               |
-| `rust-pad-mod-history` | Undo/redo history with tiered storage (in-memory + `redb` database for persistence).                                             |
+| Crate                  | Domain                                                          |
+|------------------------|-----------------------------------------------------------------|
+| `rust-pad`             | Binary. Startup wiring only.                                    |
+| `rust-pad-core`        | Text engine: buffer, document model, encoding, search.          |
+| `rust-pad-ui`          | Everything rendered: egui app, editor widget, chrome, dialogs.  |
+| `rust-pad-config`      | Serialized user-facing state: config, themes, stores, geometry. |
+| `rust-pad-mod-history` | Undo/redo persistence.                                          |
 
-**Key architectural rules:**
+**Dependency direction** (mirrors the crate manifests; do not add new edges):
 
-- **Core has no GUI dependency.** Business logic, text manipulation, and file I/O belong in
-  `rust-pad-core` or `rust-pad-config`, never in the UI crate.
-- **Keep `main.rs` thin.** It orchestrates; logic lives in library code.
+```
+rust-pad (binary) → rust-pad-ui → rust-pad-core → rust-pad-mod-history → rust-pad-config
+```
+
+(`rust-pad-ui` and the binary also depend on `rust-pad-config` directly.) `rust-pad-core`,
+`rust-pad-config`, and `rust-pad-mod-history` never depend on `rust-pad-ui` or on any GUI type. If a
+change seems to need an egui type below the UI crate, the design is wrong.
+
+### `rust-pad` (binary)
+
+Thin entry point: CLI parsing (`clap`), logging init, the panic hook (crashes are written to the problem
+store so they show up in Help > Problems after a restart), reading the saved window geometry before the
+GUI exists, and launching eframe.
+
+- **Put here:** startup wiring only.
+- **Not here:** business logic, UI code, or anything that could be unit-tested in a library crate.
+  `main.rs` orchestrates; logic lives in library code.
+
+### `rust-pad-core`
+
+The text engine. `TextBuffer` (a `ropey::Rope` wrapper), cursor and selection model, `Document`
+(buffer + cursor + history + encoding metadata), encoding detection and conversion, line-ending
+normalization, the search engine, and file I/O.
+
+- **Put here:** anything that must work without a GUI.
+- **Not here:** egui/eframe types, theme or config schema types, persistence of app-level state.
+
+### `rust-pad-ui`
+
+Everything the user sees. The eframe `App`, the custom `EditorWidget` (renders with egui primitives,
+not `TextEdit`), syntax-highlighting integration (syntect), and the application chrome: tab bar,
+activity bar, breadcrumb, workspace sidebar, dialogs, menus, status bar, icons, and the bundled fonts
+with their About-dialog license notices.
+
+- **Put here:** rendering, interaction, and UI-only state.
+- **Not here:** text-manipulation algorithms (core), config schema (config), undo storage (mod-history).
+
+### `rust-pad-config`
+
+Serialized user-facing state and its validation. The config schema and its persistence, theme
+definitions (including the chrome color tokens and style metrics the new UI consumes), theme
+sanitization, the session, view-state, workspace, and problem-log stores, platform paths, window
+geometry, and file permissions.
+
+- **Put here:** anything written to or read from the user's config/data directories, plus its
+  validation and migration logic.
+- **Not here:** rendering or egui dependencies. Themes are *data* in this crate; resolving them into
+  egui types happens in `rust-pad-ui`.
+
+### `rust-pad-mod-history`
+
+Undo/redo history with tiered storage: in-memory plus a `redb` database for persistence across
+restarts. Serialization uses `bincode` pinned at `=1.3.3` (see [Dependencies](#dependencies)).
+
+- **Put here:** history persistence only.
+- **Not here:** document editing logic; that belongs in `rust-pad-core`, which drives this crate.
+
+**Other structural rules:**
+
 - **One module per concern.** Split files when they exceed ~300 lines.
 - Each crate is listed in the root `Cargo.toml` workspace `members`.
 
@@ -152,7 +209,8 @@ No glob imports (`use foo::*`) in production code.
 
 ## Testing
 
-The project has 1,100+ tests. Maintain and extend test coverage where it makes sense.
+The project has 1,300+ tests (library plus integration). Maintain and extend test coverage where it
+makes sense.
 
 ### Conventions
 
@@ -196,6 +254,32 @@ The project uses a version-based caching strategy to keep the UI responsive:
 - Use `buffer.byte_to_char()` (O(log n) via ropey) instead of `text[..pos].chars().count()` (O(n)).
 - **Profile before optimizing.** Use `cargo flamegraph` or `criterion` for benchmarks.
 
+### Triaging Perceived Slowness
+
+**Reproduce in a release build first.** Debug builds are not representative: syntax-grammar
+compilation alone costs ~50 ms per language, and egui re-layout frames run 10-15x slower. Several
+"stutter" reports have turned out to be debug-only.
+
+The standing instrument is the pass-trace log: a TRACE-gated line per render pass with the gap since
+the previous frame, the pass duration, and egui's repaint causes (`app/pass_trace.rs`). It is compiled
+into release builds. Logs go to stderr, and the Windows release binary uses the GUI subsystem (no
+console), so capture explicitly:
+
+```powershell
+# Windows (PowerShell). Plain `2>` mangles native stderr into error records; use Start-Process.
+$env:RUST_LOG = 'info,rust_pad_ui::app=trace'
+Start-Process .\target\release\rust-pad.exe -RedirectStandardError pass-trace.log
+```
+
+```bash
+# macOS / Linux
+RUST_LOG=info,rust_pad_ui::app=trace ./target/release/rust-pad 2> pass-trace.log
+```
+
+Keep the `info,` prefix: a bare directive silences every other log target. For issues that don't need
+the trace, check **Help > Problems** first; it works without `RUST_LOG` or a console and receives
+crash reports (via the panic hook) and config-fallback incidents.
+
 ## Cross-Platform Guidelines
 
 rust-pad targets Windows, macOS, and Linux equally. Keep these in mind:
@@ -215,14 +299,31 @@ rust-pad targets Windows, macOS, and Linux equally. Keep these in mind:
 ## UI Development
 
 Before making any visual changes, read `ui-guidelines.md` at the root of the repo for detailed
-design guidelines (Material Design adapted for desktop, component specifications, accessibility
-checklist, theming, and layout rules).
+design guidelines (component specifications, accessibility checklist, theming, and layout rules).
+
+### Theme and Chrome Architecture
+
+The 3.0 UI is driven by theme tokens, resolved once per theme change:
+
+- **Tokens live in `rust-pad-config`**: `ChromeColors` (color tokens) and `ChromeStyle` (metric style)
+  on the theme definition. They are data only; no egui types.
+- **`rust-pad-ui/src/app/resolved_theme.rs` resolves them** into the egui-facing `ChromeTheme` and
+  `Metrics` used by every chrome surface. Legacy themes (Dark, Light, Dusk, Wacky) have no chrome
+  tokens and render through the stock egui path; both paths must keep working whenever you touch
+  tabs, the sidebar, or dialogs.
+- **`rust-pad-ui/src/app/chrome.rs` holds the shared widget helpers**: the dialog frame, primary and
+  secondary buttons, header band, hover tint, accent indicator, focus ring, and count badge. New UI
+  surfaces must consume these helpers instead of re-painting equivalents; hand-rolled copies of these
+  visuals are treated as code duplication and rejected in review.
+- **Display-text rule:** any surface that renders file or workspace names must route them through
+  `text_sanitize::sanitize_display_text`, which replaces control characters and Unicode
+  bidirectional-override characters with U+FFFD so a crafted filename cannot spoof the UI.
 
 ### Key UI Patterns
 
 - The custom `EditorWidget` renders with egui primitives (not `TextEdit`).
 - `SyntaxHighlighter` wraps syntect with egui integration.
-- Use `ui.fonts_mut(|f| f.layout_job(job))` for galley layout (egui 0.33+ API).
+- Use `ui.fonts_mut(|f| f.layout_job(job))` for galley layout (egui 0.34 API).
 - Menu bar: `egui::MenuBar::new().ui(ui, |ui| {})`.
 - Close menus: `ui.close()` (not `ui.close_menu()`).
 - Keyboard events: collect from `ctx.input()`, process in a `match` block.
@@ -249,6 +350,22 @@ Individual crates reference them with `dependency.workspace = true`.
   undo history serialization. Changing the version would break deserialization of existing history
   databases. **Do not update this dependency.**
 
+### Vendoring Binary Assets (fonts, images)
+
+The repo bundles binary assets (currently the DejaVu Sans Mono, IBM Plex Sans, and JetBrains Mono
+fonts). When adding or updating one:
+
+1. Download from the canonical upstream repository over HTTPS. If the upstream publishes checksums or
+   release signatures, verify against them and note that in the manifest.
+2. Record the release tag and the SHA-256 of every file in the asset directory's `MANIFEST.md`
+   (see `crates/rust-pad-ui/assets/fonts/MANIFEST.md` for the format).
+3. Ship the asset's license file next to it, and record any Reserved Font Name the license declares.
+4. Add a section to `THIRD_PARTY_LICENSES.md` with provenance and license pointers.
+5. If the asset is compiled into the binary, surface its notice in the About dialog. For fonts that
+   means adding the license file to the `THIRD_PARTY_FONT_LICENSES` array in
+   `crates/rust-pad-ui/src/app/about_dialog.rs`.
+6. Do all of the above in the same commit as the asset change.
+
 ## Security
 
 The project has undergone multiple security hardening phases. Maintain these standards:
@@ -260,7 +377,9 @@ The project has undergone multiple security hardening phases. Maintain these sta
   corruption.
 - **Permissions:** Config and data files are created with restrictive permissions (owner-only).
 - **CI supply chain:** All third-party GitHub Actions are pinned to full commit SHAs, not mutable
-  version tags. When adding or updating actions, always pin to a specific commit SHA.
+  version tags. When adding or updating actions, always pin to a specific commit SHA. Bundled binary
+  assets follow the same idea: see
+  [Vendoring Binary Assets](#vendoring-binary-assets-fonts-images) for the integrity procedure.
 - **Release integrity:** Release artifacts include SHA256 checksums for verification.
 
 ## Quality Checklist

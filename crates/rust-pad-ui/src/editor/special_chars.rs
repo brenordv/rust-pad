@@ -7,8 +7,37 @@ use egui::{Color32, FontId, Pos2, Rect, Vec2};
 use rust_pad_core::encoding::LineEnding;
 
 use super::widget::EditorWidget;
+use crate::app::resolved_theme::EolMarkerStyle;
+
+/// Glyph for the single faint return marker (ReturnGlyph EOL style).
+const RETURN_GLYPH: &str = "\u{21B5}";
 
 impl<'a> EditorWidget<'a> {
+    /// Compact label for a line ending (Chip EOL marker style).
+    pub(crate) fn eol_label(line_ending: LineEnding) -> &'static str {
+        match line_ending {
+            LineEnding::Lf => "LF",
+            LineEnding::Cr => "CR",
+            LineEnding::CrLf => "CRLF",
+        }
+    }
+
+    /// Returns the visual width the active EOL marker style occupies after
+    /// the last character of a line (used to extend selections over it).
+    pub(crate) fn eol_marker_width(
+        &self,
+        line_ending: LineEnding,
+        char_width: f32,
+        badge_char_width: f32,
+    ) -> f32 {
+        match self.theme.eol_marker {
+            EolMarkerStyle::LegacyBadges => Self::eol_badges_width(line_ending, badge_char_width),
+            EolMarkerStyle::ReturnGlyph => char_width,
+            EolMarkerStyle::Chip => {
+                Self::badge_total_width(Self::eol_label(line_ending), badge_char_width)
+            }
+        }
+    }
     /// Returns the total rendered width of a badge with the given label.
     pub(crate) fn badge_total_width(label: &str, badge_char_width: f32) -> f32 {
         let h_pad = badge_char_width * 0.4;
@@ -150,7 +179,7 @@ impl<'a> EditorWidget<'a> {
         x_positions: Option<&[f32]>,
     ) {
         let color = self.theme.special_char_color;
-        let text_y = line_y + line_height * 0.15;
+        let text_y = line_y + Self::text_top_offset(painter, font_id, line_height);
         let badge_font = FontId::monospace(font_id.size * 0.7);
         let badge_char_width = char_width * 0.7;
 
@@ -230,37 +259,66 @@ impl<'a> EditorWidget<'a> {
             }
         }
 
-        // Line ending badges
+        // Line ending marker, styled per the theme direction.
         if let Some(ending) = eol {
             let eol_x = text_area.min.x
                 + Self::col_to_x(x_positions, line_content.chars().count(), char_width)
                 - scroll_x;
-            let badges: &[&str] = match ending {
-                LineEnding::Lf => &["LF"],
-                LineEnding::CrLf => &["CR", "LF"],
-                LineEnding::Cr => &["CR"],
-            };
-            let mut bx = eol_x;
-            for label in badges {
-                if bx > text_area.max.x {
-                    break;
+            if eol_x <= text_area.max.x {
+                match self.theme.eol_marker {
+                    EolMarkerStyle::LegacyBadges => {
+                        let badges: &[&str] = match ending {
+                            LineEnding::Lf => &["LF"],
+                            LineEnding::CrLf => &["CR", "LF"],
+                            LineEnding::Cr => &["CR"],
+                        };
+                        let mut bx = eol_x;
+                        for label in badges {
+                            if bx > text_area.max.x {
+                                break;
+                            }
+                            let width = Self::render_badge(
+                                painter,
+                                label,
+                                bx,
+                                line_y,
+                                line_height,
+                                badge_char_width,
+                                &badge_font,
+                                color,
+                            );
+                            bx += width + 2.0;
+                        }
+                    }
+                    EolMarkerStyle::ReturnGlyph => {
+                        painter.text(
+                            Pos2::new(eol_x, text_y),
+                            egui::Align2::LEFT_TOP,
+                            RETURN_GLYPH,
+                            font_id.clone(),
+                            color,
+                        );
+                    }
+                    EolMarkerStyle::Chip => {
+                        Self::render_chip(
+                            painter,
+                            Self::eol_label(ending),
+                            eol_x,
+                            line_y,
+                            line_height,
+                            badge_char_width,
+                            &badge_font,
+                            self.theme.crlf_chip_bg,
+                            self.theme.crlf_chip_text,
+                        );
+                    }
                 }
-                let width = Self::render_badge(
-                    painter,
-                    label,
-                    bx,
-                    line_y,
-                    line_height,
-                    badge_char_width,
-                    &badge_font,
-                    color,
-                );
-                bx += width + 2.0;
             }
         }
     }
 
-    /// Renders a single labeled badge at the given position.
+    /// Renders a single labeled badge at the given position, deriving the
+    /// dimmed background from `color` (the legacy badge treatment).
     ///
     /// Returns the total width of the badge (for chaining multiple badges).
     #[allow(clippy::too_many_arguments)]
@@ -274,6 +332,40 @@ impl<'a> EditorWidget<'a> {
         badge_font: &FontId,
         color: Color32,
     ) -> f32 {
+        let bg = Color32::from_rgba_premultiplied(
+            color.r() / 2,
+            color.g() / 2,
+            color.b() / 2,
+            color.a() / 2,
+        );
+        Self::render_chip(
+            painter,
+            label,
+            x,
+            line_y,
+            line_height,
+            badge_char_width,
+            badge_font,
+            bg,
+            color,
+        )
+    }
+
+    /// Renders a compact labeled chip with explicit fill and text colors.
+    ///
+    /// Returns the total width of the chip.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_chip(
+        painter: &egui::Painter,
+        label: &str,
+        x: f32,
+        line_y: f32,
+        line_height: f32,
+        badge_char_width: f32,
+        badge_font: &FontId,
+        bg: Color32,
+        text_color: Color32,
+    ) -> f32 {
         let h_pad = badge_char_width * 0.4;
         let badge_height = line_height * 0.75;
         let badge_y = line_y + (line_height - badge_height) * 0.5;
@@ -281,19 +373,13 @@ impl<'a> EditorWidget<'a> {
         let badge_width = label_width + h_pad * 2.0;
         let badge_rect =
             Rect::from_min_size(Pos2::new(x, badge_y), Vec2::new(badge_width, badge_height));
-        let bg = Color32::from_rgba_premultiplied(
-            color.r() / 2,
-            color.g() / 2,
-            color.b() / 2,
-            color.a() / 2,
-        );
         painter.rect_filled(badge_rect, 2.0, bg);
         painter.text(
             badge_rect.center(),
             egui::Align2::CENTER_CENTER,
             label,
             badge_font.clone(),
-            color,
+            text_color,
         );
         badge_width
     }
@@ -460,6 +546,43 @@ mod tests {
         let lf = EditorWidget::badge_total_width("LF", BADGE_CHAR_W);
         let expected = cr + 2.0 + lf;
         assert!((w - expected).abs() < f32::EPSILON);
+    }
+
+    // ── eol_label / eol_marker_width ─────────────────────────────────
+
+    #[test]
+    fn test_eol_label_names() {
+        assert_eq!(EditorWidget::eol_label(LineEnding::Lf), "LF");
+        assert_eq!(EditorWidget::eol_label(LineEnding::Cr), "CR");
+        assert_eq!(EditorWidget::eol_label(LineEnding::CrLf), "CRLF");
+    }
+
+    fn widget_width_for(style: EolMarkerStyle) -> f32 {
+        let mut doc = rust_pad_core::document::Document::default();
+        let theme = crate::editor::EditorTheme {
+            eol_marker: style,
+            ..crate::editor::EditorTheme::default()
+        };
+        let widget = EditorWidget::new(&mut doc, &theme, None);
+        widget.eol_marker_width(LineEnding::CrLf, CHAR_W, BADGE_CHAR_W)
+    }
+
+    #[test]
+    fn test_eol_marker_width_per_style() {
+        let legacy = widget_width_for(EolMarkerStyle::LegacyBadges);
+        let glyph = widget_width_for(EolMarkerStyle::ReturnGlyph);
+        let chip = widget_width_for(EolMarkerStyle::Chip);
+
+        assert!(
+            (legacy - EditorWidget::eol_badges_width(LineEnding::CrLf, BADGE_CHAR_W)).abs()
+                < f32::EPSILON
+        );
+        assert!((glyph - CHAR_W).abs() < f32::EPSILON);
+        assert!(
+            (chip - EditorWidget::badge_total_width("CRLF", BADGE_CHAR_W)).abs() < f32::EPSILON
+        );
+        // The single chip is narrower than the legacy CR+LF badge pair.
+        assert!(chip < legacy);
     }
 
     #[test]

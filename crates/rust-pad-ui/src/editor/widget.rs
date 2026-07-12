@@ -35,6 +35,14 @@ fn rope_slice_ends_with_newline(slice: ropey::RopeSlice<'_>) -> bool {
     n > 0 && slice.char(n - 1) == '\n'
 }
 
+/// Bit-exact snapshot of the viewport offsets, for edge-detecting viewport
+/// movement across a pass. `to_bits` comparison because this is identity
+/// detection on copied values (no arithmetic), where float-equality lints
+/// don't apply semantically.
+fn viewport_bits(doc: &Document) -> (u32, u32) {
+    (doc.scroll_x.to_bits(), doc.scroll_y.to_bits())
+}
+
 /// Scrollbar track width in logical pixels.
 pub(crate) const SCROLLBAR_WIDTH: f32 = 14.0;
 /// Minimum scrollbar thumb size in logical pixels.
@@ -154,6 +162,7 @@ impl<'a> EditorWidget<'a> {
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let rect = response.rect;
         let version_before_input = self.doc.content_version;
+        let viewport_before = viewport_bits(self.doc);
 
         // Reset the scroll-origin tag at the top of every frame. Code paths
         // that move the viewport (`handle_scroll_input`, scrollbar drag,
@@ -214,6 +223,21 @@ impl<'a> EditorWidget<'a> {
         );
         self.clamp_scroll_values(&layout, total_visual_lines);
 
+        // The scrollbar drag path writes `scroll_x`/`scroll_y` in
+        // `render_scrollbars`, AFTER `render_content` consumed them, so the
+        // frame that paints the final offset is the next one. Request it
+        // eagerly whenever the viewport moved during this pass; otherwise it
+        // waits for the next timer or input event. Compared post-clamp so a
+        // write that clamps back to the original value nets to "no change",
+        // which keeps this edge-triggered: a settled frame requests nothing.
+        // External writers between frames (sync-scroll mirror, session
+        // restore) must converge in one pass for that to hold — the mirror
+        // only copies on `ScrollOrigin::UserInput`, which is reset at the top
+        // of every pass.
+        if viewport_bits(self.doc) != viewport_before {
+            ui.ctx().request_repaint();
+        }
+
         response
     }
 
@@ -244,7 +268,7 @@ impl<'a> EditorWidget<'a> {
     fn compute_layout(&mut self, ui: &Ui, rect: Rect, wrap_map: Option<&WrapMap>) -> FrameLayout {
         let effective_font_size = self.theme.font_size * self.doc.zoom_level;
         let font_id = FontId::monospace(effective_font_size);
-        let line_height = effective_font_size * 1.4;
+        let line_height = effective_font_size * self.theme.line_height_factor;
         let char_width = self.measure_char_width(ui, &font_id);
         let gutter_width = self.compute_gutter_width(ui, &font_id);
         let total_lines = self.doc.buffer.len_lines();
@@ -635,15 +659,23 @@ impl<'a> EditorWidget<'a> {
             cache.validate(
                 self.doc.content_version,
                 layout.effective_font_size,
+                layout.line_height,
                 syntax_theme_hash,
                 syntax_name_hash,
             );
         }
 
         // Track the visible logical line range for cache pruning.
+        // Saturating math: `scroll_y` is only clamped AFTER rendering, so an
+        // extreme value written between frames (or `f32::MAX as usize`,
+        // which saturates to `usize::MAX`) must not overflow the range
+        // arithmetic here; it renders empty this frame and clamps next.
         let (first_logical, last_logical) = if let Some(wm) = wrap_map {
             let first_visual = self.doc.scroll_y as usize;
-            let last_visual = (first_visual + layout.visible_lines + 1).min(total_visual_lines);
+            let last_visual = first_visual
+                .saturating_add(layout.visible_lines)
+                .saturating_add(1)
+                .min(total_visual_lines);
             self.render_lines_wrapped(
                 ui,
                 painter,
@@ -676,8 +708,10 @@ impl<'a> EditorWidget<'a> {
             (first_visual, last_visual.saturating_sub(1))
         } else {
             let first_visible_line = self.doc.scroll_y as usize;
-            let last_visible_line =
-                (first_visible_line + layout.visible_lines + 1).min(total_lines);
+            let last_visible_line = first_visible_line
+                .saturating_add(layout.visible_lines)
+                .saturating_add(1)
+                .min(total_lines);
             self.render_lines(
                 ui,
                 painter,
@@ -978,7 +1012,10 @@ impl<'a> EditorWidget<'a> {
             );
         } else {
             let text_x = text_area.min.x - info.scroll_x;
-            let text_pos = Pos2::new(text_x, info.line_y + line_height * 0.15);
+            let text_pos = Pos2::new(
+                text_x,
+                info.line_y + Self::text_top_offset(painter, font_id, line_height),
+            );
             self.render_highlighted_text(
                 ui,
                 painter,
@@ -1109,7 +1146,8 @@ impl<'a> EditorWidget<'a> {
                     let text_end_x = text_area.min.x
                         + Self::col_to_x(x_positions, seg_len, char_width)
                         - info.scroll_x;
-                    let eol_w = Self::eol_badges_width(self.doc.line_ending, badge_char_width);
+                    let eol_w =
+                        self.eol_marker_width(self.doc.line_ending, char_width, badge_char_width);
                     sel_x_end = sel_x_end.max(text_end_x + eol_w);
                 }
 
@@ -1136,7 +1174,7 @@ impl<'a> EditorWidget<'a> {
         render_content: &str,
     ) {
         let char_colors = self.extract_char_colors(render_content, font_id);
-        let text_y = info.line_y + line_height * 0.15;
+        let text_y = info.line_y + Self::text_top_offset(painter, font_id, line_height);
         for (i, ch) in info.content.chars().enumerate() {
             let x = text_area.min.x + x_positions[i] - info.scroll_x;
             if x + char_width < text_area.min.x || x > text_area.max.x {
@@ -1346,15 +1384,17 @@ impl<'a> EditorWidget<'a> {
         if self.show_line_numbers && show_line_number {
             let line_num_text = format!("{}", logical_line + 1);
             let line_num_color = if cursor_lines.contains(&logical_line) {
-                self.theme.text_color
+                self.theme.active_line_number_color
             } else {
                 self.theme.line_number_color
             };
+            let gutter_font = FontId::monospace(font_id.size * self.theme.gutter_font_factor);
+            let text_y = line_y + Self::text_top_offset(gutter_painter, &gutter_font, line_height);
             gutter_painter.text(
-                Pos2::new(gutter_rect.max.x - 8.0, line_y + line_height * 0.15),
+                Pos2::new(gutter_rect.max.x - self.theme.gutter_number_padding, text_y),
                 egui::Align2::RIGHT_TOP,
                 &line_num_text,
-                font_id.clone(),
+                gutter_font,
                 line_num_color,
             );
         }
@@ -1509,7 +1549,7 @@ impl<'a> EditorWidget<'a> {
         }
 
         let text_painter = painter.with_clip_rect(*text_area);
-        let secondary_cursor_color = Color32::from_rgb(200, 200, 200);
+        let secondary_cursor_color = self.theme.secondary_cursor_color;
 
         let all_cursors: Vec<(usize, usize, bool)> = std::iter::once((
             self.doc.cursor.position.line,
@@ -1802,6 +1842,20 @@ impl<'a> EditorWidget<'a> {
         }
     }
 
+    /// Vertical offset that centers the font's glyph row within `line_height`.
+    ///
+    /// The pre-redesign renderer used a baked `line_height * 0.15` top offset
+    /// tuned for the 1.4 legacy factor; centering keeps text balanced for any
+    /// line-height factor.
+    pub(crate) fn text_top_offset(
+        painter: &egui::Painter,
+        font_id: &FontId,
+        line_height: f32,
+    ) -> f32 {
+        let row_height = painter.fonts_mut(|f| f.row_height(font_id));
+        ((line_height - row_height) / 2.0).max(0.0)
+    }
+
     /// Measures the width of a single character in the monospace font.
     fn measure_char_width(&self, ui: &Ui, font_id: &FontId) -> f32 {
         let mut job = LayoutJob::default();
@@ -1830,7 +1884,7 @@ impl<'a> EditorWidget<'a> {
         }
         .max(3);
         let digit_width = self.measure_char_width(ui, font_id);
-        (digits as f32 + 2.0) * digit_width + 8.0
+        (digits as f32 + 2.0) * digit_width + self.theme.gutter_number_padding
     }
 }
 
@@ -2177,6 +2231,58 @@ mod tests {
     }
 
     // ── screen_to_position (non-wrapped) ───────────────────────────
+
+    // ── compute_layout ───────────────────────────────────────────────
+
+    /// The frame line height must come from the theme's line-height factor
+    /// (1.62 Aurora / 1.55 Graphite / 1.4 legacy), not a baked constant.
+    #[test]
+    fn compute_layout_line_height_follows_theme_factor() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for factor in [1.4_f32, 1.55, 1.62] {
+                let mut doc = Document {
+                    buffer: "hello\n".into(),
+                    ..Default::default()
+                };
+                let theme = EditorTheme {
+                    line_height_factor: factor,
+                    ..EditorTheme::default()
+                };
+                let mut widget = EditorWidget::new(&mut doc, &theme, None);
+                let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+                let layout = widget.compute_layout(ui, rect, None);
+                assert!(
+                    (layout.line_height - 14.0 * factor).abs() < 0.01,
+                    "factor {factor}: got {}",
+                    layout.line_height
+                );
+            }
+        });
+    }
+
+    /// Centering offset: zero when the row fills the line, half the slack
+    /// otherwise, never negative.
+    #[test]
+    fn text_top_offset_centers_glyph_row() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter();
+            let font_id = FontId::monospace(14.0);
+            let row_height = painter.fonts_mut(|f| f.row_height(&font_id));
+
+            let offset = EditorWidget::text_top_offset(painter, &font_id, row_height + 8.0);
+            assert!((offset - 4.0).abs() < 0.01);
+
+            let tight = EditorWidget::text_top_offset(painter, &font_id, row_height);
+            assert!(tight.abs() < 0.01);
+
+            // Line shorter than the glyph row must clamp to zero, not go
+            // negative and push text above the line box.
+            let clamped = EditorWidget::text_top_offset(painter, &font_id, row_height - 5.0);
+            assert!(clamped.abs() < f32::EPSILON);
+        });
+    }
 
     #[test]
     fn screen_to_position_basic() {
@@ -2641,5 +2747,126 @@ mod tests {
         assert_eq!(job.sections.len(), 2);
         assert_eq!(job.sections[0].format.color, Color32::RED);
         assert_eq!(job.sections[1].format.color, Color32::BLUE);
+    }
+
+    // ── viewport-moved repaint (bug: scrollbar-drag offset painted late) ──
+
+    #[test]
+    fn viewport_bits_change_and_clamp_back_semantics() {
+        let mut doc = Document {
+            buffer: "a\nb\nc\n".into(),
+            ..Default::default()
+        };
+        let before = viewport_bits(&doc);
+        doc.scroll_y = 5.0;
+        assert_ne!(viewport_bits(&doc), before);
+        doc.scroll_y = 0.0;
+        assert_eq!(
+            viewport_bits(&doc),
+            before,
+            "a write that clamps back to the original value must read as no change"
+        );
+        doc.scroll_x = 12.5;
+        assert_ne!(viewport_bits(&doc), before);
+    }
+
+    /// Runs one editor pass with the given events; auto-focus off so the
+    /// caret-blink timer can't schedule anything.
+    fn editor_frame(
+        ctx: &egui::Context,
+        theme: &EditorTheme,
+        doc: &mut Document,
+        word_wrap: bool,
+        events: Vec<egui::Event>,
+    ) {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            let mut widget = EditorWidget::new(doc, theme, None);
+            widget.auto_focus = false;
+            widget.word_wrap = word_wrap;
+            let _ = widget.show(ui);
+        });
+    }
+
+    #[test]
+    fn settled_editor_requests_no_repaint_and_wheel_scroll_is_attributed() {
+        let ctx = egui::Context::default();
+        let theme = EditorTheme::default();
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let mut doc = Document {
+            buffer: text.as_str().into(),
+            ..Default::default()
+        };
+
+        for _ in 0..6 {
+            editor_frame(&ctx, &theme, &mut doc, false, vec![]);
+        }
+        assert!(
+            !ctx.requested_repaint_last_pass(),
+            "a settled editor must not request immediate repaints (repaint storm)"
+        );
+
+        // Hover, then wheel-scroll. The positive signal is the CAUSE site:
+        // event-carrying passes trigger egui's own immediate repaint, so a
+        // bare requested-repaint assertion here would be vacuous.
+        editor_frame(
+            &ctx,
+            &theme,
+            &mut doc,
+            false,
+            vec![egui::Event::PointerMoved(Pos2::new(200.0, 150.0))],
+        );
+        editor_frame(
+            &ctx,
+            &theme,
+            &mut doc,
+            false,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -60.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            }],
+        );
+        assert!(doc.scroll_y > 0.0, "wheel must have scrolled the viewport");
+        // One more pass so `repaint_causes` (previous-pass causes) reflects
+        // the wheel pass.
+        editor_frame(&ctx, &theme, &mut doc, false, vec![]);
+        let causes = ctx.repaint_causes();
+        assert!(
+            causes.iter().any(|c| c.to_string().contains("widget.rs")),
+            "a viewport move must be attributed to the editor's repaint edge, got: {causes:?}"
+        );
+    }
+
+    // Pathological-content guard: a wrapped long-line document parked at max
+    // scroll must converge (clamp once, repaint once) and then go quiet —
+    // the viewport-moved edge must not oscillate into a repaint loop.
+    #[test]
+    fn wrapped_long_line_at_max_scroll_settles_without_repaint_requests() {
+        let ctx = egui::Context::default();
+        let theme = EditorTheme::default();
+        let long_line = "x".repeat(5000);
+        let mut doc = Document {
+            buffer: long_line.as_str().into(),
+            ..Default::default()
+        };
+        doc.scroll_y = f32::MAX; // clamped by the widget on the first pass
+
+        for _ in 0..8 {
+            editor_frame(&ctx, &theme, &mut doc, true, vec![]);
+        }
+        assert!(
+            !ctx.requested_repaint_last_pass(),
+            "wrapped long-line document at max scroll must settle, not loop"
+        );
+        assert!(
+            doc.scroll_y.is_finite(),
+            "scroll must have been clamped to the content"
+        );
     }
 }

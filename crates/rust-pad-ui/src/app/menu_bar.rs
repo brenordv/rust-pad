@@ -446,6 +446,12 @@ impl App {
                 ui.close();
             }
             if ui
+                .checkbox(&mut self.show_breadcrumb, "Show Breadcrumb")
+                .clicked()
+            {
+                ui.close();
+            }
+            if ui
                 .checkbox(&mut self.restore_open_files, "Restore Files on Startup")
                 .clicked()
             {
@@ -607,12 +613,7 @@ impl App {
     }
 
     fn show_help_menu(&mut self, ui: &mut egui::Ui) {
-        let help_label = if self.problems_unread > 0 {
-            "Help \u{26A0}"
-        } else {
-            "Help"
-        };
-        ui.menu_button(help_label, |ui| {
+        let response = ui.menu_button("Help", |ui| {
             let problems_label = if self.problems_unread > 0 {
                 format!("Problems ({})", self.problems_unread)
             } else {
@@ -631,6 +632,17 @@ impl App {
                 ui.close();
             }
         });
+
+        // Unread problems: a small warn dot at the item's top-right corner,
+        // pointing the user at Help > Problems.
+        if self.problems_unread > 0 {
+            let rect = response.response.rect;
+            ui.painter().circle_filled(
+                rect.right_top() + egui::Vec2::new(-1.0, 5.0),
+                3.0,
+                self.theme_ctrl.chrome.warn,
+            );
+        }
     }
 
     fn show_workspace_menu(&mut self, ui: &mut egui::Ui) {

@@ -1,6 +1,9 @@
 /// Dialogs for Find/Replace, Go To Line, etc.
-use egui::{Context, Key, Ui, Window};
+use egui::{Context, Key, Ui};
 use rust_pad_core::search::{SearchEngine, SearchOptions};
+
+use crate::app::chrome::{self, DialogOptions};
+use crate::app::resolved_theme::{ChromeTheme, Metrics};
 
 /// State for the Find/Replace dialog.
 #[derive(Debug)]
@@ -97,14 +100,22 @@ impl FindReplaceDialog {
     }
 
     /// Shows the Find/Replace dialog. Returns an action to perform, if any.
-    pub fn show(&mut self, ctx: &Context) -> Option<FindReplaceAction> {
-        // Semi-transparent when the dialog doesn't have focus, so the user
-        // gets a visual cue that the editor is the active surface. Uses the
-        // previous frame's focus state (set below from TextEdit responses).
-        let alpha = if self.has_focus { 1.0 } else { 0.7 };
-
+    ///
+    /// `editor_focused` is the caller's live "an editor widget holds egui
+    /// keyboard focus" signal; the dialog dims while it is true so the user
+    /// gets a visual cue that the editor is the active surface.
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        chrome_theme: &ChromeTheme,
+        metrics: &Metrics,
+        editor_focused: bool,
+    ) -> Option<FindReplaceAction> {
         // Reset focus tracking unconditionally so that closing the dialog
         // clears `has_focus` even though the rest of `show()` is skipped.
+        // Without this, closing the dialog with a text field focused would
+        // leave editor shortcuts suppressed forever (`suppress_editor_input`
+        // reads this flag).
         self.has_focus = false;
 
         if !self.visible {
@@ -114,39 +125,62 @@ impl FindReplaceDialog {
         let mut action = None;
         let mut open = true;
 
-        let frame = egui::Frame::window(ctx.global_style().as_ref()).fill(
-            ctx.global_style()
-                .visuals
-                .window_fill()
-                .gamma_multiply(alpha),
-        );
-
-        Window::new("Find and Replace")
-            .collapsible(false)
-            .resizable(true)
-            .default_width(420.0)
-            .frame(frame)
-            .open(&mut open)
-            .show(ctx, |ui| {
+        let dimmed = dialog_dimmed(editor_focused, self.focus_requested);
+        let mut find_text = std::mem::take(&mut self.find_text);
+        let mut replace_text = std::mem::take(&mut self.replace_text);
+        let mut focus_requested = self.focus_requested;
+        let mut has_focus = false;
+        chrome::show_dialog(
+            ctx,
+            "Find and Replace",
+            &mut open,
+            chrome_theme,
+            metrics,
+            DialogOptions {
+                resizable: true,
+                default_width: 420.0,
+                dimmed,
+                ..Default::default()
+            },
+            |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 Self::show_find_input(
                     ui,
-                    &mut self.find_text,
+                    &mut find_text,
                     &mut action,
-                    &mut self.focus_requested,
+                    &mut focus_requested,
                     &self.search_history,
-                    &mut self.has_focus,
+                    &mut has_focus,
+                    chrome_theme,
+                    metrics,
                 );
-                Self::show_replace_input(ui, &mut self.replace_text, &mut self.has_focus);
+                Self::show_replace_input(
+                    ui,
+                    &mut replace_text,
+                    &mut has_focus,
+                    chrome_theme,
+                    metrics,
+                );
                 ui.add_space(4.0);
                 Self::show_search_options(ui, &mut self.options, &mut self.scope);
                 ui.add_space(4.0);
-                Self::show_action_buttons(ui, &mut action);
+                Self::show_action_buttons(ui, &mut action, chrome_theme);
                 if !self.status.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(&self.status);
+                    // Match-count footer.
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(&self.status)
+                            .small()
+                            .color(chrome_theme.text_muted),
+                    );
                 }
-            });
+            },
+        );
+        self.find_text = find_text;
+        self.replace_text = replace_text;
+        self.focus_requested = focus_requested;
+        self.has_focus = has_focus;
 
         if !open {
             self.visible = false;
@@ -158,6 +192,7 @@ impl FindReplaceDialog {
     }
 
     /// Renders the find text input field with optional search history dropdown.
+    #[allow(clippy::too_many_arguments)]
     fn show_find_input(
         ui: &mut Ui,
         find_text: &mut String,
@@ -165,12 +200,17 @@ impl FindReplaceDialog {
         focus_requested: &mut bool,
         history: &[String],
         has_focus: &mut bool,
+        chrome_theme: &ChromeTheme,
+        metrics: &Metrics,
     ) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label("Find:      ");
             let find_response = ui.text_edit_singleline(find_text);
             *has_focus |= find_response.has_focus();
+            if find_response.has_focus() {
+                chrome::focus_ring(ui.painter(), find_response.rect, chrome_theme, metrics);
+            }
             if *focus_requested {
                 *focus_requested = false;
                 find_response.request_focus();
@@ -198,12 +238,21 @@ impl FindReplaceDialog {
     }
 
     /// Renders the replace text input field.
-    fn show_replace_input(ui: &mut Ui, replace_text: &mut String, has_focus: &mut bool) {
+    fn show_replace_input(
+        ui: &mut Ui,
+        replace_text: &mut String,
+        has_focus: &mut bool,
+        chrome_theme: &ChromeTheme,
+        metrics: &Metrics,
+    ) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label("Replace:");
             let replace_response = ui.text_edit_singleline(replace_text);
             *has_focus |= replace_response.has_focus();
+            if replace_response.has_focus() {
+                chrome::focus_ring(ui.painter(), replace_response.rect, chrome_theme, metrics);
+            }
         });
     }
 
@@ -234,26 +283,30 @@ impl FindReplaceDialog {
     }
 
     /// Renders the Find Next / Find Prev / Replace / Replace All buttons.
-    fn show_action_buttons(ui: &mut Ui, action: &mut Option<FindReplaceAction>) {
+    /// Find Next is the primary action; the rest render as secondary.
+    fn show_action_buttons(
+        ui: &mut Ui,
+        action: &mut Option<FindReplaceAction>,
+        chrome_theme: &ChromeTheme,
+    ) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if ui.button("  Find Next  ").clicked() {
+            if chrome::primary_button(ui, chrome_theme, "Find Next").clicked() {
                 *action = Some(FindReplaceAction::FindNext);
             }
-            if ui.button("  Find Prev  ").clicked() {
+            if chrome::secondary_button(ui, chrome_theme, "Find Prev").clicked() {
                 *action = Some(FindReplaceAction::FindPrev);
             }
-            if ui
-                .button("  Find All  ")
+            if chrome::secondary_button(ui, chrome_theme, "Find All")
                 .on_hover_text("List every match (current tab or all tabs) in a results panel")
                 .clicked()
             {
                 *action = Some(FindReplaceAction::FindAll);
             }
-            if ui.button("  Replace  ").clicked() {
+            if chrome::secondary_button(ui, chrome_theme, "Replace").clicked() {
                 *action = Some(FindReplaceAction::Replace);
             }
-            if ui.button("  Replace All  ").clicked() {
+            if chrome::secondary_button(ui, chrome_theme, "Replace All").clicked() {
                 *action = Some(FindReplaceAction::ReplaceAll);
             }
         });
@@ -269,6 +322,17 @@ impl FindReplaceDialog {
             }
         }
     }
+}
+
+/// Whether the Find & Replace dialog should render dimmed this frame.
+///
+/// Dimmed while an editor widget holds keyboard focus (the editor is the
+/// active surface), EXCEPT on the frame the dialog is opening: the find
+/// field's `request_focus` only lands next frame, so without the
+/// `focus_requested` exception a freshly opened dialog would flash dimmed
+/// until the next repaint.
+fn dialog_dimmed(editor_focused: bool, focus_requested: bool) -> bool {
+    editor_focused && !focus_requested
 }
 
 /// Actions that the Find/Replace dialog can request.
@@ -384,7 +448,13 @@ impl GoToLineDialog {
     }
 
     /// Shows the Go To Line dialog. Returns a target position if confirmed.
-    pub fn show(&mut self, ctx: &Context, total_lines: usize) -> Option<GoToTarget> {
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        total_lines: usize,
+        chrome_theme: &ChromeTheme,
+        metrics: &Metrics,
+    ) -> Option<GoToTarget> {
         if !self.visible {
             return None;
         }
@@ -392,17 +462,25 @@ impl GoToLineDialog {
         let mut result = None;
         let mut open = true;
 
-        Window::new("Go to Line")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(280.0)
-            .open(&mut open)
-            .show(ctx, |ui| {
+        chrome::show_dialog(
+            ctx,
+            "Go to Line",
+            &mut open,
+            chrome_theme,
+            metrics,
+            DialogOptions {
+                default_width: 280.0,
+                ..Default::default()
+            },
+            |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 ui.label(format!("Line[:Column] (1-{total_lines}):"));
                 ui.add_space(4.0);
 
                 let response = ui.text_edit_singleline(&mut self.line_text);
+                if response.has_focus() {
+                    chrome::focus_ring(ui.painter(), response.rect, chrome_theme, metrics);
+                }
                 if self.focus_requested {
                     self.focus_requested = false;
                     response.request_focus();
@@ -420,7 +498,7 @@ impl GoToLineDialog {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    if ui.button("    Go    ").clicked() {
+                    if chrome::primary_button(ui, chrome_theme, "Go").clicked() {
                         Self::try_navigate(
                             &self.line_text,
                             total_lines,
@@ -428,11 +506,14 @@ impl GoToLineDialog {
                             &mut self.visible,
                         );
                     }
-                    if ui.button("  I'm not going anywhere  ").clicked() {
+                    if chrome::secondary_button(ui, chrome_theme, "I'm not going anywhere")
+                        .clicked()
+                    {
                         self.visible = false;
                     }
                 });
-            });
+            },
+        );
 
         if !open {
             self.visible = false;
@@ -445,6 +526,43 @@ impl GoToLineDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Find & Replace focus flag ─────────────────────────────────────
+
+    /// `has_focus` drives editor-shortcut suppression (`shortcuts.rs`), so a
+    /// hidden dialog must clear it even though `show()` skips all rendering.
+    /// Without the unconditional reset, closing the dialog with a text field
+    /// focused would suppress editor clipboard shortcuts forever.
+    #[test]
+    fn hidden_dialog_clears_stale_focus_flag() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.visible = false;
+        dialog.has_focus = true;
+
+        let action = dialog.show(
+            &Context::default(),
+            &ChromeTheme::default(),
+            &Metrics::default(),
+            false,
+        );
+
+        assert!(action.is_none());
+        assert!(
+            !dialog.has_focus,
+            "a hidden dialog must release editor-shortcut suppression"
+        );
+    }
+
+    /// The dim signal follows editor focus, except on the opening frame
+    /// (pending `focus_requested`), which must render opaque: the find
+    /// field only receives focus on the following frame.
+    #[test]
+    fn dialog_dimmed_follows_editor_focus_except_while_opening() {
+        assert!(dialog_dimmed(true, false));
+        assert!(!dialog_dimmed(true, true));
+        assert!(!dialog_dimmed(false, false));
+        assert!(!dialog_dimmed(false, true));
+    }
 
     // ── parse_goto_input ──────────────────────────────────────────────
 

@@ -284,15 +284,91 @@ fn test_tab_count_after_new() {
     assert_eq!(harness.state().tabs.tab_count(), 3);
 }
 
+// ── Activity bar ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_activity_bar_toggles_workspace_panel() {
+    let mut harness = create_harness();
+    assert!(!harness.state().workspace_sidebar.visible);
+    harness.get_by_label("Workspace Explorer").click();
+    harness.run();
+    assert!(harness.state().workspace_sidebar.visible);
+    harness.get_by_label("Workspace Explorer").click();
+    harness.run();
+    assert!(!harness.state().workspace_sidebar.visible);
+}
+
+#[test]
+fn test_activity_bar_opens_find_replace() {
+    let mut harness = create_harness();
+    assert!(!harness.state().find_replace.visible);
+    harness.get_by_label("Find & Replace").click();
+    harness.run();
+    assert!(harness.state().find_replace.visible);
+}
+
+#[test]
+fn test_activity_bar_opens_settings() {
+    let mut harness = create_harness();
+    harness.get_by_label("Preferences").click();
+    harness.run();
+    assert!(harness.state().settings_open);
+}
+
+#[test]
+fn test_activity_bar_opens_problems_dialog() {
+    let mut harness = create_harness();
+    harness.get_by_label_contains("Problems").click();
+    harness.run();
+    assert!(harness.state().problems_open);
+}
+
+// ── Breadcrumb ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_breadcrumb_shows_path_segments_and_toggle_hides_them() {
+    let mut harness = create_harness();
+    {
+        let doc = harness.state_mut().tabs.active_doc_mut();
+        doc.file_path = Some(std::path::PathBuf::from("Z:\\bc-test\\notes\\plan.md"));
+        doc.title = "plan.md".to_string();
+    }
+    harness.run();
+    harness.get_by_label("notes");
+    harness.get_by_label("md");
+
+    harness.state_mut().show_breadcrumb = false;
+    harness.run();
+    assert!(harness.query_by_label("notes").is_none());
+}
+
+#[test]
+fn test_status_cursor_segment_accessible_when_accent_filled() {
+    // Graphite themes paint the Ln/Col segment as a filled accent rect;
+    // the custom paint path must still expose the accessible label.
+    let mut harness = create_harness();
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .theme_ctrl
+        .set_mode(rust_pad_ui::ThemeMode("Graphite Dark".to_string()), &ctx);
+    harness.run();
+    harness.get_by_label("Ln 1, Col 1");
+}
+
 #[test]
 fn test_tab_bar_shows_titles() {
-    let harness = create_harness();
+    let mut harness = create_harness();
+    // The breadcrumb echoes the active document title; hide it so the query
+    // unambiguously targets the tab strip.
+    harness.state_mut().show_breadcrumb = false;
+    harness.run();
     // Default document title is the clean filename (e.g. "Untitled 1")
     harness.get_by_label_contains("Untitled");
 }
 
 #[test]
-fn test_modified_tab_shows_asterisk() {
+fn test_modified_tab_announces_modified_state() {
     let mut harness = create_harness();
     // Modify the document via state
     harness
@@ -301,13 +377,16 @@ fn test_modified_tab_shows_asterisk() {
         .active_doc_mut()
         .insert_text("hello");
     harness.run();
-    // Tab title should now show "Untitled *"
-    harness.get_by_label_contains("Untitled *");
+    // The modified indicator is a painted dot; the state must still be
+    // discoverable through the accessible label.
+    harness.get_by_label_contains("Untitled, modified");
 }
 
 #[test]
 fn test_all_tabs_have_accessible_labels() {
     let mut harness = create_harness();
+    harness.state_mut().show_breadcrumb = false;
+    harness.run();
     let ctrl = Modifiers {
         ctrl: true,
         ..Default::default()
@@ -345,8 +424,8 @@ fn test_modified_indicator_on_inactive_tab() {
     harness.run();
     assert_eq!(harness.state().tabs.active, 1);
 
-    // The inactive modified tab must still show the asterisk in its label
-    harness.get_by_label_contains("Untitled *");
+    // The inactive modified tab must still announce its modified state
+    harness.get_by_label_contains("Untitled, modified");
 }
 
 // ── E. Menu Bar ────────────────────────────────────────────────────────────
@@ -1966,8 +2045,8 @@ fn test_tab_scroll_arrows_visible_on_overflow() {
         harness.run();
     }
     // The left/right arrows should be rendered (accessible by label)
-    harness.get_by_label("\u{25C0}");
-    harness.get_by_label("\u{25B6}");
+    harness.get_by_label(egui_phosphor::regular::CARET_LEFT);
+    harness.get_by_label(egui_phosphor::regular::CARET_RIGHT);
 }
 
 #[test]

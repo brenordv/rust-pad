@@ -1,5 +1,74 @@
 # Changelog
 
+## [3.0.0]
+
+This release is a full visual overhaul of the application (new themes, new fonts, new chrome for tabs,
+sidebar, dialogs, and status bar) plus a new activity bar and breadcrumb. The major version bump reflects
+the changed default appearance: the `System` theme mode now maps to the new Aurora themes. Existing
+configs, sessions, and the legacy themes (Dark, Light, Dusk, Wacky) keep working; on first launch after
+the upgrade, the new built-in themes are added to the top of your theme list (a previously deleted Wacky
+is not resurrected).
+
+### Added
+- **Four new built-in themes: Aurora Dark, Aurora Light, Graphite Dark, Graphite Light.** Aurora is the
+  new default look; Graphite is a sharper, flatter alternative. The legacy themes are unchanged and still
+  selectable. The `System` theme mode now resolves to Aurora Dark/Light and follows the OS light/dark
+  setting live while the app is running (checked about every 2 seconds), instead of only at startup.
+- **Bundled UI fonts.** The interface now ships with IBM Plex Sans (UI text) and JetBrains Mono
+  (editor and other monospace text) compiled into the binary, so the app renders identically on Windows,
+  macOS, and Linux instead of depending on system fonts. Both families are licensed under the SIL Open
+  Font License 1.1; the full license texts are viewable under Help > About > Third-Party Notices.
+- **Activity bar.** A vertical icon bar on the left edge with entries for the Workspace Explorer,
+  Find & Replace, Problems (with an unread-count badge), and Preferences pinned at the bottom.
+- **Breadcrumb strip.** A path strip above the editor showing the active file's workspace-relative
+  location plus a file-extension hint. Toggle it with View > Show Breadcrumb; the choice is persisted
+  (`show_breadcrumb` in the config).
+- **Window geometry persistence.** Window size, position, and maximized state are saved on exit and
+  restored on launch. Restores are validated against the saved monitor layout: a window whose title strip
+  would land off-screen is pulled back into view, and multi-monitor positions (including negative
+  coordinates) are preserved.
+- **Config-file resilience.** A corrupt `config.json` no longer aborts startup. The broken file is
+  preserved as `config.json.bak`, defaults are loaded, the incident is reported in the Problems menu, and
+  config saving is disabled for the session so the evidence isn't overwritten. A config that references an
+  unknown theme is reset to `System` and reported the same way.
+- **Display-name sanitization.** File and workspace names shown in the breadcrumb and the sidebar header
+  replace control characters and Unicode bidirectional-override characters with U+FFFD, so a crafted
+  filename can't visually disguise its real extension (Trojan Source class, cf. CVE-2021-42574). The
+  breadcrumb's extension hint is derived from the raw bytes and acts as the honest counter-signal.
+- **Render pass tracing.** A TRACE-gated per-pass log for performance triage, recording the gap since the
+  previous frame, the pass duration, and egui's repaint causes. Enable with
+  `RUST_LOG=info,rust_pad_ui::app=trace`; it works in release builds. Capture instructions are in
+  `CONTRIBUTING.md` (on Windows the release binary has no console, so stderr must be redirected).
+
+### Changed
+- **The tab strip moved into the editor column** (above the editor, below the breadcrumb), VS Code /
+  Rider style, and was restyled: the active tab carries an accent bar and sits flush with the editor
+  background, modified tabs show a dot instead of an asterisk (with an accessible ", modified" label
+  suffix), pinned tabs show a pin icon, and overflow is handled with scroll arrows.
+- **Status bar and menu bar restyle.** Tighter segments, themed colors, and a cursor-position segment
+  that picks up the accent color. The Help menu now shows a small dot when there are unread problems,
+  replacing the "⚠" label.
+- **Workspace sidebar restyle.** Compact tree rows with chevrons, an accent indicator on the selected
+  row, and a rebuilt header: the workspace name (truncated with a hover tooltip when long) next to
+  New File, New Folder, and Collapse All buttons, with the remaining actions (Add Folder to Workspace,
+  Show Hidden Files, Expand All, Hide Sidebar, Close Workspace) in an overflow menu.
+- **Editor polish.** The active line's gutter number is highlighted, line height and gutter metrics come
+  from the theme, the secondary caret in multi-cursor mode is themed, and end-of-line markers
+  (when Show Special Characters is on) render per theme style: a return glyph, a CRLF chip, or the
+  legacy badges.
+- **Dialogs restyle.** Themed dialogs get a title band with a close button, a primary/secondary button
+  hierarchy, and focus rings on text inputs. The background dims while a dialog is open over a focused
+  editor. Centered dialogs (Settings, Problems, About, External Change) are now movable; they open
+  centered but can be dragged.
+- **Find Results panel restyle.** Rows have hover and selection states, results render as
+  `tab:line  preview`, and a footer shows "Match n/m" for the current selection or the total match count.
+
+### Fixed
+- **Startup panic on multibyte characters in theme colors.** A user-edited theme whose hex color
+  contained a multibyte character (e.g. `#ffèa00`) crashed the app at startup because the parser sliced
+  the string at byte boundaries. Malformed colors are now rejected cleanly and fall back like any other
+  invalid theme value.
+
 ## [2.12.3]
 
 ### Changed

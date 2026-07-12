@@ -2,18 +2,37 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
+use egui::{Color32, Rect, Sense, Vec2};
 
 use super::menus::{show_directory_context_menu, show_file_context_menu, show_root_context_menu};
 use super::tree::{EntryKind, FolderRoot, TreeEntry};
 use super::watcher::WorkspaceWatcher;
+use crate::app::chrome;
+use crate::app::resolved_theme::{tree_indent, ChromeTheme, Metrics, TREE_ROW_HEIGHT};
+use crate::app::workspace_ops::generate_unique_name;
 use crate::icons;
 
 /// Minimum sidebar width in pixels.
 const MIN_WIDTH: f32 = 150.0;
 /// Maximum sidebar width in pixels.
 const MAX_WIDTH: f32 = 500.0;
-/// Default sidebar width in pixels.
+/// Default sidebar width in pixels. Kept at the pre-redesign value so a
+/// config carrying it reads as "never resized" — [`WorkspaceSidebar::effective_width`]
+/// then substitutes the theme's metric default.
 const DEFAULT_WIDTH: f32 = 250.0;
+
+/// Width of the chevron column at the start of a tree row.
+const CHEVRON_WIDTH: f32 = 16.0;
+/// Width of the entry-icon column in a tree row.
+const ICON_WIDTH: f32 = 20.0;
+/// Trailing padding after a row's name text.
+const ROW_END_PADDING: f32 = 8.0;
+/// Font size for row names and icons.
+const ROW_FONT_SIZE: f32 = 13.0;
+/// Font size for the chevron glyph.
+const CHEVRON_FONT_SIZE: f32 = 11.0;
+/// Font size for the uppercase header label.
+const HEADER_FONT_SIZE: f32 = 11.0;
 
 /// Which representation of a path the `CopyPath` action should write to
 /// the clipboard. Mirrors the three submenu items in
@@ -166,20 +185,10 @@ pub struct WorkspaceSidebar {
     /// Whether hidden files/folders (names starting with `.`) are shown.
     pub show_hidden: bool,
     /// Pending bulk expand/collapse for the next render. `Some(true)` =
-    /// expand all loaded entries; `Some(false)` = collapse all; `None` =
-    /// no bulk action queued. Consumed during the next `render_tree`
-    /// because the egui `CollapsingState` ids are only addressable from
-    /// within the sidebar's `Ui` scope.
+    /// expand all workspace roots; `Some(false)` = collapse all; `None` =
+    /// no bulk action queued. Consumed at the start of the next
+    /// `render_tree`.
     pub(crate) pending_bulk_collapse: Option<bool>,
-    /// One-shot keyboard expand/collapse override consumed by the next
-    /// `render_tree`. `Some((path, open))` forces that directory's egui
-    /// `CollapsingState` to `open` for one frame. Keyboard nav mutates the
-    /// data-model `expanded` flag, but egui's `CollapsingState` owns the
-    /// on-screen open state and `load_with_default_open` ignores its default
-    /// once a state is stored — so the model change must be pushed into egui
-    /// here or the header never moves. At most one nav key is handled per
-    /// frame, so a single slot suffices (mirrors `pending_bulk_collapse`).
-    pub(crate) pending_expand: Option<(PathBuf, bool)>,
     /// Whether the next render of the workspace rename buffer should
     /// select all text on focus. Set when entering rename mode, cleared
     /// after the selection is applied.
@@ -223,7 +232,6 @@ impl WorkspaceSidebar {
             rename_entry: None,
             show_hidden: false,
             pending_bulk_collapse: None,
-            pending_expand: None,
             workspace_rename_select_pending: false,
             selected: None,
             kbd_active: false,
@@ -240,13 +248,29 @@ impl WorkspaceSidebar {
         self.width.clamp(MIN_WIDTH, MAX_WIDTH)
     }
 
+    /// Returns the width the panel should open at: a user-persisted width
+    /// wins; a width still at the pre-redesign default means the user never
+    /// resized, so the active theme's metric default applies instead.
+    pub fn effective_width(&self, metric_default: f32) -> f32 {
+        if (self.width - DEFAULT_WIDTH).abs() < f32::EPSILON {
+            metric_default.clamp(MIN_WIDTH, MAX_WIDTH)
+        } else {
+            self.width()
+        }
+    }
+
     /// Returns true if the sidebar should be rendered.
     pub fn is_visible(&self) -> bool {
         self.visible
     }
 
     /// Renders the sidebar content and returns any action to execute.
-    pub fn show(&mut self, ui: &mut egui::Ui) -> SidebarAction {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        chrome: &ChromeTheme,
+        metrics: &Metrics,
+    ) -> SidebarAction {
         // Clear the Enter-suppression flag from the previous frame.
         self.rename_just_confirmed = false;
 
@@ -257,8 +281,7 @@ impl WorkspaceSidebar {
             .handle_tree_kbd_nav(ui.ctx())
             .unwrap_or(SidebarAction::None);
 
-        // Header: workspace name + toolbar
-        self.render_header(ui, &mut action);
+        self.render_header(ui, chrome, metrics, &mut action);
 
         ui.separator();
 
@@ -277,89 +300,149 @@ impl WorkspaceSidebar {
                         }
                     });
                 } else {
-                    self.render_tree(ui, &mut action);
+                    self.render_tree(ui, chrome, metrics, &mut action);
                 }
             });
 
         action
     }
 
-    /// Renders the sidebar header with workspace name (row 1) and toolbar
-    /// buttons (row 2). The two-row layout keeps the toolbar legible at
-    /// the minimum 150 px sidebar width — the previous single-row layout
-    /// reserved a fixed 160 px strip for buttons and starved the name
-    /// label of horizontal room.
-    fn render_header(&mut self, ui: &mut egui::Ui, action: &mut SidebarAction) {
-        ui.vertical(|ui| {
-            // Row 1: workspace name / menu / rename field
-            ui.horizontal(|ui| {
-                if self.workspace_name.is_empty() {
-                    ui.strong("Workspace");
-                } else if self.rename_buffer.is_some() {
-                    self.render_workspace_rename_field(ui, action);
-                } else {
-                    self.render_workspace_name_with_menu(ui, action);
-                }
+    /// Renders the sidebar header: the workspace label (11 px uppercase,
+    /// muted) on the left and the primary tree actions (New File, New
+    /// Folder, Collapse All) plus an overflow menu on the right. The
+    /// label keeps its pre-redesign behaviors — double-click renames the
+    /// workspace and right-click opens the workspace menu.
+    fn render_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        chrome: &ChromeTheme,
+        metrics: &Metrics,
+        action: &mut SidebarAction,
+    ) {
+        // Both paths render inside the same fixed-height band so the header
+        // keeps its height (and vertical centering) during a rename.
+        if self.rename_buffer.is_some() && !self.workspace_name.is_empty() {
+            chrome::header_band(ui, metrics.sidebar_header_height, |ui| {
+                self.render_workspace_rename_field(ui, action);
             });
-            // Row 2: toolbar buttons, left-aligned. Order: Add (+),
-            // Toggle hidden, Collapse all, Expand all, Close (X) —
-            // destructive Close at the far right so accidental clicks
-            // on the creator (Add) are unlikely to land on it.
-            ui.horizontal(|ui| {
-                if ui
-                    .small_button(icons::PLUS)
-                    .on_hover_text("Add folder")
-                    .clicked()
-                {
-                    *action = SidebarAction::AddFolder;
-                }
-                let hidden_label = if self.show_hidden {
-                    icons::EYE
-                } else {
-                    icons::EYE_SLASH
-                };
-                let hidden_tooltip = if self.show_hidden {
-                    "Hide hidden files"
-                } else {
-                    "Show hidden files"
-                };
-                if ui
-                    .small_button(hidden_label)
-                    .on_hover_text(hidden_tooltip)
-                    .clicked()
-                {
-                    *action = SidebarAction::ToggleHiddenFiles;
-                }
-                if ui
-                    .small_button(icons::CARET_DOUBLE_UP)
-                    .on_hover_text("Collapse all")
-                    .clicked()
-                {
+            return;
+        }
+        let new_entry_target = self.new_entry_target();
+        chrome::header_band(ui, metrics.sidebar_header_height, |ui| {
+            // The action buttons are emitted first (right-to-left) so they
+            // always keep their full width; the label gets whatever remains
+            // and truncates. Emitting the label first let a long name shrink
+            // the buttons' region below their width, and egui does not clip
+            // that overflow — the buttons painted over the label on narrow
+            // sidebars.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.render_header_overflow_menu(ui, action);
+                if header_icon_button(ui, icons::CARET_DOUBLE_UP, "Collapse All").clicked() {
                     *action = SidebarAction::CollapseAll;
                 }
-                if ui
-                    .small_button(icons::CARET_DOUBLE_DOWN)
-                    .on_hover_text("Expand all")
-                    .clicked()
-                {
-                    *action = SidebarAction::ExpandAll;
+                let folder_btn = header_new_entry_button(
+                    ui,
+                    icons::FOLDER_PLUS,
+                    "New Folder",
+                    &new_entry_target,
+                );
+                if folder_btn.clicked() {
+                    self.begin_new_entry(&new_entry_target, true);
                 }
-                if ui
-                    .small_button(icons::ARROW_LINE_LEFT)
-                    .on_hover_text("Hide sidebar (Ctrl+B)")
-                    .clicked()
-                {
-                    *action = SidebarAction::Hide;
+                let file_btn =
+                    header_new_entry_button(ui, icons::FILE_PLUS, "New File", &new_entry_target);
+                if file_btn.clicked() {
+                    self.begin_new_entry(&new_entry_target, false);
                 }
-                if ui
-                    .small_button(icons::X)
-                    .on_hover_text("Close workspace")
-                    .clicked()
-                {
-                    *action = SidebarAction::CloseWorkspace;
-                }
+                // Label last: consumes only the leftover region to the left
+                // of the buttons.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if self.workspace_name.is_empty() {
+                        header_name_label(ui, "WORKSPACE", chrome);
+                    } else {
+                        self.render_workspace_name_with_menu(ui, chrome, action);
+                    }
+                });
             });
         });
+    }
+
+    /// Renders the header's `…` overflow menu carrying the secondary
+    /// workspace actions that the redesigned header no longer shows as
+    /// dedicated buttons.
+    fn render_header_overflow_menu(&mut self, ui: &mut egui::Ui, action: &mut SidebarAction) {
+        let response = ui
+            .menu_button(icons::DOTS_THREE, |ui| {
+                if ui.button("Add Folder to Workspace...").clicked() {
+                    *action = SidebarAction::AddFolder;
+                    ui.close();
+                }
+                let hidden_label = if self.show_hidden {
+                    "Hide Hidden Files"
+                } else {
+                    "Show Hidden Files"
+                };
+                if ui.button(hidden_label).clicked() {
+                    *action = SidebarAction::ToggleHiddenFiles;
+                    ui.close();
+                }
+                if ui.button("Expand All").clicked() {
+                    *action = SidebarAction::ExpandAll;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Hide Sidebar").clicked() {
+                    *action = SidebarAction::Hide;
+                    ui.close();
+                }
+                if ui.button("Close Workspace").clicked() {
+                    *action = SidebarAction::CloseWorkspace;
+                    ui.close();
+                }
+            })
+            .response;
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "More Actions")
+        });
+        response.on_hover_text("More actions");
+    }
+
+    /// Picks the directory a header-initiated New File / New Folder should
+    /// target: the selected directory, the selected file's parent, or the
+    /// first available workspace root.
+    fn new_entry_target(&self) -> Option<PathBuf> {
+        if let Some(sel) = &self.selected {
+            match self.entry_kind_for(&sel.path) {
+                Some(EntryKind::Directory) => return Some(sel.path.clone()),
+                Some(EntryKind::File) => {
+                    if let Some(parent) = sel.path.parent() {
+                        return Some(parent.to_path_buf());
+                    }
+                }
+                None => {}
+            }
+        }
+        self.tree
+            .iter()
+            .find(|root| root.path.is_dir())
+            .map(|root| root.path.clone())
+    }
+
+    /// Arms the inline new-entry field under `target`, mirroring what the
+    /// context menu's New File / New Folder items seed.
+    fn begin_new_entry(&mut self, target: &Option<PathBuf>, is_dir: bool) {
+        let Some(parent) = target else {
+            return;
+        };
+        let seed = if is_dir { "new_folder" } else { "new_file.txt" };
+        let name = generate_unique_name(parent, seed, is_dir);
+        self.new_entry = Some(NewEntryState {
+            parent: parent.clone(),
+            name,
+            is_dir,
+            select_on_focus: true,
+        });
+        self.rename_entry = None;
     }
 
     /// Renders the inline text field for renaming the workspace.
@@ -395,10 +478,20 @@ impl WorkspaceSidebar {
     }
 
     /// Renders the workspace name label with context menu for workspace operations.
-    fn render_workspace_name_with_menu(&mut self, ui: &mut egui::Ui, action: &mut SidebarAction) {
-        let name_response = ui
-            .strong(&self.workspace_name)
-            .on_hover_text("Double-click to rename");
+    fn render_workspace_name_with_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        chrome: &ChromeTheme,
+        action: &mut SidebarAction,
+    ) {
+        let display = self.workspace_name.to_uppercase();
+        // The label may be elided; the hover carries the full sanitized name
+        // in its original case (the label itself is uppercased for style).
+        let hover = format!(
+            "{}\nDouble-click to rename",
+            crate::text_sanitize::sanitize_display_text(&self.workspace_name)
+        );
+        let name_response = header_name_label(ui, &display, chrome).on_hover_text(hover);
         if name_response.double_clicked() {
             self.rename_buffer = Some(self.workspace_name.clone());
             self.workspace_rename_select_pending = true;
@@ -435,26 +528,39 @@ impl WorkspaceSidebar {
         });
     }
 
-    /// Renders the folder tree with collapsible roots.
-    fn render_tree(&mut self, ui: &mut egui::Ui, action: &mut SidebarAction) {
+    /// Renders the folder tree. Every row is painted by [`tree_row`]; the
+    /// data-model `expanded` flags are the single source of truth for
+    /// open/closed state (no egui `CollapsingState` involved).
+    fn render_tree(
+        &mut self,
+        ui: &mut egui::Ui,
+        chrome: &ChromeTheme,
+        metrics: &Metrics,
+        action: &mut SidebarAction,
+    ) {
         let mut context_action = SidebarAction::None;
         let mut new_entry_request: Option<NewEntryState> = None;
         let mut selection_request: Option<SelectedNode> = None;
-        let tree_len = self.tree.len();
-        let bulk = self.pending_bulk_collapse.take();
-        // Hoist the inline-rename and pending-expand state into locals so a root
-        // row can render its own rename field (the body's `render_entry_list`
-        // only reaches nested entries) without aliasing `self` mutably across
-        // the `show_header`/`body` closures. Written back after the loop.
+        if let Some(open) = self.pending_bulk_collapse.take() {
+            // Bulk expand/collapse flips workspace-root flags only. Cascading
+            // into nested directories would lazy-load the entire reachable
+            // tree in one frame, which froze the UI on large workspaces.
+            for root in &mut self.tree {
+                root.expanded = open;
+            }
+        }
+        // Hoist the inline-rename state into locals so a root row can render
+        // its own rename field (the body's `render_entry_list` only reaches
+        // nested entries) without aliasing `self` mutably across closures.
+        // Written back after the loop.
         let mut rename_state = self.rename_entry.take();
-        let mut pending = self.pending_expand.take();
         let mut rename_confirmed = self.rename_just_confirmed;
         let mut clear_rename = false;
         // Snapshot the selection so we can pass it by reference through the
         // borrow-checker without aliasing `self.selected` mutably.
         let selected_snapshot = self.selected.clone();
 
-        for root_idx in 0..tree_len {
+        for root_idx in 0..self.tree.len() {
             let root_path = self.tree[root_idx].path.clone();
             let root_name = root_path
                 .file_name()
@@ -463,128 +569,94 @@ impl WorkspaceSidebar {
 
             let folder_exists = root_path.is_dir();
 
-            // A root selected for rename shows its inline field in place of the
-            // collapsing header, so the rename targets the row the user picked
-            // — not a same-path duplicate nested under another root.
+            // A root selected for rename shows its inline field in place of
+            // its row, so the rename targets the row the user picked — not a
+            // same-path duplicate nested under another root.
             let renaming_this_root = rename_state
                 .as_ref()
                 .is_some_and(|r| r.root_index == root_idx && r.original_path == root_path);
             if renaming_this_root {
                 if let Some(state) = rename_state.as_mut() {
-                    if render_inline_rename(ui, state, action, &mut rename_confirmed) {
+                    if render_inline_rename(ui, state, action, &mut rename_confirmed, 0) {
                         clear_rename = true;
                     }
                 }
                 continue;
             }
 
-            let id = ui.make_persistent_id(format!("root_{root_idx}"));
-            if let Some(open) = bulk {
-                self.tree[root_idx].expanded = open;
-            }
-            let expanded = self.tree[root_idx].expanded;
-
-            // Force-open the root if the inline new entry targets it
-            let should_force_open = self
+            // Force-open the root if the inline new entry targets it.
+            if self
                 .new_entry
                 .as_ref()
-                .is_some_and(|ne| ne.parent == root_path);
-
-            let mut cs = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(),
-                id,
-                expanded,
-            );
-            if let Some(open) = bulk {
-                cs.set_open(open);
-                cs.store(ui.ctx());
+                .is_some_and(|ne| ne.parent == root_path)
+            {
+                self.tree[root_idx].expanded = true;
             }
-            if should_force_open && !cs.is_open() {
-                cs.set_open(true);
-            }
-            // Apply a queued keyboard expand/collapse for this root (see
-            // `pending_expand`): the data-model flag alone does not move egui's
-            // header state.
-            if pending.as_ref().is_some_and(|(p, _)| *p == root_path) {
-                if let Some((_, open)) = pending.take() {
-                    cs.set_open(open);
-                    cs.store(ui.ctx());
-                    self.tree[root_idx].expanded = open;
-                }
-            }
-
+            let expanded = self.tree[root_idx].expanded;
             let root_selected = selected_snapshot
                 .as_ref()
                 .is_some_and(|s| s.root_index == root_idx && s.path == root_path);
-            let (_toggle, header_inner, _body) = cs
-                .show_header(ui, |ui| {
-                    let response = if folder_exists {
-                        selectable_row(ui, root_selected, egui::RichText::new(&root_name).strong())
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    } else {
-                        ui.weak(format!(
-                            "{} {root_name} (unavailable)",
-                            icons::WARNING_CIRCLE
-                        ))
-                    };
-                    if folder_exists && response.clicked() {
-                        selection_request = Some(SelectedNode {
-                            root_index: root_idx,
-                            path: root_path.clone(),
-                        });
-                    }
-                    response.context_menu(|ui| {
-                        show_root_context_menu(
-                            ui,
-                            &root_path,
-                            folder_exists,
-                            &mut context_action,
-                            &mut new_entry_request,
-                        );
-                    });
-                    response
-                })
-                .body(|ui| {
-                    if folder_exists {
-                        let mut ctx = RenderCtx {
-                            action,
-                            new_entry: &mut self.new_entry,
-                            rename_entry: &mut rename_state,
-                            rename_just_confirmed: &mut rename_confirmed,
-                            workspace_root: &root_path,
-                            show_hidden: self.show_hidden,
-                            root_index: root_idx,
-                            selected: selected_snapshot.as_ref(),
-                            pending_expand: &mut pending,
-                        };
-                        render_entry_list(
-                            ui,
-                            &root_path,
-                            &mut self.tree[root_idx].entries,
-                            &mut ctx,
-                            &mut selection_request,
-                        );
-                    } else {
-                        ui.weak("Folder not found or inaccessible");
-                    }
-                });
 
-            // Double-click on the header label toggles expand/collapse
-            if header_inner.inner.double_clicked() {
-                if let Some(mut state) =
-                    egui::collapsing_header::CollapsingState::load(ui.ctx(), id)
-                {
-                    let new_open = !state.is_open();
-                    state.set_open(new_open);
-                    state.store(ui.ctx());
-                    self.tree[root_idx].expanded = new_open;
+            let display_name = if folder_exists {
+                root_name.clone()
+            } else {
+                format!("{root_name} (unavailable)")
+            };
+            let spec = TreeRowSpec {
+                depth: 0,
+                name: &display_name,
+                kind: "folder",
+                icon: root_row_icon(folder_exists, expanded),
+                icon_color: root_icon_color(folder_exists, expanded, chrome),
+                chevron: folder_exists.then_some(expanded),
+                selected: root_selected,
+                semibold: true,
+                text_color: root_text_color(folder_exists, root_selected, ui, chrome),
+            };
+            let events = tree_row(ui, chrome, metrics, &spec);
+            if folder_exists {
+                if events.chevron_clicked || events.row_double_clicked {
+                    self.tree[root_idx].expanded = !expanded;
+                }
+                if events.row_clicked {
+                    selection_request = Some(SelectedNode {
+                        root_index: root_idx,
+                        path: root_path.clone(),
+                    });
                 }
             }
+            events.response.context_menu(|ui| {
+                show_root_context_menu(
+                    ui,
+                    &root_path,
+                    folder_exists,
+                    &mut context_action,
+                    &mut new_entry_request,
+                );
+            });
 
-            // Persist expanded state from egui's CollapsingState
-            self.tree[root_idx].expanded =
-                egui::collapsing_header::CollapsingState::load(ui.ctx(), id)
-                    .map_or(expanded, |s| s.is_open());
+            if self.tree[root_idx].expanded && folder_exists {
+                let mut ctx = RenderCtx {
+                    action,
+                    new_entry: &mut self.new_entry,
+                    rename_entry: &mut rename_state,
+                    rename_just_confirmed: &mut rename_confirmed,
+                    workspace_root: &root_path,
+                    show_hidden: self.show_hidden,
+                    root_index: root_idx,
+                    selected: selected_snapshot.as_ref(),
+                    chrome,
+                    metrics,
+                };
+                render_entry_list(
+                    ui,
+                    &root_path,
+                    &mut self.tree[root_idx].entries,
+                    &mut ctx,
+                    &mut selection_request,
+                    1,
+                );
+            }
         }
 
         if context_action != SidebarAction::None {
@@ -599,7 +671,6 @@ impl WorkspaceSidebar {
         }
         // Write hoisted state back.
         self.rename_entry = rename_state;
-        self.pending_expand = pending;
         self.rename_just_confirmed = rename_confirmed;
         if let Some(req) = selection_request {
             self.selected = Some(req);
@@ -677,9 +748,9 @@ impl WorkspaceSidebar {
     }
 
     /// Sets the `expanded` flag for the directory at `target`. No-op for
-    /// files, unknown paths, or roots that aren't directories. Note: this
-    /// does not synchronise with egui's `CollapsingState`; the next render
-    /// pass updates the on-screen state from `entry.expanded`.
+    /// files, unknown paths, or roots that aren't directories. The renderer
+    /// reads these flags directly, so the change is visible on the next
+    /// frame.
     pub(crate) fn set_expanded(&mut self, target: &std::path::Path, open: bool) {
         for root in &mut self.tree {
             if root.path == target {
@@ -695,22 +766,10 @@ impl WorkspaceSidebar {
         }
     }
 
-    /// Queues a keyboard-driven expand/collapse: updates the data-model
-    /// `expanded` flag *and* records a one-shot override so the next
-    /// `render_tree` pushes the new state into egui's `CollapsingState`
-    /// (see [`pending_expand`](Self::pending_expand)). Mouse interactions write
-    /// egui directly; keyboard nav must route through here or the header never
-    /// moves on screen.
-    pub(crate) fn queue_expand(&mut self, target: &std::path::Path, open: bool) {
-        self.set_expanded(target, open);
-        self.pending_expand = Some((target.to_path_buf(), open));
-    }
-
-    /// Convenience: flips [`is_expanded`] for `target`, queuing the egui
-    /// override so the change is visible.
+    /// Convenience: flips [`is_expanded`] for `target`.
     pub(crate) fn toggle_expanded_for(&mut self, target: &std::path::Path) {
         let new = !self.is_expanded(target);
-        self.queue_expand(target, new);
+        self.set_expanded(target, new);
     }
 
     /// Handles arrow / Enter / F2 keystrokes for the sidebar tree.
@@ -842,7 +901,7 @@ impl WorkspaceSidebar {
             return;
         }
         if !self.is_expanded(&node.path) {
-            self.queue_expand(&node.path, true);
+            self.set_expanded(&node.path, true);
             return;
         }
         // Move to the first child if it appears below us in the same root
@@ -860,7 +919,7 @@ impl WorkspaceSidebar {
         let node = nodes[idx].clone();
         let is_dir = matches!(self.entry_kind_for(&node.path), Some(EntryKind::Directory));
         if is_dir && self.is_expanded(&node.path) {
-            self.queue_expand(&node.path, false);
+            self.set_expanded(&node.path, false);
             return;
         }
         if let Some(parent) = node.path.parent() {
@@ -945,8 +1004,10 @@ fn render_inline_entry_field(
     id_salt: &str,
     name: &mut String,
     select_on_focus: &mut bool,
+    depth: usize,
 ) -> InlineEntryOutcome {
     ui.horizontal(|ui| {
+        ui.add_space(tree_indent(depth));
         ui.label(icon);
         let name_snapshot = name.clone();
         let resp = ui.add(
@@ -983,6 +1044,7 @@ fn render_inline_rename(
     state: &mut RenameEntryState,
     action: &mut SidebarAction,
     rename_just_confirmed: &mut bool,
+    depth: usize,
 ) -> bool {
     let original_name = state
         .original_path
@@ -1000,6 +1062,7 @@ fn render_inline_rename(
         "ws-rename-entry",
         &mut state.name,
         &mut state.select_on_focus,
+        depth,
     ) {
         InlineEntryOutcome::Submitted(name) if !name.is_empty() && name != original_name => {
             *action = SidebarAction::ConfirmRenameEntry(state.original_path.clone(), name);
@@ -1037,11 +1100,10 @@ pub(crate) struct RenderCtx<'a> {
     /// selected. An entry is highlighted only when both its `root_index` and
     /// path match.
     pub selected: Option<&'a SelectedNode>,
-    /// One-shot keyboard expand/collapse override threaded down from
-    /// `render_tree`. When it matches a directory's path, that directory's
-    /// egui `CollapsingState` is forced open/closed for the frame and the slot
-    /// is cleared. See [`WorkspaceSidebar::pending_expand`].
-    pub pending_expand: &'a mut Option<(PathBuf, bool)>,
+    /// Resolved chrome palette for row painting.
+    pub chrome: &'a ChromeTheme,
+    /// Resolved metric set (indicator style, radii) for row painting.
+    pub metrics: &'a Metrics,
 }
 
 impl RenderCtx<'_> {
@@ -1052,29 +1114,223 @@ impl RenderCtx<'_> {
     }
 }
 
-/// Renders a clickable, selectable tree row that mirrors the look of
-/// `ui.selectable_label` (selection highlight, hover fill) but senses with
-/// [`egui::Sense::CLICK`] — the bare, **non-focusable** click flag.
-///
-/// Tree rows must not take egui keyboard focus: a focused row makes egui's
-/// spatial widget navigation hijack the arrow keys (focus jumps to unrelated
-/// widgets) and lets the row's own activation race the sidebar's nav handler.
-/// Keeping rows non-focusable leaves arrow/Enter/F2 entirely to
-/// [`WorkspaceSidebar::handle_tree_kbd_nav`].
-fn selectable_row<'a>(
-    ui: &mut egui::Ui,
+/// Visual and semantic description of one tree row, resolved by the caller.
+struct TreeRowSpec<'a> {
+    depth: usize,
+    name: &'a str,
+    /// Accessible kind suffix ("folder" / "file") appended to the row label.
+    kind: &'a str,
+    icon: &'a str,
+    icon_color: Color32,
+    /// `Some(open)` renders a chevron for an expandable row; `None` renders
+    /// the aligned spacer files get.
+    chevron: Option<bool>,
     selected: bool,
-    text: impl egui::IntoAtoms<'a>,
-) -> egui::Response {
-    ui.add(
-        egui::Button::new(text)
-            .selected(selected)
-            .frame_when_inactive(selected)
-            .sense(egui::Sense::CLICK),
-    )
+    /// Semibold name text (workspace roots and the selected row, matching
+    /// the active tab's weight treatment).
+    semibold: bool,
+    text_color: Color32,
 }
 
-/// Renders a directory tree entry with collapsing header, context menu, and lazy-loaded children.
+/// What the user did to a tree row this frame.
+struct TreeRowEvents {
+    response: egui::Response,
+    /// The chevron was clicked (expand/collapse toggle).
+    chevron_clicked: bool,
+    /// The row body (not the chevron) was clicked.
+    row_clicked: bool,
+    /// The row body was double-clicked.
+    row_double_clicked: bool,
+}
+
+/// Paints one 26 px tree row: selection indicator or hover tint, chevron,
+/// entry icon, and name, indented per [`tree_indent`].
+///
+/// The row is a single widget sensing [`egui::Sense::CLICK`] — the bare,
+/// **non-focusable** click flag. Tree rows must not take egui keyboard
+/// focus: a focused row makes egui's spatial widget navigation hijack the
+/// arrow keys and lets the row's own activation race the sidebar's nav
+/// handler. Keeping rows non-focusable leaves arrow/Enter/F2 entirely to
+/// [`WorkspaceSidebar::handle_tree_kbd_nav`]. Chevron hits are resolved from
+/// the pointer position within the one widget rather than a second overlaid
+/// widget, so the row also stays a single accessibility node.
+fn tree_row(
+    ui: &mut egui::Ui,
+    chrome_theme: &ChromeTheme,
+    metrics: &Metrics,
+    spec: &TreeRowSpec<'_>,
+) -> TreeRowEvents {
+    let font = if spec.semibold {
+        egui::FontId::new(
+            ROW_FONT_SIZE,
+            egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+        )
+    } else {
+        egui::FontId::proportional(ROW_FONT_SIZE)
+    };
+    let name_galley = ui
+        .painter()
+        .layout_no_wrap(spec.name.to_string(), font, spec.text_color);
+
+    let indent = tree_indent(spec.depth);
+    let content_width =
+        indent + CHEVRON_WIDTH + ICON_WIDTH + name_galley.size().x + ROW_END_PADDING;
+    let width = ui.available_width().max(content_width);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, TREE_ROW_HEIGHT), Sense::CLICK);
+
+    let accessible = format!("{}, {}", spec.name, spec.kind);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            true,
+            spec.selected,
+            accessible.clone(),
+        )
+    });
+
+    let chevron_rect = Rect::from_min_size(
+        egui::pos2(rect.left() + indent, rect.top()),
+        Vec2::new(CHEVRON_WIDTH, rect.height()),
+    );
+
+    if ui.is_rect_visible(rect) {
+        if spec.selected {
+            chrome::accent_indicator(ui.painter(), rect, chrome_theme, metrics);
+        } else if response.hovered() {
+            chrome::hover_tint(ui.painter(), rect, chrome_theme, metrics);
+        }
+
+        if let Some(open) = spec.chevron {
+            let glyph = if open {
+                icons::CARET_DOWN
+            } else {
+                icons::CARET_RIGHT
+            };
+            let galley = ui.painter().layout_no_wrap(
+                glyph.to_string(),
+                egui::FontId::proportional(CHEVRON_FONT_SIZE),
+                chrome_theme.text_muted,
+            );
+            let pos = chevron_rect.center() - galley.size() / 2.0;
+            ui.painter().galley(pos, galley, chrome_theme.text_muted);
+        }
+
+        let icon_rect = Rect::from_min_size(
+            egui::pos2(chevron_rect.right(), rect.top()),
+            Vec2::new(ICON_WIDTH, rect.height()),
+        );
+        let icon_galley = ui.painter().layout_no_wrap(
+            spec.icon.to_string(),
+            egui::FontId::proportional(ROW_FONT_SIZE),
+            spec.icon_color,
+        );
+        let icon_pos = icon_rect.center() - icon_galley.size() / 2.0;
+        ui.painter().galley(icon_pos, icon_galley, spec.icon_color);
+
+        let name_pos = egui::pos2(
+            icon_rect.right(),
+            rect.center().y - name_galley.size().y / 2.0,
+        );
+        ui.painter().galley(name_pos, name_galley, spec.text_color);
+    }
+
+    let pointer_in_chevron = spec.chevron.is_some()
+        && response
+            .interact_pointer_pos()
+            .is_some_and(|pos| chevron_rect.contains(pos));
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    TreeRowEvents {
+        chevron_clicked: response.clicked() && pointer_in_chevron,
+        row_clicked: response.clicked() && !pointer_in_chevron,
+        row_double_clicked: response.double_clicked() && !pointer_in_chevron,
+        response,
+    }
+}
+
+/// The 11 px uppercase muted text used for the sidebar header label.
+fn header_label_text(text: &str, chrome_theme: &ChromeTheme) -> egui::RichText {
+    egui::RichText::new(text)
+        .font(egui::FontId::new(
+            HEADER_FONT_SIZE,
+            egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+        ))
+        .color(chrome_theme.text_muted)
+}
+
+/// Emits the header's workspace label into the remaining band width.
+///
+/// Single emission point for both the named-workspace and "WORKSPACE"
+/// placeholder paths. The text is sanitized (control chars and bidi
+/// overrides become U+FFFD) and truncates with an ellipsis instead of
+/// pushing into or under the header action buttons.
+fn header_name_label(ui: &mut egui::Ui, text: &str, chrome_theme: &ChromeTheme) -> egui::Response {
+    let sanitized = crate::text_sanitize::sanitize_display_text(text);
+    ui.add(egui::Label::new(header_label_text(&sanitized, chrome_theme)).truncate())
+}
+
+/// A small icon button for the header action strip, with a tooltip and an
+/// accessible label.
+fn header_icon_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
+    let response = ui.small_button(icon);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.on_hover_text(label)
+}
+
+/// A header New File / New Folder button, disabled when no target directory
+/// exists (no selection and no available root).
+fn header_new_entry_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    target: &Option<PathBuf>,
+) -> egui::Response {
+    let response = ui.add_enabled(target.is_some(), egui::Button::new(icon).small());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.on_hover_text(label)
+}
+
+/// Icon for a workspace-root row: warning marker when the folder is missing,
+/// open/closed folder otherwise.
+fn root_row_icon(folder_exists: bool, expanded: bool) -> &'static str {
+    if !folder_exists {
+        icons::WARNING_CIRCLE
+    } else if expanded {
+        icons::FOLDER_OPEN
+    } else {
+        icons::FOLDER
+    }
+}
+
+/// Icon color for a workspace-root row: warn for a missing folder, dimmed
+/// accent when open, muted otherwise.
+fn root_icon_color(folder_exists: bool, expanded: bool, chrome_theme: &ChromeTheme) -> Color32 {
+    if !folder_exists {
+        chrome_theme.warn
+    } else if expanded {
+        chrome_theme.accent_dim
+    } else {
+        chrome_theme.text_muted
+    }
+}
+
+/// Name color for a workspace-root row.
+fn root_text_color(
+    folder_exists: bool,
+    selected: bool,
+    ui: &egui::Ui,
+    chrome_theme: &ChromeTheme,
+) -> Color32 {
+    if !folder_exists {
+        chrome_theme.text_faint
+    } else if selected {
+        chrome_theme.accent
+    } else {
+        ui.visuals().text_color()
+    }
+}
+
+/// Renders a directory tree entry: chevron row, context menu, and
+/// lazy-loaded children.
 ///
 /// `ExpandAll` / `CollapseAll` deliberately do NOT propagate here — they only
 /// flip the workspace-root flags. Cascading expansion through every
@@ -1087,79 +1343,83 @@ fn render_directory_entry(
     new_entry_request: &mut Option<NewEntryState>,
     rename_request: &mut Option<RenameEntryState>,
     selection_request: &mut Option<SelectedNode>,
+    depth: usize,
 ) {
     let name = entry.name.clone();
     let path = entry.path.clone();
-    let expanded = entry.expanded;
-    let id = ui.make_persistent_id(("entry", &path));
 
-    let should_force_open = ctx.new_entry.as_ref().is_some_and(|ne| ne.parent == path);
-
-    let mut cs =
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, expanded);
-    if should_force_open && !cs.is_open() {
-        cs.set_open(true);
+    // Force-open the directory if the inline new entry targets it.
+    if ctx.new_entry.as_ref().is_some_and(|ne| ne.parent == path) {
+        entry.expanded = true;
     }
-    // Apply a queued keyboard expand/collapse to egui's own state — the
-    // data-model flag alone does not move the header (see `pending_expand`).
-    if ctx.pending_expand.as_ref().is_some_and(|(p, _)| *p == path) {
-        if let Some((_, open)) = ctx.pending_expand.take() {
-            cs.set_open(open);
-            entry.expanded = open;
-        }
-    }
-
-    let show_hidden = ctx.show_hidden;
-    let workspace_root = ctx.workspace_root.to_path_buf();
+    let open = entry.expanded;
     let selected = ctx.is_selected(&path);
-    let root_index = ctx.root_index;
-    let (_toggle, header_inner, _body) = cs
-        .show_header(ui, |ui| {
-            let response = selectable_row(ui, selected, format!("{} {name}", icons::FOLDER))
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if response.clicked() {
-                *selection_request = Some(SelectedNode {
-                    root_index,
-                    path: path.clone(),
-                });
-            }
-            response.context_menu(|ui| {
-                show_directory_context_menu(
-                    ui,
-                    &path,
-                    &name,
-                    &workspace_root,
-                    ctx,
-                    new_entry_request,
-                    rename_request,
-                );
-            });
-            response
-        })
-        .body(|ui| {
-            // Lazy-load children on first expand. This blocks the UI
-            // thread for one frame while scanning, but the result is
-            // cached in `entry.children` so subsequent frames are free.
-            if entry.children.is_empty() {
-                let dir_path = entry.path.clone();
-                if let Ok(children) = super::scanner::scan_directory(&dir_path, show_hidden) {
-                    entry.children = children;
-                }
-            }
-            render_entry_list(ui, &path, &mut entry.children, ctx, selection_request);
-        });
 
-    if header_inner.inner.double_clicked() {
-        if let Some(mut state) = egui::collapsing_header::CollapsingState::load(ui.ctx(), id) {
-            let new_open = !state.is_open();
-            state.set_open(new_open);
-            state.store(ui.ctx());
-            entry.expanded = new_open;
-        }
+    let spec = TreeRowSpec {
+        depth,
+        name: &name,
+        kind: "folder",
+        icon: if open {
+            icons::FOLDER_OPEN
+        } else {
+            icons::FOLDER
+        },
+        icon_color: if open {
+            ctx.chrome.accent_dim
+        } else {
+            ctx.chrome.text_muted
+        },
+        chevron: Some(open),
+        selected,
+        semibold: selected,
+        text_color: if selected {
+            ctx.chrome.accent
+        } else {
+            ui.visuals().text_color()
+        },
+    };
+    let events = tree_row(ui, ctx.chrome, ctx.metrics, &spec);
+    if events.chevron_clicked || events.row_double_clicked {
+        entry.expanded = !open;
     }
+    if events.row_clicked {
+        *selection_request = Some(SelectedNode {
+            root_index: ctx.root_index,
+            path: path.clone(),
+        });
+    }
+    let workspace_root = ctx.workspace_root.to_path_buf();
+    events.response.context_menu(|ui| {
+        show_directory_context_menu(
+            ui,
+            &path,
+            &name,
+            &workspace_root,
+            ctx,
+            new_entry_request,
+            rename_request,
+        );
+    });
 
-    entry.expanded = egui::collapsing_header::CollapsingState::load(ui.ctx(), id)
-        .map_or(expanded, |s| s.is_open());
+    if entry.expanded {
+        // Lazy-load children on first expand. This blocks the UI thread for
+        // one frame while scanning, but the result is cached in
+        // `entry.children` so subsequent frames are free.
+        if entry.children.is_empty() {
+            let dir_path = entry.path.clone();
+            if let Ok(children) = super::scanner::scan_directory(&dir_path, ctx.show_hidden) {
+                entry.children = children;
+            }
+        }
+        render_entry_list(
+            ui,
+            &path,
+            &mut entry.children,
+            ctx,
+            selection_request,
+            depth + 1,
+        );
+    }
 }
 
 /// Renders a file tree entry with the file-layout context menu.
@@ -1169,24 +1429,39 @@ fn render_file_entry(
     ctx: &mut RenderCtx<'_>,
     rename_request: &mut Option<RenameEntryState>,
     selection_request: &mut Option<SelectedNode>,
+    depth: usize,
 ) {
-    let icon = file_icon(&entry.name);
     let selected = ctx.is_selected(&entry.path);
-    let response = selectable_row(ui, selected, format!("{icon} {}", entry.name));
+    let spec = TreeRowSpec {
+        depth,
+        name: &entry.name,
+        kind: "file",
+        icon: file_icon(&entry.name),
+        icon_color: ctx.chrome.text_muted,
+        chevron: None,
+        selected,
+        semibold: selected,
+        text_color: if selected {
+            ctx.chrome.accent
+        } else {
+            ui.visuals().text_color()
+        },
+    };
+    let events = tree_row(ui, ctx.chrome, ctx.metrics, &spec);
 
-    if response.clicked() {
+    if events.row_clicked {
         *selection_request = Some(SelectedNode {
             root_index: ctx.root_index,
             path: entry.path.clone(),
         });
     }
-    if response.double_clicked() {
+    if events.row_double_clicked {
         *ctx.action = SidebarAction::OpenFile(entry.path.clone());
     }
     let workspace_root = ctx.workspace_root.to_path_buf();
     let path = entry.path.clone();
     let name = entry.name.clone();
-    response.context_menu(|ui| {
+    events.response.context_menu(|ui| {
         show_file_context_menu(ui, &path, &name, &workspace_root, ctx, rename_request);
     });
 }
@@ -1198,6 +1473,7 @@ fn render_inline_new_entry_field(
     state: &mut NewEntryState,
     action: &mut SidebarAction,
     rename_just_confirmed: &mut bool,
+    depth: usize,
 ) -> bool {
     let icon = if state.is_dir {
         icons::FOLDER_PLUS
@@ -1210,6 +1486,7 @@ fn render_inline_new_entry_field(
         "ws-new-entry",
         &mut state.name,
         &mut state.select_on_focus,
+        depth,
     ) {
         InlineEntryOutcome::Submitted(name) if !name.is_empty() => {
             *action = if state.is_dir {
@@ -1235,6 +1512,7 @@ fn render_entry_list(
     entries: &mut [TreeEntry],
     ctx: &mut RenderCtx<'_>,
     selection_request: &mut Option<SelectedNode>,
+    depth: usize,
 ) {
     let mut new_entry_request: Option<NewEntryState> = None;
     let mut rename_request: Option<RenameEntryState> = None;
@@ -1248,7 +1526,7 @@ fn render_entry_list(
 
         if is_renaming {
             if let Some(ref mut state) = ctx.rename_entry {
-                if render_inline_rename(ui, state, ctx.action, ctx.rename_just_confirmed) {
+                if render_inline_rename(ui, state, ctx.action, ctx.rename_just_confirmed, depth) {
                     clear_rename = true;
                 }
             }
@@ -1264,10 +1542,18 @@ fn render_entry_list(
                     &mut new_entry_request,
                     &mut rename_request,
                     selection_request,
+                    depth,
                 );
             }
             EntryKind::File => {
-                render_file_entry(ui, entry, ctx, &mut rename_request, selection_request);
+                render_file_entry(
+                    ui,
+                    entry,
+                    ctx,
+                    &mut rename_request,
+                    selection_request,
+                    depth,
+                );
             }
         }
     }
@@ -1276,7 +1562,13 @@ fn render_entry_list(
     let mut clear_new = false;
     if let Some(ref mut state) = ctx.new_entry {
         if state.parent.as_path() == parent_path
-            && render_inline_new_entry_field(ui, state, ctx.action, ctx.rename_just_confirmed)
+            && render_inline_new_entry_field(
+                ui,
+                state,
+                ctx.action,
+                ctx.rename_just_confirmed,
+                depth,
+            )
         {
             clear_new = true;
         }
@@ -1968,11 +2260,292 @@ mod tests {
         assert_eq!(found.kind, EntryKind::File);
     }
 
+    // ── Phase-25 restyle: row geometry, header actions, width fallback ──
+
+    fn test_chrome_and_metrics() -> (ChromeTheme, Metrics) {
+        (ChromeTheme::default(), Metrics::default())
+    }
+
+    /// Maps the named semibold UI family onto the default proportional list
+    /// so rows using it lay out in a bare test context (the real family is
+    /// installed by `App::install_fonts`, which tests don't run).
+    fn register_semibold_alias(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        fonts.families.insert(
+            egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+            proportional,
+        );
+        ctx.set_fonts(fonts);
+    }
+
+    fn row_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 400.0),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+
+    /// Renders a plain folder row at the origin and returns what one
+    /// pointer interaction produced. `click` is run as move → press →
+    /// release across three frames so egui's click detection fires.
+    fn drive_tree_row(click: Option<egui::Pos2>) -> (f32, bool, bool) {
+        let ctx = egui::Context::default();
+        let (chrome_theme, metrics) = test_chrome_and_metrics();
+        let mut height = 0.0;
+        let mut chevron_clicked = false;
+        let mut row_clicked = false;
+        let mut frame = |events: Vec<egui::Event>| {
+            let _ = ctx.run_ui(row_input(events), |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                let spec = TreeRowSpec {
+                    depth: 0,
+                    name: "src",
+                    kind: "folder",
+                    icon: icons::FOLDER,
+                    icon_color: chrome_theme.text_muted,
+                    chevron: Some(false),
+                    selected: false,
+                    semibold: false,
+                    text_color: egui::Color32::WHITE,
+                };
+                let events_out = tree_row(ui, &chrome_theme, &metrics, &spec);
+                height = events_out.response.rect.height();
+                chevron_clicked |= events_out.chevron_clicked;
+                row_clicked |= events_out.row_clicked;
+            });
+        };
+        match click {
+            None => frame(Vec::new()),
+            Some(pos) => {
+                frame(vec![egui::Event::PointerMoved(pos)]);
+                frame(vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }]);
+                frame(vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }]);
+            }
+        }
+        (height, chevron_clicked, row_clicked)
+    }
+
     #[test]
-    fn queue_expand_flips_flag_and_records_override() {
-        // Defects A/B: keyboard expand must update BOTH the data-model flag and
-        // the one-shot `pending_expand` override that the next render pushes
-        // into egui's CollapsingState.
+    fn tree_row_is_26px_tall() {
+        let (height, _, _) = drive_tree_row(None);
+        assert!((height - TREE_ROW_HEIGHT).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn tree_row_click_on_chevron_reports_toggle_not_select() {
+        // Depth 0 puts the chevron band at x ∈ [12, 28).
+        let (_, chevron, row) = drive_tree_row(Some(egui::pos2(20.0, 13.0)));
+        assert!(chevron, "chevron band click toggles");
+        assert!(!row, "chevron click must not select the row");
+    }
+
+    #[test]
+    fn tree_row_click_on_body_reports_select() {
+        let (_, chevron, row) = drive_tree_row(Some(egui::pos2(120.0, 13.0)));
+        assert!(!chevron);
+        assert!(row, "body click selects the row");
+    }
+
+    /// Full `render_tree` drive: a body click on the root row must latch
+    /// selection and keyboard ownership (click-to-focus).
+    #[test]
+    fn render_tree_row_click_latches_selection_and_keyboard() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+        let mut sidebar = WorkspaceSidebar::new();
+        sidebar.tree.push(crate::workspace::tree::FolderRoot {
+            path: tmp.path().to_path_buf(),
+            entries: vec![make_file_entry(tmp.path(), "a.txt")],
+            expanded: false,
+        });
+
+        let ctx = egui::Context::default();
+        register_semibold_alias(&ctx);
+        let (chrome_theme, metrics) = test_chrome_and_metrics();
+        let frame = |events: Vec<egui::Event>, sidebar: &mut WorkspaceSidebar| {
+            let _ = ctx.run_ui(row_input(events), |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                let mut action = SidebarAction::None;
+                sidebar.render_tree(ui, &chrome_theme, &metrics, &mut action);
+            });
+        };
+        // The collapsed root row is the first (only) row: y ∈ [0, 26).
+        let pos = egui::pos2(120.0, 13.0);
+        frame(vec![egui::Event::PointerMoved(pos)], &mut sidebar);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut sidebar,
+        );
+        frame(
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut sidebar,
+        );
+
+        assert_eq!(
+            sidebar.selected,
+            Some(SelectedNode {
+                root_index: 0,
+                path: tmp.path().to_path_buf(),
+            })
+        );
+        assert!(sidebar.kbd_active, "row click hands the keyboard over");
+    }
+
+    /// Full `show()` drive through the real ScrollArea::both path with a
+    /// populated tree: content must come out with finite, sane width (the
+    /// scroll area reports unbounded space on its scrollable axes).
+    #[test]
+    fn show_renders_populated_tree_with_finite_row_geometry() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        let mut sidebar = WorkspaceSidebar::new();
+        sidebar.visible = true;
+        sidebar.workspace_name = "ws".to_string();
+        sidebar.tree.push(crate::workspace::tree::FolderRoot {
+            path: tmp.path().to_path_buf(),
+            entries: vec![
+                make_dir_entry(tmp.path(), "sub", false, vec![]),
+                make_file_entry(tmp.path(), "a.txt"),
+            ],
+            expanded: true,
+        });
+
+        let ctx = egui::Context::default();
+        register_semibold_alias(&ctx);
+        let (chrome_theme, metrics) = test_chrome_and_metrics();
+        let mut content_width = 0.0f32;
+        let _ = ctx.run_ui(row_input(Vec::new()), |ui| {
+            egui::Panel::left("test_sidebar")
+                .default_size(248.0)
+                .show_inside(ui, |ui| {
+                    sidebar.show(ui, &chrome_theme, &metrics);
+                    content_width = ui.min_rect().width();
+                });
+        });
+        assert!(
+            content_width.is_finite(),
+            "sidebar content width must be finite, got {content_width}"
+        );
+        assert!(
+            content_width < 10_000.0,
+            "sidebar content width exploded: {content_width}"
+        );
+    }
+
+    #[test]
+    fn effective_width_uses_metric_default_when_unresized() {
+        let sidebar = WorkspaceSidebar::new();
+        assert!((sidebar.effective_width(248.0) - 248.0).abs() < f32::EPSILON);
+        assert!((sidebar.effective_width(232.0) - 232.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_width_prefers_user_persisted_width() {
+        let mut sidebar = WorkspaceSidebar::new();
+        sidebar.set_width(320.0);
+        assert!((sidebar.effective_width(248.0) - 320.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_width_clamps_metric_default() {
+        let sidebar = WorkspaceSidebar::new();
+        assert!((sidebar.effective_width(900.0) - MAX_WIDTH).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn new_entry_target_falls_back_to_first_root() {
+        let (sidebar, _tmp, root) = sidebar_with_tree();
+        assert_eq!(sidebar.new_entry_target(), Some(root));
+    }
+
+    #[test]
+    fn new_entry_target_uses_selected_directory() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        let sub = root.join("sub");
+        sidebar.selected = Some(SelectedNode {
+            root_index: 0,
+            path: sub.clone(),
+        });
+        assert_eq!(sidebar.new_entry_target(), Some(sub));
+    }
+
+    #[test]
+    fn new_entry_target_uses_selected_files_parent() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        sidebar.selected = Some(SelectedNode {
+            root_index: 0,
+            path: root.join("sub").join("child.rs"),
+        });
+        assert_eq!(sidebar.new_entry_target(), Some(root.join("sub")));
+    }
+
+    #[test]
+    fn new_entry_target_none_without_roots() {
+        let sidebar = WorkspaceSidebar::new();
+        assert_eq!(sidebar.new_entry_target(), None);
+    }
+
+    #[test]
+    fn begin_new_entry_arms_inline_state_and_clears_rename() {
+        let (mut sidebar, _tmp, root) = sidebar_with_tree();
+        sidebar.rename_entry = Some(RenameEntryState {
+            original_path: root.join("a.txt"),
+            root_index: 0,
+            name: "a.txt".to_string(),
+            is_dir: false,
+            select_on_focus: false,
+        });
+
+        sidebar.begin_new_entry(&Some(root.clone()), true);
+
+        let state = sidebar.new_entry.as_ref().expect("new entry armed");
+        assert_eq!(state.parent, root);
+        assert!(state.is_dir);
+        assert!(state.select_on_focus);
+        assert!(sidebar.rename_entry.is_none(), "mutually exclusive");
+    }
+
+    #[test]
+    fn begin_new_entry_without_target_is_noop() {
+        let mut sidebar = WorkspaceSidebar::new();
+        sidebar.begin_new_entry(&None, false);
+        assert!(sidebar.new_entry.is_none());
+    }
+
+    #[test]
+    fn set_expanded_flips_flag_both_ways() {
+        // The renderer reads `expanded` flags directly, so the data-model
+        // flag is the whole story for keyboard expand/collapse.
         let tmp = tempfile::tempdir().unwrap();
         let sub = make_dir_entry(tmp.path(), "src", false, vec![]);
         let mut sidebar = WorkspaceSidebar::new();
@@ -1984,26 +2557,14 @@ mod tests {
         let target = tmp.path().join("src");
 
         assert!(!sidebar.is_expanded(&target));
-        assert!(sidebar.pending_expand.is_none());
-
-        sidebar.queue_expand(&target, true);
+        sidebar.set_expanded(&target, true);
         assert!(sidebar.is_expanded(&target), "model flag set");
-        assert_eq!(
-            sidebar.pending_expand,
-            Some((target.clone(), true)),
-            "render override recorded so egui follows the model",
-        );
-
-        // Collapsing records the inverse override.
-        sidebar.queue_expand(&target, false);
+        sidebar.set_expanded(&target, false);
         assert!(!sidebar.is_expanded(&target));
-        assert_eq!(sidebar.pending_expand, Some((target.clone(), false)));
     }
 
     #[test]
-    fn toggle_expanded_for_queues_override() {
-        // Enter-on-folder routes through toggle → queue_expand, so it must also
-        // arm the override (the bug was that it only touched the data model).
+    fn toggle_expanded_for_flips_flag() {
         let tmp = tempfile::tempdir().unwrap();
         let sub = make_dir_entry(tmp.path(), "src", false, vec![]);
         let mut sidebar = WorkspaceSidebar::new();
@@ -2016,7 +2577,8 @@ mod tests {
 
         sidebar.toggle_expanded_for(&target);
         assert!(sidebar.is_expanded(&target));
-        assert_eq!(sidebar.pending_expand, Some((target.clone(), true)));
+        sidebar.toggle_expanded_for(&target);
+        assert!(!sidebar.is_expanded(&target));
     }
 
     #[test]
@@ -2125,7 +2687,6 @@ mod tests {
         let action = sidebar.kbd_nav_activate(node);
         assert!(action.is_none());
         assert!(!sidebar.is_expanded(&sub), "an expanded dir collapses");
-        assert_eq!(sidebar.pending_expand, Some((sub, false)));
     }
 
     #[test]
@@ -2176,7 +2737,6 @@ mod tests {
         let idx = node_idx(&nodes, &sub);
         sidebar.kbd_nav_expand_or_descend(&nodes, idx);
         assert!(sidebar.is_expanded(&sub));
-        assert_eq!(sidebar.pending_expand, Some((sub, true)));
     }
 
     #[test]
@@ -2201,9 +2761,10 @@ mod tests {
         let nodes = sidebar.visible_nodes();
         let idx = node_idx(&nodes, &root.join("a.txt"));
         let before = sidebar.selected.clone();
+        let expanded_before = sidebar.is_expanded(&root.join("sub"));
         sidebar.kbd_nav_expand_or_descend(&nodes, idx);
         assert_eq!(sidebar.selected, before);
-        assert!(sidebar.pending_expand.is_none());
+        assert_eq!(sidebar.is_expanded(&root.join("sub")), expanded_before);
     }
 
     #[test]
@@ -2214,7 +2775,6 @@ mod tests {
         let idx = node_idx(&nodes, &sub);
         sidebar.kbd_nav_collapse_or_ascend(&nodes, idx);
         assert!(!sidebar.is_expanded(&sub));
-        assert_eq!(sidebar.pending_expand, Some((sub, false)));
     }
 
     #[test]
@@ -2388,5 +2948,101 @@ mod tests {
         sidebar.kbd_active = true;
         let action = drive_kbd_nav(&mut sidebar, egui::Key::ArrowDown);
         assert!(action.is_none());
+    }
+
+    // ── Bug fix: header buttons painted over the workspace name when the
+    //    sidebar was narrow (label rendered first at natural width; the
+    //    RTL button cluster overflowed leftwards over it, unclipped). ──
+
+    /// Builds a kittest harness rendering only the sidebar at `width`.
+    ///
+    /// The first pass only registers the semibold font alias — `set_fonts`
+    /// takes effect at the NEXT pass begin, and the harness runs a pass
+    /// during construction, so registering after build panics on the
+    /// unbound named family. Rendering starts from the second pass.
+    fn header_harness(width: f32, name: &str) -> egui_kittest::Harness<'static> {
+        let mut sidebar = WorkspaceSidebar::new();
+        sidebar.workspace_name = name.to_string();
+        let (chrome_theme, metrics) = test_chrome_and_metrics();
+        let mut fonts_ready = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(width, 400.0))
+            .build_ui(move |ui| {
+                if !fonts_ready {
+                    register_semibold_alias(ui.ctx());
+                    fonts_ready = true;
+                    return;
+                }
+                let _ = sidebar.show(ui, &chrome_theme, &metrics);
+            });
+        harness.run();
+        harness
+    }
+
+    /// The four header action buttons, queried by accessible label.
+    fn header_button_rects(harness: &egui_kittest::Harness<'_>) -> Vec<egui::Rect> {
+        use egui_kittest::kittest::Queryable;
+        ["More Actions", "Collapse All", "New Folder", "New File"]
+            .iter()
+            .map(|label| harness.get_by_label(label).rect())
+            .collect()
+    }
+
+    #[test]
+    fn narrow_header_label_does_not_run_under_buttons() {
+        use egui_kittest::kittest::{By, Queryable};
+        let harness = header_harness(160.0, "official workspace with a long name");
+        let buttons = header_button_rects(&harness);
+        let label_rect = harness.get(By::new().label_contains("OFF")).rect();
+        let leftmost_button = buttons
+            .iter()
+            .map(|r| r.min.x)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            label_rect.max.x <= leftmost_button + 1.0,
+            "label (right edge {:.1}) must stop before the button cluster \
+             (left edge {:.1})",
+            label_rect.max.x,
+            leftmost_button
+        );
+        for rect in &buttons {
+            assert!(
+                rect.intersect(label_rect).width() <= 1.0,
+                "no button may overlap the label"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_header_keeps_all_buttons_inside_the_panel() {
+        let harness = header_harness(160.0, "official workspace with a long name");
+        for rect in header_button_rects(&harness) {
+            assert!(
+                rect.min.x >= -1.0 && rect.max.x <= 161.0,
+                "button {rect:?} must stay inside the 160px sidebar"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_header_still_shows_label_and_buttons() {
+        use egui_kittest::kittest::{By, Queryable};
+        let harness = header_harness(400.0, "workspace");
+        let label_rect = harness.get(By::new().label_contains("WORKSPACE")).rect();
+        assert!(label_rect.width() > 0.0, "label must be visible");
+        assert_eq!(header_button_rects(&harness).len(), 4);
+    }
+
+    #[test]
+    fn header_label_is_sanitized() {
+        use egui_kittest::kittest::{By, Queryable};
+        // A newline in the stored name must not reach the label raw.
+        let harness = header_harness(400.0, "evil\nname");
+        assert!(
+            harness
+                .query(By::new().label_contains("EVIL\u{FFFD}NAME"))
+                .is_some(),
+            "control characters must be replaced with U+FFFD"
+        );
     }
 }
