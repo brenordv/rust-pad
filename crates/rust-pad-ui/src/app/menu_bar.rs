@@ -446,6 +446,12 @@ impl App {
                 ui.close();
             }
             if ui
+                .checkbox(&mut self.show_breadcrumb, "Show Breadcrumb")
+                .clicked()
+            {
+                ui.close();
+            }
+            if ui
                 .checkbox(&mut self.restore_open_files, "Restore Files on Startup")
                 .clicked()
             {
@@ -492,7 +498,7 @@ impl App {
                 self.remove_split();
                 ui.close();
             }
-            // Synchronized scrolling — only meaningful when split is active.
+            // Synchronized scrolling: only meaningful when split is active.
             // The flag itself is persisted in AppConfig regardless, so
             // disabling/re-enabling the split preserves the user's choice.
             let mut sync_enabled = self.sync_scroll_enabled;
@@ -513,7 +519,6 @@ impl App {
         ui.menu_button("Theme", |ui| {
             let ctx_clone = ctx.clone();
 
-            // "System" entry
             if ui
                 .radio(self.theme_ctrl.theme_mode.is_system(), "System")
                 .clicked()
@@ -523,7 +528,6 @@ impl App {
             }
             ui.separator();
 
-            // Dynamic theme entries
             let theme_names: Vec<String> = self
                 .theme_ctrl
                 .available_themes
@@ -587,7 +591,6 @@ impl App {
             }
             ui.separator();
 
-            // List of open tabs
             let tab_count = self.tabs.tab_count();
             let active = self.tabs.active;
             for idx in 0..tab_count {
@@ -607,12 +610,7 @@ impl App {
     }
 
     fn show_help_menu(&mut self, ui: &mut egui::Ui) {
-        let help_label = if self.problems_unread > 0 {
-            "Help \u{26A0}"
-        } else {
-            "Help"
-        };
-        ui.menu_button(help_label, |ui| {
+        let response = ui.menu_button("Help", |ui| {
             let problems_label = if self.problems_unread > 0 {
                 format!("Problems ({})", self.problems_unread)
             } else {
@@ -631,6 +629,17 @@ impl App {
                 ui.close();
             }
         });
+
+        // Unread problems: paint a small warn dot at the item's top-right
+        // corner to point the user at Help > Problems.
+        if self.problems_unread > 0 {
+            let rect = response.response.rect;
+            ui.painter().circle_filled(
+                rect.right_top() + egui::Vec2::new(-1.0, 5.0),
+                3.0,
+                self.theme_ctrl.chrome.warn,
+            );
+        }
     }
 
     fn show_workspace_menu(&mut self, ui: &mut egui::Ui) {
@@ -686,7 +695,6 @@ impl App {
 
             ui.separator();
 
-            // Toggle sidebar visibility
             let sidebar_label = if self.workspace_sidebar.visible {
                 "Hide Sidebar"
             } else {
@@ -703,7 +711,6 @@ impl App {
                 ui.close();
             }
 
-            // Delete workspace submenu
             if !workspaces.is_empty() {
                 ui.separator();
                 ui.menu_button("Delete Workspace", |ui| {

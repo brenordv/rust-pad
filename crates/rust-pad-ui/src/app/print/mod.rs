@@ -11,11 +11,11 @@
 //!
 //! The module is split into four files:
 //!
-//! - [`layout`] — pure pagination + wrapping. No dependencies on egui or
+//! - [`layout`]: pure pagination + wrapping. No dependencies on egui or
 //!   `printpdf`, fully unit-tested.
-//! - [`pdf`] — pure `printpdf` wiring. Also unit-tested.
-//! - [`font`] — embedded TTF bytes + glyph advance ratio.
-//! - [`job`] — background worker thread that runs the CPU-bound
+//! - [`pdf`]: pure `printpdf` wiring. Also unit-tested.
+//! - [`font`]: embedded TTF bytes + glyph advance ratio.
+//! - [`job`]: background worker thread that runs the CPU-bound
 //!   generation off the UI thread.
 //!
 //! The app layer lives in [`app`](self::app) and exposes three methods on

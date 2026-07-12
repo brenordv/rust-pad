@@ -1,8 +1,23 @@
-//! About dialog showing application information, version, author, and links.
+//! About dialog showing application information, version, author, links,
+//! and the third-party font license notices required by the OFL.
 
 use eframe::egui;
 
 use super::App;
+use crate::app::chrome::{self, DialogOptions};
+
+/// Bundled font families and their OFL-1.1 license texts (which carry the
+/// upstream copyright lines), shown under Third-Party Notices.
+const THIRD_PARTY_FONT_LICENSES: [(&str, &str); 2] = [
+    (
+        "IBM Plex Sans",
+        include_str!("../../assets/fonts/LICENSE-IBMPlexSans-OFL.txt"),
+    ),
+    (
+        "JetBrains Mono",
+        include_str!("../../assets/fonts/LICENSE-JetBrainsMono-OFL.txt"),
+    ),
+];
 
 impl App {
     /// Renders the About dialog window.
@@ -14,15 +29,21 @@ impl App {
         }
 
         let mut open = true;
-        egui::Window::new("About rust-pad")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(380.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
-            .show(ctx, |ui| {
+        let chrome_theme = self.theme_ctrl.chrome.clone();
+        let metrics = self.theme_ctrl.metrics.clone();
+        chrome::show_dialog(
+            ctx,
+            "About rust-pad",
+            &mut open,
+            &chrome_theme,
+            &metrics,
+            DialogOptions {
+                default_width: 380.0,
+                center: true,
+                ..Default::default()
+            },
+            |ui| {
                 ui.vertical_centered(|ui| {
-                    // Logo
                     if let Some(texture) = &self.about_logo {
                         let size = egui::Vec2::new(96.0, 96.0);
                         ui.image(egui::load::SizedTexture::new(texture.id(), size));
@@ -70,13 +91,40 @@ impl App {
                     ));
                     ui.label(format!("Built with Rust {}", Self::rustc_version()));
                 });
-            });
+
+                ui.add_space(8.0);
+                ui.separator();
+                Self::show_third_party_notices(ui);
+            },
+        );
 
         if !open {
             self.about_open = false;
         }
 
         self.about_open
+    }
+
+    /// Renders the Third-Party Notices section: the bundled fonts and their
+    /// full OFL-1.1 license texts.
+    fn show_third_party_notices(ui: &mut egui::Ui) {
+        ui.collapsing("Third-Party Notices", |ui| {
+            ui.label(
+                "This application bundles the following fonts, used under the \
+                 SIL Open Font License, Version 1.1:",
+            );
+            ui.add_space(4.0);
+            for (name, license_text) in THIRD_PARTY_FONT_LICENSES {
+                ui.collapsing(name, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(name)
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(license_text).small());
+                        });
+                });
+            }
+        });
     }
 
     /// Loads the logo texture for the About dialog.

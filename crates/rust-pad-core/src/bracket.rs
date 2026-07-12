@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn search_limit_just_enough() {
         let text = format!("({})", "x".repeat(3));
-        let b = buf(&text); // "(xxx)" — `)` is at index 4
+        let b = buf(&text); // "(xxx)"; `)` is at index 4
         let pair = find_matching_bracket_with_limit(&b, 0, 4).unwrap();
         assert_eq!(pair, BracketPair { open: 0, close: 4 });
     }
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn prefers_char_at_cursor_over_char_before() {
-        // "][" — cursor at 1 is on `[`, char before is `]`
+        // "][": cursor at 1 is on `[`, char before is `]`
         // Should match `[` first (char at cursor) since it's checked first
         let b = buf("][x]");
         let pair = find_matching_bracket(&b, 1).unwrap();
@@ -332,7 +332,7 @@ mod tests {
     fn bracket_inside_string_matches_naively() {
         // Naive matching doesn't know about string literals
         let b = buf("(\")\")");
-        // `(` at 0: walk forward sees `)` at 2 first — depth goes to 0
+        // `(` at 0: walk forward sees `)` at 2 first, so depth goes to 0
         let pair = find_matching_bracket(&b, 0).unwrap();
         assert_eq!(pair, BracketPair { open: 0, close: 2 });
     }

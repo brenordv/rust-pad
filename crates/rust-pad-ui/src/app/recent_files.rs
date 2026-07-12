@@ -177,7 +177,7 @@ mod tests {
         mgr.track(&b);
         // b was tracked last, so it should be first
         assert!(mgr.files[0].ends_with("b.txt"));
-        // Re-track a — it should move back to front
+        // Re-track a: it should move back to front
         mgr.track(&a);
         assert!(mgr.files[0].ends_with("a.txt"));
         assert_eq!(mgr.files.len(), 2);

@@ -24,7 +24,6 @@ impl App {
     pub(crate) fn show_editor_context_menu(&mut self, ui: &mut egui::Ui) {
         let has_selection = self.tabs.active_doc().selected_text().is_some();
 
-        // Cut / Copy / Paste / Delete
         if ui
             .add_enabled(has_selection, egui::Button::new("Cut"))
             .clicked()
@@ -52,7 +51,6 @@ impl App {
         }
         ui.separator();
 
-        // Select All / Invert Selection
         if ui.button("Select All").clicked() {
             let doc = self.tabs.active_doc_mut();
             doc.cursor.select_all(&doc.buffer);
@@ -64,9 +62,7 @@ impl App {
         }
         ui.separator();
 
-        // Global Operations (always available)
         self.show_operations_submenu(ui, OperationScope::Global);
-        // Selection Operations (disabled if no selection)
         ui.add_enabled_ui(has_selection, |ui| {
             self.show_operations_submenu(ui, OperationScope::Selection);
         });

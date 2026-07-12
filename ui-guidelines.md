@@ -1,146 +1,422 @@
-# Executive Summary
+# rust-pad UI Guidelines
 
-Design the Rust notepad with Material Design principles adapted for desktop. **Use native menus and toolbars** instead of Material mobile navigation. **Follow platform conventions (Windows/macOS/Linux)** for menus, dialogs, and shortcuts. **Map Material components to desktop UI** (see table below) and adjust sizes, padding, colors, and states to match desktop norms. **Implement full keyboard support** (Alt/Cmd shortcuts, tab order, drag/drop, focus rings). Ensure **accessibility**: high-contrast text (WCAG 4.5:1), proper labels for screen readers, and scalable UI. Provide **light and dark themes** that integrate with system settings; use recommended fonts (e.g. Segoe UI on Windows, San Francisco on macOS, Roboto/Inter cross-platform) at readable sizes (≈16px body, 20–24px headings). **Use a consistent spacing grid** (e.g. 8px) and allow window resizing (target minimum 800×600)【50†L99-L104】【51†L1-L4】. **Animate sparingly** (100–300ms fades/slides) and respect “reduce motion” settings. Finally, include a comprehensive testing matrix (OS vs. feature) and QA checklist (contrast, keyboard nav, hover states【64†L139-L144】【64†L116-L123】). The following sections give direct, actionable guidelines and specs for each aspect.
+> Updated for the current redesign. Supersedes the earlier "Material-on-desktop"
+> draft: rust-pad no longer targets Material's purple palette or mobile
+> component set. It has its **own** teal-accented desktop identity, built to be
+> implemented cleanly in **Rust + egui**, and shipped as user-loadable themes.
 
-## Material Design on Desktop (Applicability)
+---
 
-- **Use Material’s visual language** (grid spacing, iconography, color roles) for consistency, but **adapt to desktop UX patterns**. For example, replace Material *Bottom Navigation* with a standard menu bar or sidebar.
-- **Replace FABs:** Desktop apps rarely use floating action buttons【5†L19-L22】. Instead, place primary actions (New, Open, Save) as toolbar buttons or menu items. If only one main action exists, a large button in the toolbar is acceptable.
-- **Leverage Material spacing:** Use an 8px (or 4px) grid for layout. Maintain at least 8px padding around controls. E.g., set 16px margin between editor and window edges.
-- **Maintain Material theming:** Use Material’s color tokens (primary, secondary, error, etc.), but allow overriding by system theme. For a generic notepad, pick a neutral primary (e.g. Material Blue) and neutral background (light or dark). Define CSS tokens (e.g. `--primary: #6200EE; --on-primary: #FFFFFF;`).
+## 1. Executive Summary
 
-## Platform-Specific Adaptations
+rust-pad is a keyboard-first, multi-document desktop notepad. The redesign keeps
+the existing mental model (menu bar, tabs, editor, status bar) and modernizes the
+*styling* while adding three structural pieces borrowed from professional IDEs
+(JetBrains Rider as the reference):
 
-- **Windows:** Use a window-embedded menu bar (File, Edit, View, Help). Place **File, Edit, View, Help** menus at top. Use Alt+letter mnemonics for menus and commands【25†L56-L60】. Minimize and maximize buttons in title bar; test at standard DPI (100%, 125%, 150%)【50†L99-L104】.
-- **macOS:** Use the global menu bar. Place **Preferences** under the app menu (e.g. “Notepad > Preferences” instead of File). Use Command (⌘) shortcuts (e.g. ⌘C, ⌘S) and standard macOS UI fonts (San Francisco). Provide “Open Recent” in File menu as per macOS norms.
-- **Linux (GTK/KDE):** Follow Windows conventions. Use in-window menu bar and GTK style. Ensure menus and dialogs use native theming (e.g. Adwaita). Support high-DPI scaling similarly to Windows.
-- **Dialogs:** On all platforms, use native file-open/save and alert dialogs. Keep dialogs modal and appropriately sized (e.g. ~400×300px for alerts). Title dialogs clearly (e.g. “Open File”). Provide Cancel and OK buttons on dialogs.
-- **Window Behavior:** Allow windows to be resizable (maximize enabled). Set minimum window size to accommodate UI (∼800×600). On Windows, avoid the old resize gripper – modern windows are resizable by default【50†L135-L142】.
+1. a slim **activity bar** on the far left,
+2. a resizable **Workspace explorer** (folder/file tree),
+3. a **breadcrumb** strip above the editor.
 
-## Component Mapping (Material → Desktop)
+Two visual directions are defined and should not be mixed within a build:
 
-| Material Component           | Desktop Equivalent                      | Actionable Adaptation                                                                                                                                                                                                                         |
-|------------------------------|-----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Top App Bar**              | **Window Title Bar + Toolbar**          | Include document title in title bar. Place common actions (New/Open/Save) as toolbar icons next to title. Keep toolbar background solid (no transparent scroll).                                                                              |
-| **Bottom Navigation**        | **Sidebar / No direct equivalent**      | Omit. Use a left sidebar or top tabs if multiple views are needed.                                                                                                                                                                            |
-| **Floating Action Button**   | **Toolbar Button / Primary Button**     | Remove FAB. Put primary action (e.g. “New File”) as a toolbar icon or primary menu item.                                                                                                                                                      |
-| **Buttons (Contained/Text)** | **Desktop Buttons**                     | Use standard buttons (flat or raised). Default size ≥32×32 px on toolbar, larger (≥48×48) if emphasizing. Provide hover (lighten background) and active states.                                                                               |
-| **Menus**                    | **Menu Bar & Context Menus**            | Implement standard cascaded menus: File, Edit, etc. Group similar items (e.g. multiple New* commands) into submenus【25†L64-L71】. Use separators (―) between groups【25†L52-L60】. Do **not** hide commands; disable if unavailable【25†L81-L88】. |
-| **Dialogs**                  | **Modal Dialog Windows**                | Use native dialogs. E.g. file picking, confirmation dialogs. Keep them smaller than main window. Ensure text and buttons follow desktop metrics.                                                                                              |
-| **Text Fields / Editor**     | **Multiline Text Edit Control**         | Use a scrollable text view. Ensure padding ~8px inside. Support typical shortcuts (Ctrl/Cmd+Z/Y, Ctrl/Cmd+A/C/V). Use monospace or sans font, 16px default.                                                                                   |
-| **Checkboxes / Radios**      | **Standard Check/Radio Controls**       | Use OS-native checkboxes and radio buttons for options (e.g. word wrap toggle). Maintain Material color for checked state (blue on light theme).                                                                                              |
-| **Switch**                   | **Toggle Switch**                       | Use switch control for boolean prefs (e.g. Show Line Numbers). Follow desktop style (e.g. off/on labels).                                                                                                                                     |
-| **Tabs**                     | **Window Tabs**                         | Use a tab bar at top of document area if multi-document. Follow platform tab style (e.g. Chrome-like on Windows, unified style on Mac).                                                                                                       |
-| **Bottom Sheet**             | **Drawer or Panel**                     | Not applicable. Use side panels or dialogs for additional content (e.g. search).                                                                                                                                                              |
-| **Snackbars/Toasts**         | **Status Bar Messages / Notifications** | Show non-critical messages in status bar (e.g. “File saved”). For critical alerts use dialogs. Avoid mobile-style toasts unless subtle desktop notifications.                                                                                 |
-| **Icons**                    | **Toolbar Icons**                       | Provide 24×24px icons (SVG/PNG) in a consistent style. Use Material icons (outlined style) or system glyphs. For dark mode, use white/light icons; for light mode use dark icons.                                                             |
-| **Typography**               | **System Font**                         | Use a legible sans-serif. On Windows use Segoe UI; on Mac SF Pro; cross-platform, Roboto/Inter. Body text ~16px, headings 18–24px. Use 1.5 line-height.                                                                                       |
+| Direction                  | Feel                         | Corner radius | Density | Base bg (dark) | Accent (dark) |
+|----------------------------|------------------------------|---------------|---------|----------------|---------------|
+| **Aurora Teal** (`aurora`) | Soft, rounded, blue-charcoal | 6–7 px        | Roomy   | `#151A20`      | `#2DD4BF`     |
+| **Graphite** (`graphite`)  | Sharp, dense, near-black     | 2–3 px        | Tight   | `#0E0F13`      | `#2FE3AE`     |
 
-*Rationale:* Follow official guidelines: unique mnemonic keys for menus【25†L56-L60】, use one level of cascading【25†L64-L71】, and include all commands even if disabled【25†L81-L88】. The table above maps each Material UI pattern to standard desktop patterns.
+Both ship **full light + dark themes**, integrate with the OS light/dark
+preference, meet **WCAG AA contrast (≥4.5:1)** for body text, support **full
+keyboard + numpad** control, and animate sparingly (100–250 ms, honoring
+"reduce motion"). Everything here is expressed as concrete egui values and as
+entries in rust-pad's existing theme-JSON schema so a theme can be reproduced
+without touching code.
 
-## Component Specifications
+---
 
-- **Buttons:** Minimum 32×32 px (24dp icon + 8px padding). Larger (e.g. 40×40 px) for emphasis. Use **Fill Color** for primary (e.g. #6200EE on light, #BB86FC on dark) with white text, and **Outlined** or **Text** style for secondary actions. Hover: increase brightness by ~10%. Press: darken background (use 200ms animation). Disabled: gray (#D1D1D1) background with 50% opacity text.
-- **Text Editor:** Background white (#FFFFFF) in light theme, dark gray (#121212) in dark. Text color black/#000000 or white/#FFFFFF respectively. Use a 1px inset border (#CCCCCC) around the editor. Padding: 8px all around. Default font 16px (roboto/sans-serif). Cursor color matches accent.
-- **Menus:** Use 14px font. Menu item height ~24px. Separator: 1px gray line. Checked state: use a checkmark icon (or ▶ for radio) on left. Mnemonic underline on Windows (enable underlines under Alt key【25†L56-L60】). Disabled items: 50% opacity.
-- **Dialog Windows:** Title font 16px bold. Content font 14px. Window padding: 12px. Buttons in dialog: 32×32 px, 8px spacing between. On Windows, use “OK/Cancel” order (OK on left); on macOS, use “Cancel” on left.
-- **Icons:** Provide at least 2 pixel densities (1×, 2×). Align icons on an 24px grid. Use color tokens or match theme (blue for “info” icons, red #B00020 for error). Ensure alt text for accessibility.
-- **Colors:** Define tokens, e.g. `--color-primary: #6200EE; --color-secondary: #03DAC6; --color-bg-light: #FFFFFF; --color-bg-dark: #121212; --color-surface: #F5F5F5; --color-error: #B00020`. Use them consistently. Maintain contrast ≥4.5:1 for text【64†L139-L144】.
+## 2. Design Language
 
-## Interaction Rules
+- **Accent:** teal/green. Aurora `#2DD4BF`, Graphite `#2FE3AE`. On light themes
+  the accent is darkened (~0.6×) so text/icons on light surfaces keep contrast.
+  Accent is used for: active tab top-bar, active tree/tab selection, cursor,
+  primary buttons, focus rings, links, and "unread/active" counts. **Never** use
+  it as a large fill behind body text.
+- **Neutrals:** a single desaturated blue-charcoal ramp (Aurora) or a near-black
+  gray ramp (Graphite). No pure `#000`/`#FFF` chrome; editor surfaces may reach
+  `#FBFCFE` (light) / `#151A20`–`#0E0F13` (dark).
+- **Typography:**
+    - **UI:** IBM Plex Sans (400/500/600). Fallbacks by platform: Segoe UI
+      (Windows), SF Pro (macOS), Inter/Roboto (Linux).
+    - **Editor + code + timestamps:** JetBrains Mono (400/500).
+    - Sizes: UI body **13 px**, section labels 11 px (uppercase, +0.13em tracking),
+      dialog titles 14 px/600, editor **13 px** at line-height 1.62 (Aurora) /
+      1.55 (Graphite). Never below 11 px for chrome, 12 px for content.
+- **Grid & spacing:** 8-px base grid (4-px allowed for dense inline rows).
+  Chrome row heights: title bar 38, menu bar 32, tab strip 38, breadcrumb 29,
+  status bar 27, tree row 26, activity item 38.
+- **Elevation:** flat panels separated by **1-px borders**, not shadows. Reserve
+  soft shadows for floating surfaces only (menus, dialogs).
+- **Iconography:** 1.6-px stroke line icons on a 24-px grid (18–19 px drawn in
+  chrome, 14–15 px in the tree/dialogs). Outline style; color follows the
+  surface's text/muted role, accent only when active.
 
-- **Keyboard Shortcuts:** Support standard shortcuts (Ctrl/Cmd+N/O/S for new/open/save; Ctrl/Cmd+Z/Y undo/redo; Ctrl/Cmd+C/V/X copy/paste/cut; Ctrl/Cmd+F find; Ctrl/Cmd+A select all). Show shortcuts in menu hints.
-- **Mnemonics:** Assign Alt+Letter on Windows menus (e.g. Alt+F for File)【25†L56-L60】. On macOS, use Cmd modifiers instead and display ⌘ symbol.
-- **Focus & Tab Order:** Ensure logical tabbing through all controls. Visible focus highlight (glow/outline) on focused buttons, inputs, menus. For example, tab order: (Menu Bar) → Toolbar → Editor → Status Bar.
-- **Drag & Drop:** Allow dragging a file onto the window to open it. Enable text drag-selection to move text. Show an appropriate drop cursor/icon.
-- **Clipboard:** Implement Cut/Copy/Paste on text selection and on files (e.g. copy file path). Use system clipboard APIs so keyboard shortcuts work.
-- **Window Management:** Add Close/Minimize/Maximize in the title bar. Default action on close with unsaved changes: prompt “Save changes?” dialog. Remember last window position/size. On multi-monitor setups, open on the active monitor.
+---
 
-## Accessibility Checklist
+## 3. App Structure & Layout
 
-- **Keyboard Navigation:** Verify all functionality is operable via keyboard alone. Tab between buttons, menus, and editor fields. Focus must always be visible.
-- **Screen Reader Labels:** Provide `aria-label` or equivalent for all buttons/menus (e.g. “New File”, “Open”). Group related controls (e.g. radio buttons with same name). Announce error dialogs.
-- **Contrast:** Ensure text/icons meet WCAG 2.0 contrast ratio ≥4.5:1【64†L139-L144】 (e.g. black on white or white on dark). Provide a high-contrast theme if possible.
-- **Scalability:** Test UI at 125% and 150% scale (120dpi, 144dpi). Text and controls should reflow and remain usable【50†L99-L104】.
-- **Accessible Fonts:** Use at least 16px base font. Avoid small text (<12px). Support system font-size adjustments if OS allows.
-- **Test Assistive Tech:** Verify with screen readers (NVDA/JAWS on Windows, VoiceOver on Mac). All actions should be announced.
-- **Spacing and Hit Targets:** Ensure clickable targets are ≥20×20 px. There should be ≥8px spacing around interactive elements to avoid crowding【64†L129-L134】.
+Left-to-right, the main window is:
 
-## Theming & Branding
-
-- **Light/Dark Themes:** Provide both. In **light mode**, use dark text (#000000) on white (#FFFFFF) surfaces. In **dark mode**, use white text (#FFFFFF) on dark backgrounds (#121212). Use semi-transparent surfaces for raised elements (e.g. toolbar #222222 with 80% opacity).
-- **System Integration:** Detect OS dark/light preference and switch themes. For Windows 10+, follow system accent color for highlights (e.g. focus ring). On macOS, sync with system’s Light/Dark.
-- **Fonts:** Use UI fonts: Windows – Segoe UI (14–16px body), macOS – SF Pro (13–15px). For cross-OS, Roboto or Inter (16px) is a good neutral choice【55†L49-L53】. Use bold for headings and toolbar titles.
-- **Iconography:** Use Material Icons (outline style) or system icons. Size icons at 24×24 px for toolbars, 16×16 px for dialogs/menus. Provide both filled and outline variants for hover/active. Maintain consistent stroke weight.
-- **Color Tokens:** Define and reuse tokens (as above). For example, `--theme-accent` used for link text and active states. Update colors in one place to maintain consistency.
-
-## Layout, Spacing, Density
-
-- **Grid:** Base spacing = 8px. Align all elements to this grid. For example, make toolbar height 48px, editor margin 8px, status bar 24px high.
-- **Window Size:** Design for ≥800×600 px. Make all dialogs and menus functional at 640×480.
-- **Density:** Desktop allows tighter layout than mobile. Controls can be closer (4px apart horizontally if needed) but don’t go below 4px. Prefer 8px for vertical spacing between form fields.
-- **Responsive Behavior:** If window is wide, use two-column layouts (e.g. tool settings beside editor). If narrow, stack elements vertically and use scrolling.
-- **Readability:** Limit text line length in editor to ~65 characters for comfort【51†L1-L4】. Wrap text at window edge. Avoid horizontal scrolling of documents if possible.
-
-## Animations & Motion
-
-- **Timing:** Use subtle transitions for showing/hiding panels or dialogs (fade 150–250ms). Animate progress (e.g. progress bar fill in 300ms).
-- **Reduce Motion:** Check OS reduce-motion setting. If enabled, **disable all nonessential animations** and use simple state changes.
-- **Type of Motion:** Avoid page swipes or slides; use cross-fade or slide-ins. For example, toolbar menus can fade in/out quickly.
-- **Feedback:** Provide instant visual feedback on actions (button press highlight) and only small delays (≤100ms) if needed.
-
-## Testing & QA
-
-**Accessibility QA Checklist:**
-- Test keyboard-only workflow: menus, dialogs, toolbar all reachable by Tab/Alt/Cmd.
-- Verify focus indicators are visible.
-- Check color contrast with a tool (accept ≥4.5:1)【64†L139-L144】.
-- Validate screen-reader announcements.
-- Confirm scalable layouts at high DPI.
-
-**Functional Tests:**
-- **File Operations:** Test Open, Save, Save As on each OS’s default directories.
-- **Editing:** Verify Undo/Redo, Copy/Paste, Find/Replace work.
-- **Menus & Shortcuts:** Ensure every menu item corresponds to a shortcut (and vice versa). Test Alt/Cmd shortcuts.
-- **Drag/Drop:** Try dropping a file into the app. Test dragging text.
-- **Dialogs:** Open preferences, error dialogs (e.g. Cancel Save). Buttons do what they promise.
-- **Window Management:** Maximize, minimize, close, multi-monitor. State (unsaved changes) properly handled on close.
-- **Theme Switching:** Toggle OS theme; verify app switches color scheme.
-
-**OS × Feature Testing Matrix:**
-
-| Feature / OS      | Windows           | macOS             | Linux (GTK)        |
-|-------------------|-------------------|-------------------|--------------------|
-| File Open/Save    | ✔ Open native dialog; ✓ Save works | ✔ Uses macOS dialog; ✓ Save works | ✔ Uses GTK dialog; ✓ Save works |
-| Undo/Redo (CtrlZ/Y) | ✔ Works; Shortcut shown in Edit menu | ✔ ⌘Z/⇧⌘Z work | ✔ Works |
-| Copy/Paste (CtrlC/V)| ✔ Works; Confirm Clipboard | ✔ ⌘C/⌘V work | ✔ Works |
-| Preferences location | ✔ In Edit or Tools menu | ✔ In App menu | ✔ In Edit/Tools menu |
-| Dark Mode support | ✔ Follows Windows dark setting | ✔ Follows system dark/light | ✔ Follows GTK theme |
-| High-DPI (125%,150%)| ✔ UI scales properly | ✔ UI scales | ✔ UI scales |
-
-Adjust the above as needed for actual behavior during QA.
-
-## Migration & Trade-offs
-
-- **UI Consistency vs Platform Familiarity:** Always prefer user expectations. E.g. on Mac, user expects “Preferences” under the app menu. On Windows, Ribbon-style UIs are discouraged; use classic menu.
-- **Branding vs Native Look:** A fully Material-styled UI (custom colors/controls) stands out but may feel foreign on each OS. Decide if custom theming is worth it. You can mix: e.g., native dialogs but custom toolbar style.
-- **Feature Coverage:** Material has many components; prioritize what desktop needs. For example, skip mobile-only elements (bottom sheets, FAB) and focus on desktop essentials (menus, dialogs, tooltips).
-- **Library Choice:** Using a Rust GUI toolkit may impose limitations (e.g. Iced might not have native menu bar). Factor this into design trade-offs. If a toolkit lacks a feature (like native menu support), implement fallback UI (e.g. a toolbar menu button).
-
-## File Flow Diagram
-
-```mermaid
-flowchart LR
-    U[User] --> M["Click File \u003e Open"]
-    M --> D["Show Open Dialog"]
-    D --> F["Select file and confirm"]
-    F --> L["Load file into editor"]
-    L --> E[Editor displays content]
-    E --> U2["User edits text"]
-    U2 --> SM["Click File \u003e Save"]
-    SM --> SD["Show Save Dialog (if new)"]
-    SD --> SV["File saved to disk"]
-    SV --> SBar["Status shows 'File saved'"]
+```
+┌────────────────────────────────────────────────────────────────┐
+│ Title bar:  ● app · "Untitled 3 ● rust-pad"        _  ▢  ✕     │
+├────────────────────────────────────────────────────────────────┤
+│ Menu bar:  File Edit Search Encoding View Settings … Help ●    │
+├────┬──────────────┬────────────────────────────────────────────┤
+│ A  │ WORKSPACE  ⊞ │ Tabs:  ▸docs.txt  ●Untitled 3 ✕  +   ‹ ›   │
+│ C  │ ▾ rust-pad   ├────────────────────────────────────── ─────┤
+│ T  │   ▸ assets   │ Breadcrumb: rust-pad › documents › Untitled│
+│ I  │   ▾ notes    ├────────────────────────────────────────────┤
+│ V  │      plan.md │  1  About the treatment panel:           ↵ │
+│ I  │    ●Untit… 3 │  2  1. The fields should take …          ↵ │
+│ T  │   README.md  │  …                                         │
+│ Y  │ ▾ archive    │ 12  This configuration allows … │          │
+├────┴──────────────┴────────────────────────────────────────────┤
+│ Status:  Ln 12, Col 96 │ UTF-8 │ CRLF │ Spaces: 4 │ … │ ●Auto  │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-The above flowchart shows the common **Open → Edit → Save** sequence. Ensure each arrow corresponds to actual code: e.g. “Load file” triggers a read-into-editor action, “Save” triggers file write.
+### 3.1 Activity bar
+- Width **52 px** (Aurora) / **46 px** (Graphite). Filled with the chrome color.
+- Vertical icons: **Files** (toggles the Workspace panel), **Search**,
+  **Problems** (with unread count badge), **Source control**; **Settings**
+  pinned to the bottom.
+- **Active item** = accent icon. Aurora shows a rounded accent-tint pill;
+  Graphite shows a 2-px accent **left bar**. Hover = accent-tint background.
+- egui: `SidePanel::left("activity").exact_width(52.0).resizable(false)` with
+  vertical `ImageButton`s; paint the active pill/bar via `ui.painter().rect_filled`.
+
+### 3.2 Workspace explorer (the file tree)
+This is a first-class feature: the panel between the activity bar and the editor.
+- Width **248 px** (Aurora) / **232 px** (Graphite); **resizable** by dragging the
+  right edge; toggled by the activity bar's Files icon. Persist width + collapsed
+  state per workspace.
+- **Header:** "WORKSPACE" label (11 px uppercase, muted) + right-aligned actions:
+  New File, New Folder, Collapse All.
+- **Rows:** 26 px tall. `indent = 12 + depth × 15 px`. Folders get a chevron
+  (rotates 90° when open) + folder glyph; files get an aligned spacer + file
+  glyph. Open folders may tint their glyph with the dimmed accent.
+- **Selection = the open document.** The active file uses the *same* treatment as
+  its active tab: accent text, accent-tint row background, and a 2-px accent
+  left bar, so tree and tabs always agree.
+- egui: a scrollable `ui.vertical` inside the side panel; each row is one
+  `Response` (`sense(hover|click)`), painting its own hover/selected background;
+  a `collapsing`-style chevron per folder. Double-click a file to open, single
+  click to preview.
+
+### 3.3 Tabs
+- 38-px strip on the editor column. Active tab = editor-bg fill + **2-px accent
+  top bar** + 600 weight. Inactive = transparent + muted text.
+- **Modified indicator:** a filled accent **dot**, replacing the legacy `*`.
+- Pinned tabs show a small pin glyph; a close `✕` appears on the active/hovered
+  tab. Right side of the strip: overflow chevrons `‹ ›` + a `＋` new-tab button.
+- egui: horizontal `ScrollArea` of custom selectable labels; paint the top bar
+  and dot manually.
+
+### 3.4 Breadcrumb
+- 29-px strip above the editor: `folder › folder › file` using muted labels, a
+  faint `›` separator, and the current file in full-strength text. Right-aligned
+  file-type hint (e.g. `txt`). Purely informational in v1.
+
+### 3.5 Editor
+- Gutter: right-aligned line numbers (12 px, faint) with a 1-px separator; the
+  **active line** number takes the accent.
+- Body: JetBrains Mono, current-line highlight, selection tint from the accent,
+  a blinking accent caret.
+- **Line-end markers** replace the old chunky `CR`/`LF` chip pair:
+    - Aurora → a single faint `↵` glyph (special-char color).
+    - Graphite → one compact `CRLF` chip.
+    - Both are toggleable under **View → Show line endings**.
+- Soft-wrap long lines at the window edge (no horizontal document scroll by
+  default); comfortable measure ~90 chars before wrap.
+
+### 3.6 Status bar
+- 27 px, segmented with 1-px dividers: `Ln, Col`, encoding, EOL, indentation,
+  line count, char count, size, then right-aligned `Zoom` and `Auto-Save`
+  (with a "saved" green dot).
+- **Cursor segment emphasis:** Graphite paints the `Ln, Col` segment with a
+  filled accent rect (dark text); Aurora simply colors that text with the accent.
+- egui: `TopBottomPanel::bottom("status").exact_height(27.0)` with a horizontal
+  layout; separators via 1-px `rect_filled`.
+
+---
+
+## 4. Color Tokens & Theme JSON
+
+rust-pad already loads user themes. Every direction/mode below is expressible in
+the existing `editor` schema. Map the same values into egui `Visuals` for chrome.
+
+### 4.1 egui `Visuals` (chrome) mapping
+
+| Role                 | egui field                         | Aurora dark   | Graphite dark |
+|----------------------|------------------------------------|---------------|---------------|
+| Window fill          | `window_fill`                      | `#151A20`     | `#0E0F13`     |
+| Panel fill           | `panel_fill`                       | `#171C24`     | `#131519`     |
+| Extreme bg (inputs)  | `extreme_bg_color`                 | `#0F141A`     | `#0A0B0D`     |
+| Text                 | `override_text_color`              | `#C8D2DC`     | `#D7DCE2`     |
+| Selection fill       | `selection.bg_fill`                | accent @ ~15% | accent @ ~14% |
+| Hyperlink / accent   | `hyperlink_color`                  | `#2DD4BF`     | `#2FE3AE`     |
+| Separators / borders | `widgets.noninteractive.bg_stroke` | `#242C36`     | `#1D2027`     |
+| Corner radius        | `widgets.*.corner_radius`          | `6.0`         | `2.0`         |
+| Window radius        | `window_corner_radius`             | `7.0`         | `3.0`         |
+
+Light themes use the darkened accent, `window_fill` `#FBFCFE`/`#FFFFFF`,
+`override_text_color` `#2B333C`/`#22262C`, and borders `#DEE5EC`/`#E4E7EC`.
+
+### 4.2 Editor theme JSON (paste-ready)
+
+**Aurora Teal — Dark**
+```json
+{
+  "name": "Aurora Teal — Dark",
+  "editor": {
+    "bg_color": "#151A20",
+    "current_line_highlight": "#1C232C",
+    "cursor_color": "#2DD4BF",
+    "gutter_separator_color": "#242C36",
+    "line_number_bg": "#151A20",
+    "line_number_color": "#5B6572",
+    "matching_bracket_color": "#2DD4BF5A",
+    "modified_line_color": "#E0A93C",
+    "occurrence_highlight_color": "#2DD4BF33",
+    "saved_line_color": "#4FB86A",
+    "scrollbar_thumb_active": "#7E8B98",
+    "scrollbar_thumb_hover": "#5E6A76",
+    "scrollbar_thumb_idle": "#3A434E",
+    "scrollbar_track_color": "#171C24",
+    "selection_color": "#2DD4BF59",
+    "special_char_color": "#5B6572B4",
+    "text_color": "#C8D2DC"
+  }
+}
+```
+
+**Aurora Teal — Light**
+```json
+{
+  "name": "Aurora Teal — Light",
+  "editor": {
+    "bg_color": "#FBFCFE",
+    "current_line_highlight": "#EAF3F1",
+    "cursor_color": "#12897B",
+    "gutter_separator_color": "#DEE5EC",
+    "line_number_bg": "#F3F6F9",
+    "line_number_color": "#9BA7B2",
+    "matching_bracket_color": "#12897B5A",
+    "modified_line_color": "#C4881F",
+    "occurrence_highlight_color": "#12897B33",
+    "saved_line_color": "#3E9E5A",
+    "scrollbar_thumb_active": "#9AA6B2",
+    "scrollbar_thumb_hover": "#B4BEC8",
+    "scrollbar_thumb_idle": "#CBD3DB",
+    "scrollbar_track_color": "#EFF3F7",
+    "selection_color": "#12897B59",
+    "special_char_color": "#9BA7B2B4",
+    "text_color": "#2B333C"
+  }
+}
+```
+
+**Graphite — Dark**
+```json
+{
+  "name": "Graphite — Dark",
+  "editor": {
+    "bg_color": "#0E0F13",
+    "current_line_highlight": "#15181D",
+    "cursor_color": "#2FE3AE",
+    "gutter_separator_color": "#1D2027",
+    "line_number_bg": "#0E0F13",
+    "line_number_color": "#4F5560",
+    "matching_bracket_color": "#2FE3AE5A",
+    "modified_line_color": "#E0A93C",
+    "occurrence_highlight_color": "#2FE3AE33",
+    "saved_line_color": "#42C088",
+    "scrollbar_thumb_active": "#828994",
+    "scrollbar_thumb_hover": "#5E656F",
+    "scrollbar_thumb_idle": "#363C45",
+    "scrollbar_track_color": "#131519",
+    "selection_color": "#2FE3AE59",
+    "special_char_color": "#4F5560B4",
+    "text_color": "#D7DCE2"
+  }
+}
+```
+
+**Graphite — Light**
+```json
+{
+  "name": "Graphite — Light",
+  "editor": {
+    "bg_color": "#FFFFFF",
+    "current_line_highlight": "#EFF6F3",
+    "cursor_color": "#118466",
+    "gutter_separator_color": "#E4E7EC",
+    "line_number_bg": "#FAFBFC",
+    "line_number_color": "#A3AAB3",
+    "matching_bracket_color": "#1184665A",
+    "modified_line_color": "#C4881F",
+    "occurrence_highlight_color": "#11846633",
+    "saved_line_color": "#2FA772",
+    "scrollbar_thumb_active": "#9BA2AC",
+    "scrollbar_thumb_hover": "#B6BCC4",
+    "scrollbar_thumb_idle": "#CDD2D9",
+    "scrollbar_track_color": "#F4F5F8",
+    "selection_color": "#11846659",
+    "special_char_color": "#A3AAB3B4",
+    "text_color": "#22262C"
+  }
+}
+```
+
+> Semantic colors (shared): warning/modified `#E0A93C` (dark) / `#C4881F`
+> (light), error `#E0443E`, success/saved as above. The 8-digit hex suffixes
+> (`5A`, `33`, `59`, `B4`) are alpha. Keep them when hand-editing.
+
+---
+
+## 5. Component Specs
+
+- **Primary button:** accent fill, `onAccent` text (`#08120F` on dark accents,
+  `#FFFFFF` on light accents), 600 weight, 6-px (Aurora) / 2-px (Graphite)
+  radius, 7×14 padding. Used once per surface (e.g. Find Next).
+- **Secondary button:** `btnBg` fill + 1-px border; hover raises the border and
+  text to the accent. 5–7 px vertical padding.
+- **Inputs:** `extreme_bg` fill, 1-px border, 6/2-px radius, 32-px height.
+  **Focus:** 1.5-px accent border + a 3-px accent-tint outer ring (the focus
+  indicator; never remove it).
+- **Checkbox / radio:** 15 px; checked = accent fill + check / accent inner dot.
+- **Tree row / list item:** 26 px, hover accent-tint, selected = accent-tint +
+  2-px accent left bar.
+- **Menu (dropdown):** floating surface with a soft shadow, 5-px inner padding,
+  6-px item radius, hover accent-tint. Items show a trailing count/shortcut hint
+  in the accent or muted color. One level of cascading; separators between
+  groups; disabled items at ~50% opacity (never hidden).
+- **Dialogs (Problems, Find & Replace, Find Results):** header uses `dialogHead`
+  fill + 1-px divider + title 14 px/600 + a close `✕`. Body on `dialogBg`. Rows
+  divided by 1-px borders. Find Results carries its own mini status bar footer.
+
+**Material → rust-pad component map** (what replaces the old table):
+
+| Old Material notion      | rust-pad desktop equivalent                                  |
+|--------------------------|--------------------------------------------------------------|
+| Top app bar              | Title bar + menu bar (+ optional toolbar)                    |
+| Bottom nav / FAB         | **Removed**: use the activity bar + menu/toolbar actions     |
+| Navigation drawer        | **Workspace explorer** side panel                            |
+| Tabs                     | Document tab strip with accent top-bar + modified dot        |
+| Snackbar / toast         | Status-bar messages; Problems dialog for anything actionable |
+| Elevated cards           | Flat 1-px-bordered panels                                    |
+| Purple `#6200EE` primary | Teal accent (`#2DD4BF` / `#2FE3AE`)                          |
+
+---
+
+## 6. Interaction & Keyboard
+
+rust-pad is keyboard- and **numpad**-first; preserve those bindings:
+
+- **Standard:** `Ctrl/Cmd + N/O/S` new/open/save, `Z/Y` undo/redo,
+  `X/C/V` cut/copy/paste, `A` select-all, `F` find. Show the shortcut in each
+  menu item.
+- **Mnemonics:** `Alt+letter` on Windows/Linux menus; on macOS use the global
+  menu bar with `⌘` symbols.
+- **Numpad workflow (app-specific, keep intact):** numpad `*`, `-`, `.`,
+  `Enter`, and `Esc` drive the domain forms; they must not be shadowed by new
+  tree/tab shortcuts. Document these in Help.
+- **Focus order:** Menu bar → Activity bar → Workspace tree → Tabs → Editor →
+  Status bar. Every focus stop shows the visible accent focus ring.
+- **Tree keys:** ↑/↓ move, →/← expand/collapse, Enter opens, `F2` rename,
+  `Delete` deletes (with confirm).
+- **Drag & drop:** drop a file onto the window to open it; drag files within the
+  tree to move; drag text to move a selection. Show a valid-drop cursor.
+- **Unsaved close:** prompt "Save changes?" before closing a modified tab/window;
+  remember window size/position and reopen on the active monitor.
+
+---
+
+## 7. Accessibility
+
+- **Contrast:** body text ≥ 4.5:1 on its surface, UI/borders ≥ 3:1. The token
+  sets above are tuned for this; light-mode accent is darkened specifically so
+  accent-on-light passes. Verify any custom theme before shipping.
+- **Focus visibility:** the accent focus ring is mandatory on every interactive
+  control; do not rely on color alone. Pair the ring with the selected bar/fill.
+- **Screen readers:** label every icon button and tree row (name + kind, e.g.
+  "notes, folder, expanded"; "Untitled 3, file, modified"). Announce dialog
+  titles and Problems entries.
+- **Scaling:** support egui `zoom_factor` (Ctrl+`+`/`-`) and OS scale at 125% /
+  150%; the whole layout must reflow: the tree and editor keep min widths and
+  the window minimum is **800×600**.
+- **Hit targets:** ≥ 20×20 px clickable, ≥ 8-px spacing between interactive
+  elements (tree rows and status segments already satisfy this).
+- **Reduced motion:** honor the OS setting. Drop caret blink to a steady caret
+  and disable panel fades.
+
+---
+
+## 8. Theming & System Integration
+
+- Ship all four themes (2 directions × light/dark) and a **"Follow system"**
+  option that switches light/dark with the OS.
+- On Windows, optionally tint the focus ring with the system accent; on macOS,
+  sync with the system appearance; on Linux, respect the GTK/portal color-scheme
+  preference.
+- Fonts load via egui `FontDefinitions`: register IBM Plex Sans → `Proportional`
+  and JetBrains Mono → `Monospace`, then set `FontId` sizes (13 editor / 13 UI /
+  11 labels). Fall back to the platform UI font if a face is missing.
+- Keep all colors in the theme file; code reads tokens, never hard-codes hex.
+
+---
+
+## 9. Motion
+
+- Panel/menu/dialog show-hide: 120–200 ms cross-fade. Tree expand/collapse: a
+  quick height/opacity ease (≤200 ms). No slides or page transitions.
+- Instant press feedback (<100 ms) on buttons and tree rows.
+- All non-essential motion is gated behind the reduced-motion check.
+
+---
+
+## 10. Testing & QA
+
+**Design QA:** contrast pass on all four themes; focus ring visible on every
+control; tree selection matches the active tab; line-ending marker toggle works;
+status cursor segment renders per direction; both directions never mixed.
+
+**Functional:** file open/save per OS; undo/redo, cut/copy/paste, find/replace;
+numpad workflow intact; drag-drop open; unsaved-close prompt; theme + system
+switch; high-DPI reflow at 125/150%.
+
+**OS × feature matrix:**
+
+| Feature / OS         | Windows                       | macOS              | Linux (GTK)           |
+|----------------------|-------------------------------|--------------------|-----------------------|
+| File open/save       | native dialog                 | native dialog      | GTK/portal dialog     |
+| Menus                | in-window bar + Alt mnemonics | global menu bar, ⌘ | in-window bar         |
+| Preferences location | Settings menu                 | App menu           | Settings menu         |
+| Dark/light           | follows system                | follows system     | follows portal scheme |
+| System accent tint   | optional focus ring           | —                  | —                     |
+| High-DPI 125/150%    | reflows                       | reflows            | reflows               |
+| Numpad workflow      | ✓                             | ✓                  | ✓                     |
+
+---
+
+## 11. Trade-offs & Notes
+
+- **Native menus vs custom chrome:** rust-pad draws its own menu bar/tabs/tree in
+  egui (immediate-mode has no native menu bar). Keep the *behavior* native
+  (mnemonics, ordering, "Preferences" placement) even though pixels are custom.
+- **Direction choice:** pick **one** direction to ship as the default; the other
+  can live as an alternate theme pair. Aurora reads friendlier for general use;
+  Graphite reads more "pro tool" and denser for power users.
+- **Scope:** the activity bar, workspace tree, and breadcrumb are the only
+  structural additions: everything else is restyling, so migration is mostly a
+  `Visuals`/tokens swap plus three new panels.

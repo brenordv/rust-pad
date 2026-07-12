@@ -1,11 +1,12 @@
 //! Dialog for prompting the user when an open file has been modified externally.
 
 use super::App;
+use crate::app::chrome::{self, DialogOptions};
 
 impl App {
     /// Returns the index of the active document iff it has a pending
     /// external change. Inactive tabs with the flag set are deliberately
-    /// ignored — the prompt only surfaces when the user is actually looking
+    /// ignored; the prompt only surfaces when the user is actually looking
     /// at the affected tab. Switching to a flagged tab will surface the
     /// prompt on the next frame.
     pub(crate) fn pending_external_change_idx(&self) -> Option<usize> {
@@ -57,12 +58,22 @@ impl App {
         let has_unsaved = self.tabs.documents[idx].modified;
         let mut reload = false;
         let mut keep = false;
+        let mut open = true;
+        let chrome_theme = self.theme_ctrl.chrome.clone();
+        let metrics = self.theme_ctrl.metrics.clone();
 
-        egui::Window::new("File Changed on Disk")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        chrome::show_dialog(
+            ctx,
+            "File Changed on Disk",
+            &mut open,
+            &chrome_theme,
+            &metrics,
+            DialogOptions {
+                center: true,
+                closable: false,
+                ..Default::default()
+            },
+            |ui| {
                 if has_unsaved {
                     ui.label(format!(
                         "The file '{}' has been modified by another program.\n\n\
@@ -78,14 +89,15 @@ impl App {
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Reload").clicked() {
+                    if chrome::primary_button(ui, &chrome_theme, "Reload").clicked() {
                         reload = true;
                     }
-                    if ui.button("Keep My Version").clicked() {
+                    if chrome::secondary_button(ui, &chrome_theme, "Keep My Version").clicked() {
                         keep = true;
                     }
                 });
-            });
+            },
+        );
 
         if reload {
             self.accept_external_reload(idx);

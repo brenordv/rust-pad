@@ -10,7 +10,7 @@ fn unsaved(id: &str, title: &str) -> SessionTabEntry {
     }
 }
 
-/// Builds a `SessionData` listing the given unsaved session ids, mirroring
+/// Builds a `SessionData` listing the given unsaved session ids. Mirrors
 /// what `build_session_snapshot` produces so the content pairs and meta agree.
 fn unsaved_meta(ids: &[&str]) -> SessionData {
     SessionData {

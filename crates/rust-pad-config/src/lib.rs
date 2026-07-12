@@ -10,10 +10,10 @@ pub mod view_state;
 pub mod workspace;
 
 pub use color::HexColor;
-pub use config::{AppConfig, RecentFilesCleanup};
+pub use config::{AppConfig, ConfigLoadReport, RecentFilesCleanup, WindowGeometry};
 pub use permissions::{set_owner_only_dir_permissions, set_owner_only_file_permissions};
 pub use problem_log::{ProblemEntry, ProblemStore};
 pub use session::{SessionData, SessionStore, SessionTabEntry};
-pub use theme::{EditorColors, ThemeDefinition, UiColors};
+pub use theme::{ChromeColors, ChromeStyle, EditorColors, ThemeDefinition, UiColors};
 pub use view_state::{ViewState, ViewStateStore};
 pub use workspace::{WorkspaceEntry, WorkspaceStore};

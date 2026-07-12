@@ -54,7 +54,6 @@ fn test_editor_zoom_scales_font_at_different_levels() {
     let mut harness = create_harness();
     let base = harness.state().theme_ctrl.theme.font_size;
 
-    // Zoom to 2.0
     harness.state_mut().tabs.active_doc_mut().zoom_level = 2.0;
     harness.run();
 
@@ -891,7 +890,7 @@ fn test_render_cached_galley_reuse() {
         .active_doc_mut()
         .insert_text("let x = 42;\n");
 
-    // Render twice without changing content — second render should use cached galley
+    // Render twice without changing content: second render should use cached galley
     harness.run();
     harness.run();
 
@@ -913,7 +912,7 @@ fn test_render_modified_document_change_tracking() {
     harness.state_mut().tabs.active_doc_mut().modified = false;
     harness.run();
 
-    // Now modify line 2 — this should trigger change tracking markers in the gutter
+    // Now modify line 2: this should trigger change tracking markers in the gutter
     let doc = harness.state_mut().tabs.active_doc_mut();
     doc.cursor.position = Position::new(1, 5);
     doc.insert_text(" modified");
@@ -958,7 +957,7 @@ fn test_render_word_wrap_first_and_continuation_rows() {
 #[test]
 fn test_render_plain_text_no_extension() {
     let mut harness = create_harness();
-    // Title without extension — still uses syntax highlighter but detects plain text
+    // Title without extension: still uses syntax highlighter but detects plain text
     harness.state_mut().tabs.active_doc_mut().title = "Untitled".to_string();
     harness
         .state_mut()
@@ -1016,7 +1015,7 @@ fn test_render_word_wrap_with_all_features() {
 fn test_render_empty_document_with_line_numbers() {
     let mut harness = create_harness();
     harness.state_mut().show_line_numbers = true;
-    // Empty document — gutter should show line 1
+    // Empty document: gutter should show line 1
     harness.run();
 
     assert_eq!(harness.state().tabs.active_doc().buffer.len_lines(), 1);

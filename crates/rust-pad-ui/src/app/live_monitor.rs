@@ -47,7 +47,7 @@ impl LiveMonitorController {
                     if doc.live_monitoring {
                         true
                     } else {
-                        // No baseline for non-monitored docs — record mtime and skip.
+                        // No baseline for non-monitored docs: record mtime and skip.
                         doc.last_known_mtime = Some(current_mtime);
                         false
                     }
@@ -97,7 +97,7 @@ mod tests {
         ctrl.last_check = Instant::now() - Duration::from_secs(5);
         let mut tabs = TabManager::new();
         assert!(!tabs.active_doc().live_monitoring);
-        // Should be a no-op — no panic, no changes
+        // Should be a no-op: no panic, no changes
         ctrl.tick(&mut tabs, None);
     }
 
@@ -107,14 +107,14 @@ mod tests {
         ctrl.last_check = Instant::now() - Duration::from_secs(5);
         let mut tabs = TabManager::new();
         tabs.active_doc_mut().live_monitoring = true;
-        // No file_path — tick should skip
+        // No file_path: tick should skip
         ctrl.tick(&mut tabs, None);
     }
 
     #[test]
     fn test_tick_throttled_within_one_second() {
         let mut ctrl = LiveMonitorController::new();
-        // last_check is just now — tick should not run
+        // last_check is just now: tick should not run
         let mut tabs = TabManager::new();
         tabs.active_doc_mut().live_monitoring = true;
         ctrl.tick(&mut tabs, None);
@@ -158,7 +158,7 @@ mod tests {
 
         let mut tabs = TabManager::new();
         tabs.open_file(&file).unwrap();
-        // Not live-monitored — should flag, not auto-reload.
+        // Not live-monitored: should flag, not auto-reload.
         assert!(!tabs.active_doc().live_monitoring);
         let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
         tabs.active_doc_mut().last_known_mtime = Some(mtime);
@@ -193,7 +193,7 @@ mod tests {
         tabs.open_file(&file).unwrap();
         let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
         tabs.active_doc_mut().last_known_mtime = Some(mtime);
-        // Pre-flag as pending — tick should not re-flag.
+        // Pre-flag as pending: tick should not re-flag.
         tabs.active_doc_mut().external_change_detected = true;
 
         std::thread::sleep(std::time::Duration::from_millis(50));

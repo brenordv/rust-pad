@@ -394,7 +394,7 @@ mod tests {
     fn insert_multi_single_cursor_delegates() {
         let mut doc = doc_with("hello");
         doc.cursor.position = Position::new(0, 5);
-        // No secondary cursors — should behave like insert_text
+        // No secondary cursors; should behave like insert_text
         doc.insert_text_multi("!");
         assert_eq!(doc.buffer.to_string(), "hello!");
     }
@@ -441,7 +441,7 @@ mod tests {
         let mut doc = doc_with("hello");
         doc.cursor.position = Position::new(0, 5);
         add_cursor(&mut doc, 0, 0);
-        // Empty texts — fallback to insert_text_multi with first (none available)
+        // Empty texts: fallback to insert_text_multi with first (none available)
         doc.insert_text_per_cursor(&[]);
         // No crash, text should be unchanged
         assert_eq!(doc.buffer.to_string(), "hello");
@@ -562,7 +562,7 @@ mod tests {
         let mut doc = doc_with("hello");
         doc.cursor.position = Position::new(0, 0);
         add_cursor(&mut doc, 0, 0);
-        // Both cursors at position 0 — nothing to delete
+        // Both cursors at position 0; nothing to delete
         doc.backspace_multi();
         assert_eq!(doc.buffer.to_string(), "hello");
     }
@@ -687,7 +687,7 @@ mod tests {
         let mut doc = doc_with("hello");
         doc.cursor.position = Position::new(0, 5);
         doc.cursor.selection_anchor = Some(Position::new(0, 0));
-        // No secondary cursors — delegates to selected_text
+        // No secondary cursors; delegates to selected_text
         assert_eq!(doc.selected_text_multi(), Some("hello".to_string()));
     }
 

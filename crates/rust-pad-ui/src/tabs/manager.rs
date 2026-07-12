@@ -194,7 +194,6 @@ impl TabManager {
     /// - "Untitled 3" or "Untitled 3.md" → 3
     /// - "myfile.rs" → 0
     fn parse_untitled_number(title: &str) -> usize {
-        // Strip any file extension
         let base = match title.rfind('.') {
             Some(pos) if pos > 0 => &title[..pos],
             _ => title,
@@ -257,7 +256,7 @@ impl TabManager {
             self.delete_tab_history(0);
             self.documents[0] = self.create_document();
             self.active = 0;
-            // Reset any split state — there is only one document now.
+            // Reset any split state; there is only one document now.
             self.panes = None;
             return true;
         }
@@ -303,7 +302,7 @@ impl TabManager {
     /// Drops `removed` from a pane's `order` and rewrites the pane's
     /// `active` doc index so it continues to point at a valid document.
     /// If the active doc was the one being removed, falls back to the
-    /// pane's first survivor (or `0` for an empty pane — caller must
+    /// pane's first survivor (or `0` for an empty pane; the caller must
     /// then collapse the split).
     fn renumber_pane_after_remove(order: &mut Vec<usize>, active: &mut usize, removed: usize) {
         Self::remove_and_renumber(order, removed);
@@ -1110,7 +1109,7 @@ mod tests {
         tm.switch_to(0);
         assert_eq!(tm.active, 0);
 
-        // Open same file via from_bytes — should switch, not add
+        // Open same file via from_bytes; should switch, not add
         tm.open_from_bytes(&path, b"original").unwrap();
         assert_eq!(tm.tab_count(), 2); // no new tab
         assert_eq!(tm.active, 1); // switched to existing
@@ -1140,12 +1139,12 @@ mod tests {
     #[test]
     fn test_pin_tab_moves_to_pinned_section_end() {
         let mut tm = make_n_tabs(4);
-        // Pin tab 2 ("tab2") — should move to index 0 (no pinned yet).
+        // Pin tab 2 ("tab2"); should move to index 0 (no pinned yet).
         tm.pin_tab(2);
         assert_eq!(tm.pinned_count(), 1);
         assert_eq!(tm.documents[0].title, "tab2");
         assert!(tm.documents[0].pinned);
-        // Pin tab 3 ("tab3", now at index 3) — should move to index 1.
+        // Pin tab 3 ("tab3", now at index 3); should move to index 1.
         tm.pin_tab(3);
         assert_eq!(tm.pinned_count(), 2);
         assert_eq!(tm.documents[0].title, "tab2");
@@ -1160,7 +1159,7 @@ mod tests {
         tm.pin_tab(2); // tab2 → index 1 (pinned). Order: [tab0*, tab2*, tab1, tab3]
         assert_eq!(tm.pinned_count(), 2);
 
-        // Unpin tab0 (idx 0) — should move to leftmost unpinned position (idx 1).
+        // Unpin tab0 (idx 0); should move to leftmost unpinned position (idx 1).
         tm.unpin_tab(0);
         assert_eq!(tm.pinned_count(), 1);
         assert_eq!(tm.documents[0].title, "tab2");
@@ -1182,7 +1181,7 @@ mod tests {
     #[test]
     fn test_unpin_tab_idempotent() {
         let mut tm = make_n_tabs(3);
-        // Unpin a tab that isn't pinned — no-op.
+        // Unpin a tab that isn't pinned: no-op.
         tm.unpin_tab(1);
         assert_eq!(tm.pinned_count(), 0);
         assert!(!tm.documents[1].pinned);
@@ -1218,7 +1217,7 @@ mod tests {
     fn test_pinning_non_active_tab_before_active_keeps_same_document() {
         let mut tm = make_n_tabs(4);
         tm.switch_to(2); // active = "tab2"
-        tm.pin_tab(0); // pin tab0 — already at idx 0, so move is a no-op.
+        tm.pin_tab(0); // pin tab0; already at idx 0, so move is a no-op.
         assert_eq!(tm.documents[tm.active].title, "tab2");
     }
 
@@ -1424,7 +1423,7 @@ mod tests {
     #[test]
     fn close_last_tab_in_pane_auto_collapses_split() {
         // Reproduces the codepath that caused the "two clicks to split"
-        // bug — when the right pane only has one tab and that tab is
+        // bug: when the right pane only has one tab and that tab is
         // closed, `panes` must drop to None so the UI is consistent.
         let mut tm = make_n_tabs(3);
         tm.enable_split(); // left=[0,1], right=[2], focused=Right
@@ -1496,7 +1495,7 @@ mod tests {
     fn move_tab_to_pane_collapses_when_source_empty() {
         let mut tm = make_n_tabs(2);
         tm.enable_split(); // left=[0], right=[1]
-                           // Move tab0 from left to right — left becomes empty.
+                           // Move tab0 from left to right; left becomes empty.
         tm.move_tab_to_pane(0, PaneId::Right);
         assert!(
             !tm.is_split(),

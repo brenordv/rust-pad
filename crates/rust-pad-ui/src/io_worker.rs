@@ -84,7 +84,7 @@ pub struct SaveAsContext {
     pub session_id: Option<String>,
     /// Original file path of the tab (for file-backed tabs doing "Save As").
     pub original_path: Option<PathBuf>,
-    /// When true, this is a "Save a Copy" — the document state is not updated.
+    /// When true, this is a "Save a Copy": the document state is not updated.
     pub is_copy: bool,
 }
 
@@ -551,7 +551,7 @@ mod tests {
         let worker = IoWorker::new();
         worker.send(IoRequest::ReadFile {
             path: path.clone(),
-            max_file_size_bytes: Some(100), // 100 bytes limit
+            max_file_size_bytes: Some(100),
         });
 
         match poll_blocking(&worker, TEST_TIMEOUT) {

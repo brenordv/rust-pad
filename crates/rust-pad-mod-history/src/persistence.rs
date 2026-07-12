@@ -43,7 +43,7 @@ fn history_key(doc_id: &str, seq: u64) -> String {
 /// Returns the exclusive range bounds for all history entries of a document.
 ///
 /// Uses `#` as separator and `$` (one ASCII codepoint above `#`) as the
-/// exclusive upper bound, ensuring the range captures exactly the entries
+/// exclusive upper bound, so the range captures exactly the entries
 /// for the given doc_id.
 fn doc_range(doc_id: &str) -> (String, String) {
     let start = format!("{doc_id}#");

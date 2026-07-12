@@ -56,7 +56,7 @@ impl WorkspaceStore {
     pub fn open(path: &Path) -> Result<Self> {
         let db = open_or_create_db(path, "workspace")?;
 
-        // Ensure tables exist
+        // Create the table if it doesn't exist yet.
         let write_txn = db
             .begin_write()
             .context("Failed to begin initial workspace write transaction")?;

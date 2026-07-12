@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn test_resolve_falls_back_to_home() {
         let state = default_state();
-        // No last_used, no default_work_folder — should return home dir
+        // No last_used, no default_work_folder: should return home dir
         let resolved = state.resolve_directory();
         assert_eq!(resolved, dirs::home_dir());
     }

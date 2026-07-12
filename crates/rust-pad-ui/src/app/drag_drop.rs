@@ -70,10 +70,8 @@ impl App {
             egui::Id::new("drop_overlay"),
         ));
 
-        // Semi-transparent background
         painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
 
-        // Centered label
         let text = egui::RichText::new("Drop file(s) or folder(s)")
             .size(24.0)
             .color(egui::Color32::WHITE);
@@ -111,7 +109,7 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         std::fs::write(folder.path().join("test.txt"), "content").unwrap();
 
-        // No workspace active — add_dropped_folder should auto-create one
+        // No workspace active: add_dropped_folder should auto-create one
         assert!(app.workspace_sidebar.workspace_id.is_none());
         app.add_dropped_folder(folder.path());
 

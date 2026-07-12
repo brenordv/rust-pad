@@ -3,7 +3,7 @@
 //! The problem store is initialized once at startup (before `App::new`) and
 //! is available to any code in the process via the free functions in this
 //! module. When the store is unavailable (init failed or was never called),
-//! all operations gracefully degrade to no-ops.
+//! all operations degrade to no-ops.
 
 use std::sync::{Arc, OnceLock};
 
@@ -111,12 +111,12 @@ pub fn records_since(baseline: usize) -> Vec<rust_pad_config::problem_log::Probl
     all.into_iter().take(total - baseline).collect()
 }
 
-/// Initialises a temp-backed problem store for unit tests, ensuring
-/// later calls to [`warn_problem`] / [`info_problem`] actually persist.
+/// Initialises a temp-backed problem store for unit tests so later
+/// calls to [`warn_problem`] / [`info_problem`] actually persist.
 ///
 /// Idempotent: subsequent calls are no-ops because the underlying
 /// `OnceLock` only accepts a single write. Tests that need an isolated
-/// store should not rely on this — they should construct a
+/// store should not rely on this; they should construct a
 /// `ProblemStore` directly and inspect it. This helper exists so the
 /// `complete_copy_contents` tests can observe the `[CC05]` / `[CC06]`
 /// emissions in a shared process-wide log.

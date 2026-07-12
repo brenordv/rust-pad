@@ -1,7 +1,10 @@
 //! Top-level application tying together tabs, editor, menus, and status bar.
 
 mod about_dialog;
+mod activity_bar;
 mod auto_save;
+mod breadcrumb;
+pub(crate) mod chrome;
 mod clipboard;
 mod context_menu;
 mod drag_drop;
@@ -12,9 +15,11 @@ mod file_ops;
 mod find_results;
 mod live_monitor;
 mod menu_bar;
+mod pass_trace;
 mod print;
 mod problems_dialog;
 mod recent_files;
+pub mod resolved_theme;
 mod search;
 mod settings_dialog;
 mod shortcuts;
@@ -59,7 +64,7 @@ const FLUSH_INTERVAL_SECS: u64 = 30;
 /// paths) the input is returned unchanged.
 ///
 /// Display-only: never feed the result back into filesystem APIs or security
-/// gates — the canonical `PathBuf` remains the source of truth for those.
+/// gates; the canonical `PathBuf` remains the source of truth for those.
 fn display_path(path: &Path) -> String {
     let s = path.display().to_string();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
@@ -81,6 +86,10 @@ pub struct StartupArgs {
     /// If true, store config and data next to the executable instead of
     /// in platform-standard directories. Useful for USB/portable installs.
     pub portable: bool,
+    /// Whether `main` applied a saved window position at startup. Gates the
+    /// first-frame off-screen correction so it never yanks a window the OS
+    /// placed itself.
+    pub restored_position: bool,
 }
 
 /// Which color theme to use.
@@ -114,14 +123,20 @@ impl ThemeMode {
         self.0 == "System"
     }
 
+    /// The builtin theme name System mode maps an OS color scheme to.
+    pub(crate) fn system_theme_name(mode: dark_light::Mode) -> &'static str {
+        match mode {
+            dark_light::Mode::Light => "Aurora Light",
+            _ => "Aurora Dark",
+        }
+    }
+
     /// Resolves "System" to a concrete theme name using the OS preference.
-    /// Non-system modes return their own name.
+    /// Non-system modes return their own name. Detection failures fall back
+    /// to the dark variant (the poll in `fn ui` warns about them once).
     pub fn resolve(&self) -> &str {
         if self.is_system() {
-            match dark_light::detect() {
-                Ok(dark_light::Mode::Light) => "Light",
-                _ => "Dark",
-            }
+            Self::system_theme_name(dark_light::detect().unwrap_or(dark_light::Mode::Dark))
         } else {
             &self.0
         }
@@ -130,7 +145,7 @@ impl ThemeMode {
 
 /// An unsaved tab whose content exceeded `session_content_max_kb` and was
 /// therefore omitted from the persisted snapshot content (its metadata is
-/// still saved, so it restores as an empty tab — the documented cap behaviour).
+/// still saved, so it restores as an empty tab, the documented cap behaviour).
 struct OverLimitTab {
     session_id: String,
     kb: usize,
@@ -143,12 +158,17 @@ pub struct App {
     pub word_wrap: bool,
     pub show_special_chars: bool,
     pub show_line_numbers: bool,
+    pub show_breadcrumb: bool,
+    breadcrumb_cache: breadcrumb::BreadcrumbCache,
     pub restore_open_files: bool,
     pub show_full_path_in_title: bool,
     pub file_dialog: FileDialogState,
     pub auto_save: AutoSaveController,
     pub recent_files: RecentFilesManager,
     config_path: PathBuf,
+    /// Set when the unparsable settings file could not be moved aside at
+    /// load time; saving must be skipped so the original is never clobbered.
+    config_save_blocked: bool,
     clipboard: Option<arboard::Clipboard>,
     dialog_state: DialogState,
     pub find_replace: FindReplaceDialog,
@@ -157,6 +177,9 @@ pub struct App {
     pub go_to_line: GoToLineDialog,
     bookmarks: BookmarkManager,
     last_flush: Instant,
+    /// Start time of the previous UI pass, for the TRACE pass-gap
+    /// diagnostic (see `pass_trace`). `None` before the first pass.
+    last_pass_start: Option<Instant>,
     session_store: Option<SessionStore>,
     session_content_max_kb: usize,
     /// Fingerprint of the last persisted session snapshot. The crash-safe
@@ -192,7 +215,9 @@ pub struct App {
     live_monitor: LiveMonitorController,
     pub settings_open: bool,
     pub settings_tab: SettingsTab,
-    pub(crate) about_open: bool,
+    /// Whether the About dialog is open. Public so integration tests can
+    /// drive the dialog directly (same rationale as `problems_open`).
+    pub about_open: bool,
     pub(crate) about_logo: Option<egui::TextureHandle>,
     io_worker: crate::io_worker::IoWorker,
     pub(crate) io_activity: crate::io_worker::IoActivity,
@@ -202,6 +227,12 @@ pub struct App {
     pub tabs_overflow: bool,
     /// Active tab index on the previous frame, used to detect tab changes.
     prev_active_tab: usize,
+    /// Whether any editor widget held egui keyboard focus when the editor
+    /// area rendered this frame. Drives the Find & Replace dim: the dialog
+    /// dims exactly while the editor is the active surface. Set by the
+    /// single-pane and split-pane render paths, read by `show_dialogs`,
+    /// which runs later in the same frame.
+    editor_kbd_focus: bool,
     /// Tab count on the previous frame, used to detect tab open/close.
     prev_tab_count: usize,
     /// When true, the "Close All" operation is in progress and should
@@ -247,7 +278,7 @@ pub struct App {
     /// opens or a new entry is logged.
     pub(crate) problems_unread: usize,
     /// Whether the Problems dialog is currently visible.
-    pub(crate) problems_open: bool,
+    pub problems_open: bool,
     /// Workspace sidebar state (tree, watcher, visibility).
     pub workspace_sidebar: crate::workspace::sidebar::WorkspaceSidebar,
     /// Workspace persistence store (redb-backed).
@@ -261,6 +292,26 @@ pub struct App {
     /// Per-file view-state store (cursor + scroll restored across
     /// sessions). `None` if the store could not be opened.
     pub(crate) view_state_store: Option<rust_pad_config::ViewStateStore>,
+    /// Last good floating-window geometry captured from `ViewportInfo`.
+    /// Capture skips maximized frames so the maximized rect never becomes
+    /// the restored floating size; `None` frames keep the previous stash.
+    captured_geometry: Option<rust_pad_config::WindowGeometry>,
+    /// Whether the window is currently maximized (folded into the saved
+    /// geometry on exit).
+    window_maximized: bool,
+    /// Whether `main` applied a saved window position at startup (gates the
+    /// one-shot off-screen correction).
+    geometry_restored_position: bool,
+    /// Whether the one-shot off-screen correction already ran.
+    geometry_corrected: bool,
+    /// When the OS color scheme was last polled (System mode only).
+    last_system_theme_poll: Instant,
+    /// The theme name System mode last resolved to, so the poll can detect
+    /// an actual scheme change.
+    system_theme_applied: String,
+    /// Whether the poll already warned about a failing scheme detection
+    /// (warn-once, not per poll).
+    system_theme_poll_warned: bool,
 }
 
 #[derive(Debug, Default)]
@@ -270,7 +321,7 @@ pub(crate) enum DialogState {
     ConfirmClose(usize),
     /// The user requested a reload-from-disk on a modified document.
     ConfirmReload,
-    /// A file exceeded the size limit — ask the user whether to open it anyway.
+    /// A file exceeded the size limit; ask the user whether to open it anyway.
     ConfirmLargeFile {
         path: std::path::PathBuf,
         message: String,
@@ -291,31 +342,145 @@ pub(crate) enum DialogState {
     },
 }
 
+/// Named font family carrying the medium (500) UI weight, with icon and
+/// fallback fonts included.
+pub const FONT_FAMILY_MEDIUM: &str = "ui-medium";
+/// Named font family carrying the semibold (600) UI weight, with icon and
+/// fallback fonts included.
+pub const FONT_FAMILY_SEMIBOLD: &str = "ui-semibold";
+
 impl App {
+    /// Installs the bundled UI and editor fonts plus the Phosphor icon font.
+    ///
+    /// IBM Plex Sans heads the proportional family and JetBrains Mono the
+    /// monospace family, with egui's defaults kept as glyph fallbacks. The
+    /// 500/600 weights are exposed as the named families
+    /// [`FONT_FAMILY_MEDIUM`] / [`FONT_FAMILY_SEMIBOLD`], built on top of the
+    /// full proportional list so icons and fallback glyphs render inside
+    /// bold chrome labels too.
+    fn install_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        for (name, bytes) in [
+            (
+                "plex-sans",
+                &include_bytes!("../../assets/fonts/IBMPlexSans-Regular.ttf")[..],
+            ),
+            (
+                "plex-sans-medium",
+                &include_bytes!("../../assets/fonts/IBMPlexSans-Medium.ttf")[..],
+            ),
+            (
+                "plex-sans-semibold",
+                &include_bytes!("../../assets/fonts/IBMPlexSans-SemiBold.ttf")[..],
+            ),
+            (
+                "jetbrains-mono",
+                &include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf")[..],
+            ),
+        ] {
+            fonts
+                .font_data
+                .insert(name.to_owned(), egui::FontData::from_static(bytes).into());
+        }
+
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "plex-sans".to_owned());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .insert(0, "jetbrains-mono".to_owned());
+
+        // Phosphor appends itself to the proportional and monospace lists,
+        // so it must merge before the named weight families are built from
+        // the proportional list below.
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        for (family, head) in [
+            (FONT_FAMILY_MEDIUM, "plex-sans-medium"),
+            (FONT_FAMILY_SEMIBOLD, "plex-sans-semibold"),
+        ] {
+            let mut list = proportional.clone();
+            list.insert(0, head.to_owned());
+            fonts
+                .families
+                .insert(egui::FontFamily::Name(family.into()), list);
+        }
+
+        tracing::debug!(
+            families = ?fonts.families.keys().collect::<Vec<_>>(),
+            "Registered font families"
+        );
+        ctx.set_fonts(fonts);
+
+        ctx.global_style_mut(|style| {
+            style.text_styles.insert(
+                egui::TextStyle::Body,
+                egui::FontId::new(13.0, egui::FontFamily::Proportional),
+            );
+            style.text_styles.insert(
+                egui::TextStyle::Button,
+                egui::FontId::new(13.0, egui::FontFamily::Proportional),
+            );
+            style.text_styles.insert(
+                egui::TextStyle::Small,
+                egui::FontId::new(11.0, egui::FontFamily::Proportional),
+            );
+            style.text_styles.insert(
+                egui::TextStyle::Monospace,
+                egui::FontId::new(13.0, egui::FontFamily::Monospace),
+            );
+            style.text_styles.insert(
+                egui::TextStyle::Heading,
+                egui::FontId::new(14.0, egui::FontFamily::Name(FONT_FAMILY_SEMIBOLD.into())),
+            );
+        });
+    }
+
     /// Creates a new application instance.
     pub fn new(cc: &eframe::CreationContext<'_>, args: StartupArgs) -> Self {
         // Disable egui's built-in keyboard zoom so Ctrl+/- only affects the editor text
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
-        // Install the Phosphor icon font alongside egui's defaults so that
-        // every constant in `crate::icons` renders at the active text size
-        // and recolours with the active theme.
-        let mut fonts = egui::FontDefinitions::default();
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-        cc.egui_ctx.set_fonts(fonts);
+        Self::install_fonts(&cc.egui_ctx);
 
         // Migrate config/data from legacy exe-relative paths to platform dirs
         if !args.portable {
             rust_pad_config::paths::migrate_legacy_paths();
         }
 
-        // Load config
         let config_path = if args.portable {
             rust_pad_config::paths::portable_config_file_path()
         } else {
             AppConfig::config_path()
         };
-        let app_config = AppConfig::load_or_create(&config_path);
+        let (app_config, config_report) = AppConfig::load_or_create_with_report(&config_path);
+        if let Some(parse_error) = &config_report.parse_error {
+            crate::problem_log::warn_problem(&format!(
+                "Settings file {} could not be read and was reset to defaults ({parse_error}). \
+                 The previous file was kept as a .bak backup.",
+                config_path.display()
+            ));
+        }
+        if let Some(previous) = &config_report.theme_reset {
+            crate::problem_log::info_problem(&format!(
+                "Theme '{previous}' from the settings file no longer exists; using System instead"
+            ));
+        }
+        if config_report.save_blocked {
+            crate::problem_log::warn_problem(
+                "The broken settings file could not be moved aside; settings changes will NOT \
+                 be saved this session to protect it",
+            );
+        }
 
         let theme_ctrl = ThemeController::new(
             &app_config.current_theme,
@@ -325,6 +490,9 @@ impl App {
             app_config.themes.clone(),
             &cc.egui_ctx,
         );
+        // Seed the System-mode poll with what just got applied so the first
+        // poll doesn't re-resolve without an actual OS scheme change.
+        let system_theme_applied = theme_ctrl.theme_mode.resolve().to_string();
 
         let mut history_config = HistoryConfig::default();
         if args.portable {
@@ -347,7 +515,6 @@ impl App {
         tabs.documents[0].line_ending = tabs.default_line_ending.resolve();
         tabs.documents[0].zoom_level = app_config.current_zoom_level;
 
-        // Open session store
         let session_path = if args.portable {
             rust_pad_config::paths::portable_session_file_path()
         } else {
@@ -374,7 +541,6 @@ impl App {
                 Self::restore_session(&mut tabs, &session_store, app_config.session_content_max_kb);
         }
 
-        // Open files requested via CLI arguments
         Self::open_startup_files(&mut tabs, &args);
 
         let max_file_size_bytes = app_config.max_file_size_bytes();
@@ -393,6 +559,8 @@ impl App {
             word_wrap: app_config.word_wrap,
             show_special_chars: app_config.show_special_chars,
             show_line_numbers: app_config.show_line_numbers,
+            show_breadcrumb: app_config.show_breadcrumb,
+            breadcrumb_cache: breadcrumb::BreadcrumbCache::default(),
             restore_open_files: app_config.restore_open_files,
             show_full_path_in_title: app_config.show_full_path_in_title,
             file_dialog: FileDialogState {
@@ -416,6 +584,7 @@ impl App {
                 app_config.recent_files,
             ),
             config_path,
+            config_save_blocked: config_report.save_blocked,
             clipboard: arboard::Clipboard::new().ok(),
             dialog_state: DialogState::None,
             find_replace: FindReplaceDialog::new(),
@@ -423,6 +592,7 @@ impl App {
             go_to_line: GoToLineDialog::new(),
             bookmarks: BookmarkManager::new(),
             last_flush: Instant::now(),
+            last_pass_start: None,
             session_store,
             session_content_max_kb: app_config.session_content_max_kb,
             last_snapshot_sig: None,
@@ -444,6 +614,7 @@ impl App {
             tab_scroll_offset: 0.0,
             tabs_overflow: false,
             prev_active_tab: 0,
+            editor_kbd_focus: false,
             prev_tab_count: 0,
             closing_all: false,
             tab_drag: None,
@@ -465,6 +636,13 @@ impl App {
             cached_workspace_list: None,
             last_watcher_overflow_log: None,
             view_state_store: Self::init_view_state_store(args.portable),
+            captured_geometry: None,
+            window_maximized: false,
+            geometry_restored_position: args.restored_position,
+            geometry_corrected: false,
+            last_system_theme_poll: Instant::now(),
+            system_theme_applied: system_theme_applied.clone(),
+            system_theme_poll_warned: false,
         };
 
         // Reapply persisted split-view layout once the App is fully built.
@@ -472,7 +650,6 @@ impl App {
             app.apply_session_split(&split);
         }
 
-        // Restore workspace sidebar state from config.
         app.workspace_sidebar.set_width(ws_sidebar_width);
         app.workspace_sidebar.show_hidden = ws_show_hidden;
         if ws_sidebar_visible {
@@ -509,8 +686,9 @@ impl App {
             Vec::with_capacity(session_data.tabs.len());
 
         // Tally recovery outcomes for the post-restore notices below. A
-        // missing content *row* (key absent) means an unsaved buffer was lost
-        // — distinct from a present-but-empty row (a genuinely blank tab).
+        // missing content *row* (key absent) means an unsaved buffer was
+        // lost, as distinct from a present-but-empty row (a genuinely blank
+        // tab).
         let mut recovered_nonempty = 0usize;
         let mut missing_content = 0usize;
 
@@ -571,10 +749,10 @@ impl App {
                 .active_tab_index
                 .min(tabs.documents.len().saturating_sub(1));
 
-            // Apply pin/color metadata to the restored tabs. We set raw flags
-            // (rather than calling pin_tab) and then perform a stable sort to
-            // bring pinned tabs to the left, since the persisted ordering
-            // already reflects the user's intended layout.
+            // Apply pin/color metadata to the restored tabs. Raw flag writes,
+            // not pin_tab: pin_tab would reorder the tabs, and the persisted
+            // ordering already reflects the user's intended layout (pinned
+            // tabs were saved in position).
             let count = restored_metadata.len().min(tabs.documents.len());
             for (i, (pinned, color)) in restored_metadata.into_iter().take(count).enumerate() {
                 tabs.documents[i].pinned = pinned;
@@ -601,14 +779,14 @@ impl App {
             tracing::warn!("post-restore session snapshot failed: {e:#}");
         }
 
-        // Surface recovery outcomes (counts only — never tab titles/content).
+        // Surface recovery outcomes (counts only, never tab titles/content).
         if !was_clean && recovered_nonempty > 0 {
             crate::problem_log::info_problem(&format!(
                 "Recovered {recovered_nonempty} unsaved document(s) after an unexpected shutdown."
             ));
         }
         // Only after an *unclean* shutdown is a missing content row a genuine
-        // loss. On a clean restart an absent row is expected — it belongs to an
+        // loss. On a clean restart an absent row is expected: it belongs to an
         // over-cap tab that was intentionally not persisted (and already warned
         // about at autosave time), so reporting it here would be a false alarm.
         if !was_clean && missing_content > 0 {
@@ -632,7 +810,7 @@ impl App {
     /// the clean-exit, post-restore, and periodic-autosave paths so the
     /// snapshot-building (and the `session_content_max_kb` cap) live in exactly
     /// one place. Unsaved tabs lacking a `session_id` are assigned one here so
-    /// their identity — and thus the content key and the dirty fingerprint —
+    /// their identity (and thus the content key and the dirty fingerprint)
     /// stays stable across snapshots (hence `&mut tabs`). Tabs whose content
     /// exceeds the cap are omitted from `content` and reported in the returned
     /// over-limit list (still listed in metadata, so they restore empty).
@@ -657,7 +835,6 @@ impl App {
                 continue;
             }
 
-            // Unsaved tab: ensure a stable session id, then collect content.
             let sid = match &doc.session_id {
                 Some(s) => s.clone(),
                 None => {
@@ -693,7 +870,7 @@ impl App {
 
     /// Fingerprint of everything that goes into a session snapshot, used to
     /// skip redundant autosaves. Hashes the ordered tab identities plus each
-    /// unsaved buffer's `content_version` (a robust change signal that, unlike
+    /// unsaved buffer's `content_version` (a change signal that, unlike
     /// summing versions, is immune to membership and undo/redo aliasing),
     /// along with pin/colour, the active index, and the split layout.
     fn session_snapshot_sig(&self) -> u64 {
@@ -838,7 +1015,6 @@ impl App {
             doc.insert_text(text);
         }
 
-        // Remove the initial empty tab if CLI args opened any tabs
         if has_cli_content && tabs.tab_count() > 1 {
             let first_is_empty = tabs.documents[0].buffer.is_empty()
                 && tabs.documents[0].file_path.is_none()
@@ -899,10 +1075,10 @@ impl App {
 
                     if let Some(ctx) = self.io_activity.save_as_context.take() {
                         if ctx.is_copy {
-                            // "Save a Copy" — don't update document state
+                            // "Save a Copy": don't update document state
                             tracing::info!("Saved copy to '{}'", path.display());
                         } else {
-                            // Normal "Save As" — update document state
+                            // Normal "Save As": update document state
                             let tab_idx = self.find_save_as_tab(&ctx);
 
                             if let Some(idx) = tab_idx {
@@ -956,7 +1132,7 @@ impl App {
                         self.io_activity.pending_reads =
                             self.io_activity.pending_reads.saturating_sub(1);
                         // A clipboard read with a matching path is dropped
-                        // here too — its failure mode is already surfaced
+                        // here too; its failure mode is already surfaced
                         // through the generic I/O-error problem entry.
                         self.pending_clipboard_reads.retain(|p2| p2 != p);
                     }
@@ -1037,12 +1213,22 @@ impl App {
         self.show_about_dialog(ctx);
         self.show_problems_dialog(ctx);
 
-        if let Some(action) = self.find_replace.show(ctx) {
+        if let Some(action) = self.find_replace.show(
+            ctx,
+            &self.theme_ctrl.chrome,
+            &self.theme_ctrl.metrics,
+            self.editor_kbd_focus,
+        ) {
             self.handle_search_action(action);
         }
 
         let total_lines = self.tabs.active_doc().buffer.len_lines();
-        if let Some(target) = self.go_to_line.show(ctx, total_lines) {
+        if let Some(target) = self.go_to_line.show(
+            ctx,
+            total_lines,
+            &self.theme_ctrl.chrome,
+            &self.theme_ctrl.metrics,
+        ) {
             let doc = self.tabs.active_doc_mut();
             doc.cursor.clear_selection();
             doc.cursor
@@ -1154,7 +1340,7 @@ impl App {
     /// * LF normalisation (matches the paste path),
     /// * clipboard write through the sanitising helper.
     ///
-    /// Never logs the decoded text — only path and length. See the
+    /// Never logs the decoded text, only path and length. See the
     /// module-level "observability" note in `app/clipboard.rs`.
     fn complete_copy_contents(&mut self, path: &std::path::Path, bytes: &[u8]) {
         tracing::debug!(
@@ -1209,7 +1395,7 @@ impl App {
     /// Shows the confirmation dialog for "Copy file contents" on files
     /// larger than the warning threshold. Mirrors the shape of the
     /// `ConfirmLargeFile` dialog but binds to `pending_copy_contents`
-    /// instead of `DialogState` because the two flows are independent —
+    /// instead of `DialogState` because the two flows are independent:
     /// users can have a pending "open file too large" prompt and a
     /// "copy contents too large" prompt at the same time.
     ///
@@ -1394,7 +1580,7 @@ impl App {
     /// Reads a file from disk and opens it as lossy UTF-8 in a new tab.
     ///
     /// The resulting document is untitled (no file path) so the user must
-    /// explicitly "Save As" to write it back — this prevents accidentally
+    /// explicitly "Save As" to write it back; this prevents accidentally
     /// overwriting the original file.
     fn recover_file_as_utf8_lossy(&mut self, path: &std::path::Path) {
         let bytes = match std::fs::read(path) {
@@ -1421,9 +1607,10 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let pass_start = Instant::now();
         let ctx = ui.ctx().clone();
 
-        // Prevent egui's built-in Ctrl+scroll zoom — we handle zoom ourselves
+        // Prevent egui's built-in Ctrl+scroll zoom; we handle zoom ourselves
         ctx.set_zoom_factor(1.0);
 
         // macOS (New Bug 2): after the window regains focus (e.g. via
@@ -1431,7 +1618,7 @@ impl eframe::App for App {
         // until the pointer crosses a panel boundary, because winit doesn't
         // re-push the icon until the pointer moves. Forcing a reset on the
         // focus-gained event lets the normal per-frame hover logic re-assert
-        // the correct icon. macOS-only — the issue doesn't occur elsewhere,
+        // the correct icon. macOS-only: the issue doesn't occur elsewhere,
         // and scoping it keeps other platforms untouched.
         #[cfg(target_os = "macos")]
         {
@@ -1445,6 +1632,11 @@ impl eframe::App for App {
             }
         }
 
+        // Window-geometry persistence: stash the current floating rect (for
+        // on_exit) and, once, verify a restored position is actually visible.
+        self.capture_window_geometry(&ctx);
+        self.correct_offscreen_window_once(&ctx);
+
         // Clear the one-frame rename confirmation flag from the previous frame.
         // Must happen before handle_global_shortcuts which checks rename_buffer.
         self.workspace_sidebar.rename_just_confirmed = false;
@@ -1452,46 +1644,25 @@ impl eframe::App for App {
         self.handle_global_shortcuts(&ctx);
         self.handle_dropped_items(&ctx);
 
-        // Update the OS window title to reflect the active document
         self.update_window_title(&ctx);
 
-        // Menu bar
-        let panel_fill = ctx.global_style().visuals.panel_fill;
-        let faint_bg = ctx.global_style().visuals.faint_bg_color;
-        let extreme_bg = ctx.global_style().visuals.extreme_bg_color;
-
         egui::Panel::top("menu_bar")
+            .exact_size(crate::app::resolved_theme::MENU_BAR_HEIGHT)
             .frame(
                 egui::Frame::new()
-                    .fill(panel_fill)
+                    .fill(self.theme_ctrl.chrome.chrome_bg)
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show_inside(ui, |ui| {
                 self.show_menu_bar(ui, &ctx);
             });
 
-        // Tab bar — only the global single-pane bar. In split-view mode the
-        // tab strips are rendered inside each pane by `render_split_panes`,
-        // so the outer tab bar is suppressed to avoid stacking two strips.
-        if !self.is_split() {
-            egui::Panel::top("tab_bar")
-                .frame(
-                    egui::Frame::new()
-                        .fill(faint_bg)
-                        .inner_margin(egui::Margin::symmetric(8, 4)),
-                )
-                .show_inside(ui, |ui| {
-                    self.show_tab_bar(ui);
-                });
-        }
-
-        // Status bar
         egui::Panel::bottom("status_bar")
-            .max_size(24.0)
+            .exact_size(crate::app::resolved_theme::STATUS_BAR_HEIGHT)
             .frame(
                 egui::Frame::new()
-                    .fill(extreme_bg)
-                    .inner_margin(egui::Margin::symmetric(8, 3)),
+                    .fill(self.theme_ctrl.chrome.status_bg)
+                    .inner_margin(egui::Margin::symmetric(8, 0)),
             )
             .show_inside(ui, |ui| {
                 self.show_status_bar(ui);
@@ -1499,22 +1670,50 @@ impl eframe::App for App {
 
         // Find Results panel (above the status bar). Declared before the
         // central panel so it claims its bottom strip first.
-        match self.find_results.show_panel(ui) {
+        let find_results_chrome = self.theme_ctrl.chrome.clone();
+        let find_results_metrics = self.theme_ctrl.metrics.clone();
+        match self
+            .find_results
+            .show_panel(ui, &find_results_chrome, &find_results_metrics)
+        {
             find_results::FindResultsAction::Navigate(idx) => self.navigate_to_find_result(idx),
             find_results::FindResultsAction::Close => self.find_results.clear(),
             find_results::FindResultsAction::None => {}
         }
 
-        // Workspace sidebar (left panel)
+        // Activity bar: the slim icon strip on the far left, declared before
+        // the workspace panel so it claims the leftmost edge.
+        let activity_action = egui::Panel::left("activity_bar")
+            .exact_size(self.theme_ctrl.metrics.activity_bar_width)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(self.theme_ctrl.chrome.activity_bg))
+            .show_inside(ui, |ui| {
+                let rect = ui.max_rect();
+                let border = self.theme_ctrl.chrome.border;
+                ui.painter().line_segment(
+                    [rect.right_top(), rect.right_bottom()],
+                    egui::Stroke::new(1.0, border),
+                );
+                self.show_activity_bar(ui)
+            })
+            .inner;
+        self.handle_activity_action(activity_action);
+
         let sidebar_action = if self.workspace_sidebar.is_visible() {
             // Populate workspace list from cache (refreshed only after mutations)
             self.workspace_sidebar.available_workspaces = self.get_cached_workspace_list().clone();
-            let width = self.workspace_sidebar.width();
+            let width = self
+                .workspace_sidebar
+                .effective_width(self.theme_ctrl.metrics.workspace_default_width);
+            let chrome_theme = self.theme_ctrl.chrome.clone();
+            let metrics = self.theme_ctrl.metrics.clone();
             egui::Panel::left("workspace_sidebar")
                 .resizable(true)
                 .default_size(width)
                 .size_range(150.0..=500.0)
-                .show_inside(ui, |ui| self.workspace_sidebar.show(ui))
+                .show_inside(ui, |ui| {
+                    self.workspace_sidebar.show(ui, &chrome_theme, &metrics)
+                })
                 .inner
         } else {
             crate::workspace::sidebar::SidebarAction::None
@@ -1523,13 +1722,13 @@ impl eframe::App for App {
             self.handle_sidebar_action(sidebar_action);
         }
 
-        // Editor area
         let workspace_editing = self.workspace_sidebar.rename_buffer.is_some()
             || self.workspace_sidebar.rename_just_confirmed
             || self.workspace_sidebar.new_entry.is_some()
             || self.workspace_sidebar.rename_entry.is_some();
         let dialog_open = self.is_dialog_open() || workspace_editing;
         let modal_dialog_open = self.is_modal_dialog_open() || workspace_editing;
+        self.editor_kbd_focus = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme_ctrl.theme.bg_color))
             .show_inside(ui, |ui| {
@@ -1539,6 +1738,30 @@ impl eframe::App for App {
                     // handled inside `render_split_panes`.
                     self.render_split_panes(ui, dialog_open, modal_dialog_open);
                     return;
+                }
+
+                // Tab strip lives inside the editor column (to the right of
+                // the activity bar and workspace panel), not across the full
+                // window width. Tabs paint their own full-height chrome, so
+                // the strip frame carries no inner margin.
+                egui::Panel::top("tab_bar")
+                    .exact_size(crate::app::resolved_theme::TAB_STRIP_HEIGHT)
+                    .frame(egui::Frame::new().fill(self.theme_ctrl.chrome.chrome_bg))
+                    .show_inside(ui, |ui| {
+                        self.show_tab_bar(ui);
+                    });
+
+                if self.show_breadcrumb {
+                    egui::Panel::top("breadcrumb")
+                        .exact_size(crate::app::resolved_theme::BREADCRUMB_HEIGHT)
+                        .frame(
+                            egui::Frame::new()
+                                .fill(self.theme_ctrl.theme.bg_color)
+                                .inner_margin(egui::Margin::symmetric(10, 0)),
+                        )
+                        .show_inside(ui, |ui| {
+                            self.show_breadcrumb_strip(ui);
+                        });
                 }
 
                 // When the sidebar owns keyboard input, suppress the editor's
@@ -1564,6 +1787,8 @@ impl eframe::App for App {
                     editor.show(ui)
                 };
 
+                self.editor_kbd_focus = response.has_focus();
+
                 // A click in the editor returns keyboard ownership to it, so
                 // sidebar arrow navigation stops and the editor receives keys.
                 if response.clicked() {
@@ -1581,16 +1806,12 @@ impl eframe::App for App {
         // closure) so it observes whatever the editor widgets wrote.
         self.propagate_sync_scroll();
 
-        // Dialogs
         self.show_dialogs(&ctx);
 
         // Drag-and-drop hover overlay (painted on top of everything)
         self.paint_drop_overlay(&ctx);
 
-        // Process completed background I/O operations
         self.handle_io_responses();
-
-        // Process completed print / export-as-PDF jobs
         self.handle_print_responses();
 
         // Live file monitoring: check for external changes every second
@@ -1613,13 +1834,17 @@ impl eframe::App for App {
         // Auto-save file-backed documents
         self.auto_save.tick(&mut self.tabs);
 
-        // Keep the cached problem count in sync with the global store.
         self.problems_unread = crate::problem_log::unread_count();
+
+        // System-mode OS-scheme poll. Its deadline MUST register in the
+        // next_repaint min-computation below: the frame loop is on-demand
+        // and the poll would never tick while idle otherwise.
+        let system_poll_deadline = self.tick_system_theme_poll(&ctx);
 
         let has_live_monitoring = self.tabs.documents.iter().any(|d| d.live_monitoring);
         let has_workspace_watcher = self.workspace_sidebar.watcher.is_some();
         let has_pending_io = self.io_activity.is_busy();
-        let next_repaint = if has_pending_io {
+        let mut next_repaint = if has_pending_io {
             // Poll more frequently while I/O is in flight
             Duration::from_millis(100)
         } else if has_live_monitoring || has_workspace_watcher {
@@ -1629,7 +1854,13 @@ impl eframe::App for App {
         } else {
             Duration::from_secs(FLUSH_INTERVAL_SECS)
         };
+        if let Some(deadline) = system_poll_deadline {
+            next_repaint = next_repaint.min(deadline);
+        }
         ctx.request_repaint_after(next_repaint);
+
+        // TRACE pass diagnostic: runs last so `pass_ms` covers the whole pass.
+        self.emit_pass_trace(&ctx, pass_start);
     }
 
     fn on_exit(&mut self) {
@@ -1646,7 +1877,6 @@ impl eframe::App for App {
         // used by the periodic autosave and post-restore snapshot.
         self.run_session_snapshot(true);
 
-        // Save current preferences to config file
         let config = AppConfig {
             current_theme: self.theme_ctrl.theme_mode.0.clone(),
             current_zoom_level: self.theme_ctrl.default_zoom_level,
@@ -1654,6 +1884,7 @@ impl eframe::App for App {
             word_wrap: self.word_wrap,
             show_special_chars: self.show_special_chars,
             show_line_numbers: self.show_line_numbers,
+            show_breadcrumb: self.show_breadcrumb,
             restore_open_files: self.restore_open_files,
             show_full_path_in_title: self.show_full_path_in_title,
             font_size: self.theme_ctrl.theme.font_size,
@@ -1685,11 +1916,145 @@ impl eframe::App for App {
             workspace_sidebar_visible: self.workspace_sidebar.visible,
             workspace_sidebar_width: self.workspace_sidebar.width,
             show_hidden_files: self.workspace_sidebar.show_hidden,
+            window_geometry: self.exit_window_geometry(),
             themes: self.theme_ctrl.available_themes.clone(),
         };
-        if let Err(e) = config.save(&self.config_path) {
+        if self.config_save_blocked {
+            tracing::warn!("Config save suppressed: broken settings file could not be moved aside");
+        } else if let Err(e) = config.save(&self.config_path) {
             crate::problem_log::warn_problem(&format!("Failed to save config on exit: {e}"));
         }
+    }
+}
+
+/// Frame-loop support: window-geometry capture, the one-shot off-screen
+/// correction, and the System-mode OS-scheme poll.
+impl App {
+    /// Interval between OS color-scheme polls while the theme mode is
+    /// System. A standing ~0.5 Hz wakeup, scheduled only in that mode.
+    const SYSTEM_THEME_POLL_INTERVAL: Duration = Duration::from_secs(2);
+    /// How early a poll may run instead of scheduling a tiny wakeup. egui
+    /// subtracts the predicted frame time from every requested repaint
+    /// delay, so a sub-frame remainder degenerates into an immediate-repaint
+    /// loop (egui_kittest's 250 ms predicted dt makes that concrete).
+    const SYSTEM_THEME_POLL_SLACK: Duration = Duration::from_millis(300);
+
+    /// Stashes the current floating-window geometry from `ViewportInfo`.
+    ///
+    /// Runs every frame; `on_exit` has no `Context` access, so the last good
+    /// stash is what gets persisted. Maximized frames only update the
+    /// maximized flag (the maximized rect must never become the restored
+    /// floating size), and frames where the backend reports `None` rects
+    /// keep the previous stash instead of clobbering it.
+    fn capture_window_geometry(&mut self, ctx: &egui::Context) {
+        let info = ctx.input(|i| i.viewport().clone());
+        if let Some(maximized) = info.maximized {
+            self.window_maximized = maximized;
+        }
+        if self.window_maximized {
+            return;
+        }
+        let (Some(outer), Some(inner), Some(monitor)) =
+            (info.outer_rect, info.inner_rect, info.monitor_size)
+        else {
+            return;
+        };
+        self.captured_geometry = Some(rust_pad_config::WindowGeometry {
+            x: outer.min.x,
+            y: outer.min.y,
+            inner_w: inner.width(),
+            inner_h: inner.height(),
+            maximized: false,
+            monitor_w: monitor.x,
+            monitor_h: monitor.y,
+        });
+    }
+
+    /// The geometry persisted on exit: the last floating capture with the
+    /// live maximized flag folded in.
+    fn exit_window_geometry(&self) -> Option<rust_pad_config::WindowGeometry> {
+        self.captured_geometry.map(|mut g| {
+            g.maximized = self.window_maximized;
+            g
+        })
+    }
+
+    /// One-shot backstop for the disconnected-monitor case that startup
+    /// validation can't see: if the position restored by `main` puts the
+    /// title-bar strip outside the live monitor, re-position to a visible
+    /// default. Runs only when a saved position was actually applied.
+    fn correct_offscreen_window_once(&mut self, ctx: &egui::Context) {
+        if self.geometry_corrected || !self.geometry_restored_position {
+            return;
+        }
+        let info = ctx.input(|i| i.viewport().clone());
+        if info.maximized.unwrap_or(false) {
+            self.geometry_corrected = true;
+            return;
+        }
+        let (Some(outer), Some(monitor)) = (info.outer_rect, info.monitor_size) else {
+            // Backend hasn't reported rects yet; try again next frame.
+            return;
+        };
+        self.geometry_corrected = true;
+        let strip = egui::Rect::from_min_size(
+            outer.min,
+            egui::vec2(outer.width(), rust_pad_config::config::TITLE_STRIP_HEIGHT),
+        );
+        let monitor_rect =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(monitor.x, monitor.y));
+        if !strip.intersects(monitor_rect) {
+            tracing::warn!(
+                outer = ?outer,
+                monitor = ?monitor,
+                "Restored window landed off the current monitor; repositioning"
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(64.0, 64.0)));
+        }
+    }
+
+    /// Polls the OS color scheme while the theme mode is System and
+    /// re-resolves the theme when the scheme actually changed.
+    ///
+    /// Returns the time until the next poll is due so `fn ui` can register
+    /// it in the `next_repaint` min-computation: the frame loop is
+    /// on-demand and would otherwise never tick while idle. Returns `None`
+    /// outside System mode (no standing wakeup, no cost).
+    fn tick_system_theme_poll(&mut self, ctx: &egui::Context) -> Option<Duration> {
+        if !self.theme_ctrl.theme_mode.is_system() {
+            return None;
+        }
+        let elapsed = self.last_system_theme_poll.elapsed();
+        if elapsed + Self::SYSTEM_THEME_POLL_SLACK < Self::SYSTEM_THEME_POLL_INTERVAL {
+            return Some(Self::SYSTEM_THEME_POLL_INTERVAL - elapsed);
+        }
+        self.last_system_theme_poll = Instant::now();
+        match dark_light::detect() {
+            Ok(mode) => {
+                let target = ThemeMode::system_theme_name(mode);
+                if target != self.system_theme_applied {
+                    tracing::info!(
+                        from = %self.system_theme_applied,
+                        to = %target,
+                        "OS color scheme changed; re-resolving System theme"
+                    );
+                    self.system_theme_applied = target.to_string();
+                    self.theme_ctrl.set_mode(ThemeMode::system(), ctx);
+                }
+            }
+            Err(e) => {
+                // Warn once, not per poll: the silent Err→Dark mapping in
+                // `ThemeMode::resolve` would otherwise hide a permanently
+                // broken detection behind a forced Aurora Dark.
+                if !self.system_theme_poll_warned {
+                    self.system_theme_poll_warned = true;
+                    tracing::warn!(
+                        "OS color-scheme detection failed ({e}); System mode keeps the current theme"
+                    );
+                }
+            }
+        }
+        Some(Self::SYSTEM_THEME_POLL_INTERVAL)
     }
 }
 
@@ -1706,7 +2071,7 @@ mod tests {
     #[test]
     fn display_path_strips_verbatim_prefix() {
         // Defect D: canonicalized Windows paths carry the `\\?\` prefix; the
-        // dialog must show the clean form. Pure string transform — runs on all
+        // dialog must show the clean form. Pure string transform; runs on all
         // platforms.
         assert_eq!(
             display_path(Path::new(r"\\?\Z:\tmp\rust-pad-demo\big.txt")),
@@ -1741,6 +2106,8 @@ mod tests {
             tabs: TabManager::new(),
             theme_ctrl: ThemeController {
                 theme: EditorTheme::default(),
+                chrome: crate::app::resolved_theme::ChromeTheme::default(),
+                metrics: crate::app::resolved_theme::Metrics::default(),
                 theme_mode: ThemeMode::dark(),
                 default_zoom_level: 1.0,
                 max_zoom_level: 15.0,
@@ -1751,6 +2118,8 @@ mod tests {
             word_wrap: false,
             show_special_chars: false,
             show_line_numbers: true,
+            show_breadcrumb: true,
+            breadcrumb_cache: breadcrumb::BreadcrumbCache::default(),
             restore_open_files: true,
             show_full_path_in_title: true,
             file_dialog: FileDialogState {
@@ -1767,6 +2136,7 @@ mod tests {
                 files: Vec::new(),
             },
             config_path: std::path::PathBuf::from("rust-pad.json"),
+            config_save_blocked: false,
             clipboard: None,
             dialog_state: DialogState::None,
             find_replace: FindReplaceDialog::new(),
@@ -1774,6 +2144,7 @@ mod tests {
             go_to_line: GoToLineDialog::new(),
             bookmarks: BookmarkManager::new(),
             last_flush: Instant::now(),
+            last_pass_start: None,
             session_store: None,
             session_content_max_kb: 10_240,
             last_snapshot_sig: None,
@@ -1795,6 +2166,7 @@ mod tests {
             tab_scroll_offset: 0.0,
             tabs_overflow: false,
             prev_active_tab: 0,
+            editor_kbd_focus: false,
             prev_tab_count: 0,
             closing_all: false,
             tab_drag: None,
@@ -1816,6 +2188,13 @@ mod tests {
             cached_workspace_list: None,
             last_watcher_overflow_log: None,
             view_state_store: None,
+            captured_geometry: None,
+            window_maximized: false,
+            geometry_restored_position: false,
+            geometry_corrected: false,
+            last_system_theme_poll: Instant::now(),
+            system_theme_applied: String::new(),
+            system_theme_poll_warned: false,
         }
     }
 
@@ -1890,6 +2269,163 @@ mod tests {
         // Cut (clipboard may be None in tests, so only verify deletion)
         app.cut();
         assert_eq!(app.tabs.active_doc().buffer.to_string(), "hello ");
+    }
+
+    // -- Window geometry capture (Phase G / ADR-7) --
+
+    /// Runs one headless frame with the given viewport info and lets `f`
+    /// exercise the app against the resulting context.
+    fn run_with_viewport_info(
+        app: &mut App,
+        mutate: impl FnOnce(&mut egui::ViewportInfo),
+        f: impl FnOnce(&mut App, &egui::Context),
+    ) {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        let info = raw.viewports.entry(egui::ViewportId::ROOT).or_default();
+        info.outer_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(100.0, 50.0),
+            egui::vec2(1210.0, 838.0),
+        ));
+        info.inner_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(105.0, 82.0),
+            egui::vec2(1200.0, 800.0),
+        ));
+        info.monitor_size = Some(egui::vec2(2560.0, 1440.0));
+        info.maximized = Some(false);
+        mutate(info);
+        let mut f = Some(f);
+        let _ = ctx.run_ui(raw, |ui| {
+            if let Some(f) = f.take() {
+                f(app, ui.ctx());
+            }
+        });
+    }
+
+    #[test]
+    fn capture_window_geometry_stores_floating_rect() {
+        let mut app = test_app();
+        run_with_viewport_info(
+            &mut app,
+            |_| {},
+            |app, ctx| {
+                app.capture_window_geometry(ctx);
+            },
+        );
+        let g = app.captured_geometry.expect("captured");
+        assert!((g.x - 100.0).abs() < f32::EPSILON);
+        assert!((g.y - 50.0).abs() < f32::EPSILON);
+        assert!((g.inner_w - 1200.0).abs() < f32::EPSILON);
+        assert!((g.inner_h - 800.0).abs() < f32::EPSILON);
+        assert!((g.monitor_w - 2560.0).abs() < f32::EPSILON);
+        assert!(!g.maximized);
+        assert!(!app.window_maximized);
+    }
+
+    #[test]
+    fn capture_window_geometry_maximized_frame_keeps_floating_stash() {
+        let mut app = test_app();
+        run_with_viewport_info(
+            &mut app,
+            |_| {},
+            |app, ctx| {
+                app.capture_window_geometry(ctx);
+            },
+        );
+        // A maximized frame reports the maximized rect; it must not replace
+        // the floating stash, only flip the flag.
+        run_with_viewport_info(
+            &mut app,
+            |info| {
+                info.maximized = Some(true);
+                info.outer_rect = Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(2560.0, 1440.0),
+                ));
+            },
+            |app, ctx| {
+                app.capture_window_geometry(ctx);
+            },
+        );
+        let g = app.captured_geometry.expect("stash kept");
+        assert!(
+            (g.inner_w - 1200.0).abs() < f32::EPSILON,
+            "floating size kept"
+        );
+        assert!(app.window_maximized);
+        // on_exit folds the live maximized flag into the saved geometry.
+        let saved = app.exit_window_geometry().expect("saved");
+        assert!(saved.maximized);
+        assert!((saved.inner_w - 1200.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn capture_window_geometry_none_rects_keep_previous_stash() {
+        let mut app = test_app();
+        run_with_viewport_info(
+            &mut app,
+            |_| {},
+            |app, ctx| {
+                app.capture_window_geometry(ctx);
+            },
+        );
+        run_with_viewport_info(
+            &mut app,
+            |info| {
+                info.outer_rect = None;
+                info.inner_rect = None;
+            },
+            |app, ctx| {
+                app.capture_window_geometry(ctx);
+            },
+        );
+        assert!(
+            app.captured_geometry.is_some(),
+            "None frame must not clobber"
+        );
+    }
+
+    #[test]
+    fn exit_window_geometry_none_without_any_capture() {
+        let app = test_app();
+        assert!(app.exit_window_geometry().is_none());
+    }
+
+    // -- System theme poll (Phase G) --
+
+    #[test]
+    fn system_theme_name_maps_light_and_dark() {
+        assert_eq!(
+            ThemeMode::system_theme_name(dark_light::Mode::Light),
+            "Aurora Light"
+        );
+        assert_eq!(
+            ThemeMode::system_theme_name(dark_light::Mode::Dark),
+            "Aurora Dark"
+        );
+        assert_eq!(
+            ThemeMode::system_theme_name(dark_light::Mode::Unspecified),
+            "Aurora Dark"
+        );
+    }
+
+    #[test]
+    fn system_theme_poll_skipped_outside_system_mode() {
+        let mut app = test_app(); // theme_mode is Dark
+        let ctx = egui::Context::default();
+        assert!(app.tick_system_theme_poll(&ctx).is_none());
+    }
+
+    #[test]
+    fn system_theme_poll_reports_remaining_time_between_polls() {
+        let mut app = test_app();
+        app.theme_ctrl.theme_mode = ThemeMode::system();
+        app.last_system_theme_poll = Instant::now();
+        let ctx = egui::Context::default();
+        let deadline = app
+            .tick_system_theme_poll(&ctx)
+            .expect("System mode schedules a wakeup");
+        assert!(deadline <= App::SYSTEM_THEME_POLL_INTERVAL);
     }
 
     // -- Sort lines --
@@ -1991,7 +2527,7 @@ mod tests {
             app.tabs.active_doc().indent_style,
             rust_pad_core::indent::IndentStyle::Spaces(4)
         );
-        // No selection — indents current line only
+        // No selection: indents current line only
         app.tabs.active_doc_mut().cursor.position = Position::new(0, 0);
         app.indent_selection(true);
         assert_eq!(app.tabs.active_doc().buffer.to_string(), "    a\nb\nc");
@@ -2186,7 +2722,7 @@ mod tests {
         app.tabs.active_doc_mut().insert_text("line1\nline2");
         app.tabs.active_doc_mut().cursor.position = Position::new(0, 0);
         app.add_cursor_above();
-        // Should not add cursor — already at first line
+        // Should not add cursor: already at first line
         assert_eq!(app.tabs.active_doc().secondary_cursors.len(), 0);
     }
 
@@ -2196,7 +2732,7 @@ mod tests {
         app.tabs.active_doc_mut().insert_text("line1\nline2");
         app.tabs.active_doc_mut().cursor.position = Position::new(1, 0);
         app.add_cursor_below();
-        // Should not add cursor — already at last line
+        // Should not add cursor: already at last line
         assert_eq!(app.tabs.active_doc().secondary_cursors.len(), 0);
     }
 
@@ -2344,7 +2880,7 @@ mod tests {
         // Open find/replace dialog
         app.find_replace.open();
 
-        // Directly call delete — in real flow this is gated by !dialog_open
+        // Directly call delete; in real flow this is gated by !dialog_open
         // Verify the gating logic: is_dialog_open should be true
         assert!(app.is_dialog_open());
         // The buffer should be unchanged since the shortcut wouldn't fire
@@ -2536,7 +3072,7 @@ mod tests {
         sc.position = Position::new(1, 2);
         app.tabs.active_doc_mut().secondary_cursors.push(sc);
 
-        // Clipboard has 3 lines but only 2 cursors — paste full text at each cursor
+        // Clipboard has 3 lines but only 2 cursors; paste full text at each cursor
         let clipboard_text = "X\nY\nZ";
         let normalized = rust_pad_core::encoding::normalize_line_endings(clipboard_text);
         let doc = app.tabs.active_doc_mut();
@@ -2755,7 +3291,7 @@ mod tests {
         app.tabs.active_doc_mut().insert_text("hello");
         set_find_text(&mut app, "hello");
         app.handle_search_action(FindReplaceAction::FindAll);
-        // No result at index 99 — must not panic or change the active tab.
+        // No result at index 99; must not panic or change the active tab.
         app.navigate_to_find_result(99);
         assert_eq!(app.tabs.active, 0);
     }
@@ -2995,7 +3531,7 @@ mod tests {
         app.auto_save.enabled = true;
         app.auto_save.interval_secs = 0; // trigger immediately
         app.auto_save.tick(&mut app.tabs);
-        // No file_path, so auto_save should skip — doc still modified
+        // No file_path, so auto_save should skip; doc still modified
         assert!(app.tabs.active_doc().modified);
     }
 
@@ -3010,7 +3546,7 @@ mod tests {
     #[test]
     fn test_cleanup_session_for_tab_no_session() {
         let app = test_app();
-        // No session_id and no session_store — should not panic
+        // No session_id and no session_store; should not panic
         app.cleanup_session_for_tab(0);
     }
 
@@ -3165,7 +3701,7 @@ mod tests {
         // Reset modified flag after insert
         app.tabs.active_doc_mut().modified = false;
         app.convert_case_scoped(CaseConversion::Upper, OperationScope::Global);
-        // Already uppercase — nothing changed
+        // Already uppercase; nothing changed
         assert_eq!(app.tabs.active_doc().buffer.to_string(), "HELLO");
         assert!(!app.tabs.active_doc().modified);
     }
@@ -4142,13 +4678,13 @@ mod tests {
             Some(Position::new(2, 0))
         );
 
-        // Alt+Shift+Up: shrink — remove line 2 cursor
+        // Alt+Shift+Up shrinks: the line 2 cursor is removed
         app.add_cursor_above();
         let doc = app.tabs.active_doc();
         assert_eq!(doc.secondary_cursors.len(), 1);
         assert_eq!(doc.secondary_cursors[0].position.line, 1);
 
-        // Alt+Shift+Up: shrink — remove line 1 cursor
+        // Alt+Shift+Up shrinks: the line 1 cursor is removed
         app.add_cursor_above();
         let doc = app.tabs.active_doc();
         assert_eq!(doc.secondary_cursors.len(), 0);
@@ -4182,7 +4718,7 @@ mod tests {
             app.tabs.active_doc_mut().session_id = Some("test-small".to_string());
             app.on_exit();
         }
-        // App dropped — reopen store to verify
+        // App dropped; reopen store to verify
         let store = SessionStore::open(&db_path).expect("reopen store");
         let loaded = store.load_content("test-small").unwrap();
         assert!(loaded.is_some());
@@ -4540,7 +5076,7 @@ mod tests {
     #[test]
     fn test_save_active_untitled_has_no_path() {
         // save_active() on an untitled doc would call save_as_dialog() which
-        // spawns an rfd dialog thread — not safe on headless CI. Instead verify
+        // spawns an rfd dialog thread; not safe on headless CI. Instead verify
         // the branching precondition: untitled docs have no file_path.
         let app = test_app();
         assert!(app.tabs.active_doc().file_path.is_none());
@@ -4550,7 +5086,7 @@ mod tests {
 
     #[test]
     fn test_save_as_context_captures_version() {
-        // save_as_dialog() spawns an rfd dialog thread — not safe on headless
+        // save_as_dialog() spawns an rfd dialog thread; not safe on headless
         // CI. Instead verify the SaveAsContext struct captures the right data.
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("content");
@@ -5140,7 +5676,7 @@ mod tests {
         app.dialog_state = DialogState::None;
         app.continue_close_all();
 
-        // All done — single blank tab, closing_all cleared
+        // All done: single blank tab, closing_all cleared
         assert_eq!(app.tabs.tab_count(), 1);
         assert!(!app.tabs.active_doc().modified);
         assert!(!app.closing_all);
@@ -5161,7 +5697,7 @@ mod tests {
         app.dialog_state = DialogState::None;
         app.closing_all = false;
 
-        // Chain should be stopped — no more prompts
+        // Chain should be stopped; no more prompts
         assert!(!app.closing_all);
         assert_eq!(app.tabs.tab_count(), 2);
     }
@@ -5299,7 +5835,7 @@ mod tests {
         // Pinned tab survives; the unpinned unchanged tabs are closed.
         // Closing the last unpinned tab via close_tab resets to a single
         // empty tab when only one document is left, but here we still have
-        // the pinned one — so the pinned tab should remain.
+        // the pinned one, so the pinned tab should remain.
         assert!(
             app.tabs.documents.iter().any(|d| d.title == "keep_pinned"),
             "pinned tab must survive close_unchanged_tabs"
@@ -5420,9 +5956,10 @@ mod tests {
 
     #[test]
     fn test_save_copy_context_has_is_copy_true() {
-        // save_copy_dialog() spawns an rfd dialog thread — not safe on
+        // save_copy_dialog() spawns an rfd dialog thread; not safe on
         // headless CI. Instead verify the SaveAsContext would have is_copy
-        // set by constructing it directly, matching the pattern at line ~3296.
+        // set by constructing it directly, the same shape
+        // save_as_dialog_impl builds.
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("content");
         let doc = app.tabs.active_doc();
@@ -5439,7 +5976,7 @@ mod tests {
 
     #[test]
     fn test_save_as_context_has_is_copy_false() {
-        // save_as_dialog() spawns an rfd dialog thread — not safe on
+        // save_as_dialog() spawns an rfd dialog thread; not safe on
         // headless CI. Verify the SaveAsContext directly.
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("content");
@@ -5473,7 +6010,7 @@ mod tests {
         assert!(app.handle_escape_shortcut(egui::Key::Escape));
         assert!(matches!(app.dialog_state, DialogState::None));
         assert!(!app.closing_all);
-        // Settings should still be open — only one dialog per press
+        // Settings should still be open; only one dialog per press
         assert!(app.settings_open);
     }
 
@@ -5685,7 +6222,7 @@ mod tests {
     // The global problem-log singleton is a process-wide OnceLock, so we
     // serialise these four tests on a dedicated mutex (no serial_test
     // dep) and use snapshot/records_since to filter out noise from any
-    // other tests in the same binary. `init_for_tests` is idempotent —
+    // other tests in the same binary. `init_for_tests` is idempotent:
     // first call wins, later calls reuse the same temp-backed store.
 
     use std::sync::Mutex;
@@ -5720,8 +6257,8 @@ mod tests {
 
         let mut app = test_app();
         let baseline = crate::problem_log::snapshot_record_count();
-        // UTF-8 string that decodes cleanly but contains an embedded NUL
-        // — exercises the post-decode NUL gate in `complete_copy_contents`.
+        // UTF-8 string that decodes cleanly but contains an embedded NUL;
+        // exercises the post-decode NUL gate in `complete_copy_contents`.
         app.complete_copy_contents(std::path::Path::new("/tmp/nul.bin"), b"head\0tail");
         let new_records = crate::problem_log::records_since(baseline);
         assert!(
@@ -5740,7 +6277,7 @@ mod tests {
 
         let mut app = test_app();
         let baseline = crate::problem_log::snapshot_record_count();
-        // U+202E RIGHT-TO-LEFT OVERRIDE — Trojan-Source class.
+        // U+202E RIGHT-TO-LEFT OVERRIDE, Trojan-Source class.
         let bytes = "safe\u{202E}evil".as_bytes();
         app.complete_copy_contents(std::path::Path::new("/tmp/bidi.txt"), bytes);
         let new_records = crate::problem_log::records_since(baseline);
@@ -5749,7 +6286,7 @@ mod tests {
             "bidi override must emit [CC06]; got: {:?}",
             new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
         );
-        // [CC05] would mean we refused to copy — must NOT be present.
+        // [CC05] would mean we refused to copy; it must NOT be present.
         assert!(
             !new_records.iter().any(|r| r.message.contains("[CC05]")),
             "bidi override is a notice, not a refusal; [CC05] must not appear",
@@ -5769,9 +6306,9 @@ mod tests {
         // for the detected encoding (and even if it decodes, none of the
         // common encodings produce safe text). The decode error or the
         // post-decode NUL gate must surface as [CC05].
-        // UTF-16 LE BOM followed by an odd byte count — decode_bytes returns
+        // UTF-16 LE BOM followed by an odd byte count: decode_bytes returns
         // a hard error (cannot pair the remaining byte), which the decode
-        // gate at line 884 translates to a [CC05] refusal.
+        // gate in `complete_copy_contents` translates to a [CC05] refusal.
         app.complete_copy_contents(std::path::Path::new("/tmp/binary.bin"), b"\xFF\xFE\xFD");
         let new_records = crate::problem_log::records_since(baseline);
         assert!(

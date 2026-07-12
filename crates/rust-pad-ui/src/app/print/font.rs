@@ -5,7 +5,7 @@
 //! deterministic output across platforms.
 //!
 //! Font: **DejaVu Sans Mono** (regular weight).
-//! License: Bitstream Vera / DejaVu license — permissive, reproduced in
+//! License: Bitstream Vera / DejaVu license; permissive, reproduced in
 //! `THIRD_PARTY_LICENSES.md`.
 
 /// Raw TTF bytes of the bundled monospace font.

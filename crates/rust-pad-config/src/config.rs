@@ -3,9 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::theme::{
-    all_builtin_themes, builtin_dark, builtin_dusk, builtin_light, ThemeDefinition,
-};
+use crate::theme::{all_builtin_themes, ThemeDefinition};
 
 /// When to remove dead (non-existent) files from the recent files list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -14,6 +12,100 @@ pub enum RecentFilesCleanup {
     OnStartup,
     OnMenuOpen,
     Both,
+}
+
+/// Persisted window geometry, captured on exit and restored at startup.
+///
+/// The monitor size at save time is recorded so the restore path can tell
+/// whether the saved position still lands on a visible screen.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    /// Outer window position; negative values are legitimate on multi-monitor
+    /// setups and must not be clamped away.
+    pub x: f32,
+    pub y: f32,
+    pub inner_w: f32,
+    pub inner_h: f32,
+    pub maximized: bool,
+    pub monitor_w: f32,
+    pub monitor_h: f32,
+}
+
+/// Height of the band along a window's top edge that must be visible for a
+/// saved position to be restored (the strip the user can grab to move the
+/// window back).
+pub const TITLE_STRIP_HEIGHT: f32 = 30.0;
+
+/// Smallest window size ever restored, regardless of what the config says.
+pub const MIN_RESTORED_INNER: (f32, f32) = (800.0, 600.0);
+
+impl WindowGeometry {
+    /// Returns `true` when every field is finite and sizes are positive,
+    /// the precondition for using this geometry at restore time.
+    pub fn is_plausible(&self) -> bool {
+        let finite = [
+            self.x,
+            self.y,
+            self.inner_w,
+            self.inner_h,
+            self.monitor_w,
+            self.monitor_h,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        finite
+            && self.inner_w > 0.0
+            && self.inner_h > 0.0
+            && self.monitor_w > 0.0
+            && self.monitor_h > 0.0
+    }
+
+    /// The inner size to restore: clamped at both ends to
+    /// [`MIN_RESTORED_INNER`] ..= the saved monitor size (hand-edited JSON
+    /// can carry absurd values in either direction). The `bool` reports
+    /// whether clamping changed anything, so the caller can `warn!`.
+    pub fn restore_inner_size(&self) -> (f32, f32, bool) {
+        let (min_w, min_h) = MIN_RESTORED_INNER;
+        // A monitor smaller than the minimum still gets the minimum: a
+        // too-large window beats an unusably small one.
+        let w = self.inner_w.clamp(min_w, self.monitor_w.max(min_w));
+        let h = self.inner_h.clamp(min_h, self.monitor_h.max(min_h));
+        let clamped =
+            (w - self.inner_w).abs() > f32::EPSILON || (h - self.inner_h).abs() > f32::EPSILON;
+        (w, h, clamped)
+    }
+
+    /// The outer position to restore, or `None` when the saved title-bar
+    /// strip does not intersect the monitor recorded at save time.
+    ///
+    /// Negative coordinates are legitimate multi-monitor positions and are
+    /// never zero-clamped; the visibility test against the recorded monitor
+    /// is the only gate. The strip is the top edge band of the window rect,
+    /// so a window whose bottom pixel peeks onto the screen does not pass.
+    pub fn restore_position(&self) -> Option<(f32, f32)> {
+        let strip_left = self.x;
+        let strip_right = self.x + self.inner_w;
+        let strip_top = self.y;
+        let strip_bottom = self.y + TITLE_STRIP_HEIGHT;
+        let visible = strip_left < self.monitor_w
+            && strip_right > 0.0
+            && strip_top < self.monitor_h
+            && strip_bottom > 0.0;
+        visible.then_some((self.x, self.y))
+    }
+}
+
+/// What degraded while loading the config, so the UI layer can tell the user
+/// instead of silently running on defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigLoadReport {
+    /// The config file existed but could not be parsed; carries the error text.
+    pub parse_error: Option<String>,
+    /// The broken config file could not be moved aside; saving must be
+    /// suppressed so the original is never overwritten.
+    pub save_blocked: bool,
+    /// A `current_theme` value that was reset to "System" by sanitize.
+    pub theme_reset: Option<String>,
 }
 
 /// Top-level application configuration.
@@ -26,6 +118,8 @@ pub struct AppConfig {
     pub word_wrap: bool,
     pub show_special_chars: bool,
     pub show_line_numbers: bool,
+    /// Whether the breadcrumb strip above the editor is shown.
+    pub show_breadcrumb: bool,
     pub restore_open_files: bool,
     pub show_full_path_in_title: bool,
     pub font_size: f32,
@@ -85,6 +179,9 @@ pub struct AppConfig {
     pub workspace_sidebar_width: f32,
     /// Whether hidden files/folders (names starting with `.`) are shown in the workspace tree.
     pub show_hidden_files: bool,
+    /// Window position/size from the last session; `None` until first saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_geometry: Option<WindowGeometry>,
     pub themes: Vec<ThemeDefinition>,
 }
 
@@ -97,6 +194,7 @@ impl Default for AppConfig {
             word_wrap: false,
             show_special_chars: false,
             show_line_numbers: true,
+            show_breadcrumb: true,
             restore_open_files: true,
             show_full_path_in_title: true,
             font_size: 16.0,
@@ -121,6 +219,7 @@ impl Default for AppConfig {
             workspace_sidebar_visible: false,
             workspace_sidebar_width: 250.0,
             show_hidden_files: false,
+            window_geometry: None,
             themes: all_builtin_themes(),
         }
     }
@@ -138,32 +237,95 @@ impl AppConfig {
     /// Loads config from `path`, creating a default file if it doesn't exist.
     /// Returns defaults on any error (missing file, parse error, etc.).
     pub fn load_or_create(path: &std::path::Path) -> Self {
-        if path.exists() {
-            match std::fs::read_to_string(path) {
-                Ok(contents) => match serde_json::from_str::<AppConfig>(&contents) {
-                    Ok(mut config) => {
-                        config.sanitize();
-                        config.with_builtins_merged();
-                        return config;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to parse config at {}: {e}", path.display());
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!("Failed to read config at {}: {e}", path.display());
-                }
-            }
-            // Return defaults on error (don't overwrite broken file)
-            let mut config = Self::default();
-            config.sanitize();
-            config
-        } else {
+        Self::load_or_create_with_report(path).0
+    }
+
+    /// Reads only the persisted window geometry from `path`: a pure read
+    /// with none of [`load_or_create_with_report`](Self::load_or_create_with_report)'s
+    /// side effects (no file creation, no `.bak` move-aside), for use before
+    /// the app owns config loading. Returns `None` on any error or when the
+    /// stored geometry is not plausible.
+    pub fn peek_window_geometry(path: &std::path::Path) -> Option<WindowGeometry> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let config: Self = serde_json::from_str(&text).ok()?;
+        config.window_geometry.filter(WindowGeometry::is_plausible)
+    }
+
+    /// Loads config from `path` like [`load_or_create`](Self::load_or_create),
+    /// additionally reporting anything that degraded so the caller can surface
+    /// it to the user.
+    ///
+    /// On a parse failure the broken file is moved aside to `<path>.bak`
+    /// (replacing any older backup) so a later save can't destroy it. If that
+    /// move fails, the report carries `save_blocked` and the caller must not
+    /// save the config for the rest of the session.
+    pub fn load_or_create_with_report(path: &std::path::Path) -> (Self, ConfigLoadReport) {
+        let mut report = ConfigLoadReport::default();
+        if !path.exists() {
             let config = Self::default();
             if let Err(e) = config.save(path) {
                 tracing::warn!("Failed to create default config at {}: {e}", path.display());
             }
-            config
+            return (config, report);
+        }
+
+        let parse_result = std::fs::read_to_string(path)
+            .map_err(|e| format!("read failed: {e}"))
+            .and_then(|contents| {
+                serde_json::from_str::<AppConfig>(&contents)
+                    .map_err(|e| format!("parse failed: {e}"))
+            });
+
+        match parse_result {
+            Ok(mut config) => {
+                // Merge before sanitizing: a `current_theme` naming a builtin
+                // that isn't in the serialized vec yet (e.g. after an upgrade
+                // that added themes) must survive the unknown-name reset.
+                config.with_builtins_merged();
+                report.theme_reset = config.sanitize();
+                (config, report)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load config at {}: {e}", path.display());
+                report.parse_error = Some(e);
+                report.save_blocked = !Self::backup_broken_file(path);
+                let mut config = Self::default();
+                config.sanitize();
+                (config, report)
+            }
+        }
+    }
+
+    /// Moves an unparsable config file to `<path>.bak`, deleting any stale
+    /// backup first (Windows refuses to rename onto an existing file).
+    /// Returns `false` when the file could not be moved aside; the caller
+    /// must then refuse to save over it.
+    fn backup_broken_file(path: &std::path::Path) -> bool {
+        let mut backup = path.as_os_str().to_owned();
+        backup.push(".bak");
+        let backup = PathBuf::from(backup);
+        if backup.exists() {
+            if let Err(e) = std::fs::remove_file(&backup) {
+                tracing::warn!("Failed to remove stale backup {}: {e}", backup.display());
+                return false;
+            }
+        }
+        match std::fs::rename(path, &backup) {
+            Ok(()) => {
+                tracing::warn!(
+                    "Moved unparsable config {} to {}",
+                    path.display(),
+                    backup.display()
+                );
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to move unparsable config {} aside: {e}; config saving disabled",
+                    path.display()
+                );
+                false
+            }
         }
     }
 
@@ -184,20 +346,21 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Ensures the built-in Dark, Light, and Dusk themes are always present.
+    /// Adds any built-in theme that is missing, so configs serialized by
+    /// older versions gain themes added since.
     /// User-defined themes with matching names take priority over built-ins.
     /// The deletable "Wacky" sample is intentionally not force-merged.
     pub fn with_builtins_merged(&mut self) {
-        if !self.themes.iter().any(|t| t.name == "Dark") {
-            self.themes.insert(0, builtin_dark());
-        }
-        if !self.themes.iter().any(|t| t.name == "Light") {
-            let insert_at = 1.min(self.themes.len());
-            self.themes.insert(insert_at, builtin_light());
-        }
-        if !self.themes.iter().any(|t| t.name == "Dusk") {
-            let insert_at = 2.min(self.themes.len());
-            self.themes.insert(insert_at, builtin_dusk());
+        let mut insert_at = 0;
+        for builtin in all_builtin_themes() {
+            if builtin.name == "Wacky" {
+                continue;
+            }
+            if !self.themes.iter().any(|t| t.name == builtin.name) {
+                let at = insert_at.min(self.themes.len());
+                self.themes.insert(at, builtin);
+            }
+            insert_at += 1;
         }
     }
 
@@ -244,7 +407,7 @@ impl AppConfig {
 
     /// Returns the Copy Contents warning threshold in bytes.
     ///
-    /// `0` in `copy_contents_warning_mb` means "always prompt" — the
+    /// `0` in `copy_contents_warning_mb` means "always prompt": the
     /// caller treats a `0` return value as "every file triggers the
     /// confirmation dialog".
     pub fn copy_contents_warning_bytes(&self) -> u64 {
@@ -263,18 +426,25 @@ impl AppConfig {
     }
 
     /// Clamps values to valid ranges and resets invalid fields.
-    pub fn sanitize(&mut self) {
+    ///
+    /// Returns the previous `current_theme` when it named an unknown theme
+    /// and had to be reset to "System", so callers can tell the user.
+    pub fn sanitize(&mut self) -> Option<String> {
         self.max_zoom_level = self.max_zoom_level.max(1.0);
         self.current_zoom_level = self.current_zoom_level.clamp(0.5, self.max_zoom_level);
         self.font_size = self.font_size.clamp(6.0, 72.0);
 
+        let mut theme_reset = None;
         let valid_modes = ["System", "Dark", "Light"];
         // Also allow any custom theme name as a valid mode
         let theme_names: Vec<String> = self.themes.iter().map(|t| t.name.clone()).collect();
         if !valid_modes.contains(&self.current_theme.as_str())
             && !theme_names.contains(&self.current_theme)
         {
-            self.current_theme = "System".to_string();
+            theme_reset = Some(std::mem::replace(
+                &mut self.current_theme,
+                "System".to_string(),
+            ));
         }
         self.auto_save_interval_secs = self.auto_save_interval_secs.max(5);
         self.recent_files_max_count = self.recent_files_max_count.clamp(1, 50);
@@ -288,7 +458,7 @@ impl AppConfig {
             self.copy_contents_max_mb = self.copy_contents_max_mb.clamp(1, 10_240);
         }
         // The Copy Contents warning threshold cannot exceed the Copy Contents
-        // hard cap — otherwise the user would never see the prompt before
+        // hard cap; otherwise the user would never see the prompt before
         // hitting the outright refusal. `0` on either side means "no limit /
         // always prompt" and is preserved as-is.
         if self.copy_contents_warning_mb > 0 && self.copy_contents_max_mb > 0 {
@@ -300,12 +470,21 @@ impl AppConfig {
             self.session_content_max_kb = self.session_content_max_kb.clamp(1, 102_400);
         }
         self.workspace_sidebar_width = self.workspace_sidebar_width.clamp(150.0, 500.0);
+        // Geometry with non-finite or non-positive values (hand-edited JSON
+        // can encode infinity) is unusable; drop it and let the OS place the
+        // window. Position validation happens at restore time.
+        if self.window_geometry.is_some_and(|g| !g.is_plausible()) {
+            self.window_geometry = None;
+        }
+
+        theme_reset
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::builtin_dark;
 
     #[test]
     fn test_default_config() {
@@ -316,7 +495,8 @@ mod tests {
         assert!(!config.show_special_chars);
         assert!(config.restore_open_files);
         assert!((config.font_size - 16.0).abs() < f32::EPSILON);
-        assert_eq!(config.themes.len(), 4);
+        assert_eq!(config.themes.len(), 8);
+        assert!(config.window_geometry.is_none());
     }
 
     #[test]
@@ -380,7 +560,19 @@ mod tests {
     fn test_theme_names() {
         let config = AppConfig::default();
         let names = config.theme_names();
-        assert_eq!(names, vec!["Dark", "Light", "Dusk", "Wacky"]);
+        assert_eq!(
+            names,
+            vec![
+                "Aurora Dark",
+                "Aurora Light",
+                "Graphite Dark",
+                "Graphite Light",
+                "Dark",
+                "Light",
+                "Dusk",
+                "Wacky"
+            ]
+        );
     }
 
     #[test]
@@ -390,10 +582,114 @@ mod tests {
             ..Default::default()
         };
         config.with_builtins_merged();
-        assert!(config.find_theme("Dark").is_some());
-        assert!(config.find_theme("Light").is_some());
-        assert!(config.find_theme("Dusk").is_some());
-        assert!(config.find_theme("Wacky").is_some());
+        for name in [
+            "Aurora Dark",
+            "Aurora Light",
+            "Graphite Dark",
+            "Graphite Light",
+            "Dark",
+            "Light",
+            "Dusk",
+            "Wacky",
+        ] {
+            assert!(config.find_theme(name).is_some(), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn test_with_builtins_merged_reaches_configs_from_older_versions() {
+        // Simulates a user whose serialized themes vec predates the Aurora and
+        // Graphite themes: after a merge they appear, in builtin order.
+        let mut config = AppConfig {
+            themes: vec![
+                builtin_dark(),
+                crate::theme::builtin_light(),
+                crate::theme::builtin_dusk(),
+                crate::theme::sample_wacky(),
+            ],
+            ..Default::default()
+        };
+        config.with_builtins_merged();
+        assert_eq!(config.themes.len(), 8);
+        assert_eq!(config.themes[0].name, "Aurora Dark");
+        assert_eq!(config.themes[3].name, "Graphite Light");
+    }
+
+    #[test]
+    fn test_with_builtins_merged_does_not_resurrect_deleted_wacky() {
+        let mut config = AppConfig {
+            themes: vec![builtin_dark()],
+            ..Default::default()
+        };
+        config.with_builtins_merged();
+        assert!(config.find_theme("Wacky").is_none());
+    }
+
+    #[test]
+    fn test_load_merges_before_sanitize_so_new_builtin_selection_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let old_config = AppConfig {
+            current_theme: "Aurora Dark".to_string(),
+            themes: vec![builtin_dark()],
+            ..Default::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&old_config).unwrap()).unwrap();
+
+        let (loaded, report) = AppConfig::load_or_create_with_report(&path);
+
+        assert_eq!(loaded.current_theme, "Aurora Dark");
+        assert_eq!(report, ConfigLoadReport::default());
+    }
+
+    #[test]
+    fn test_load_reports_theme_reset_for_unknown_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let old_config = AppConfig {
+            current_theme: "Gone".to_string(),
+            ..Default::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&old_config).unwrap()).unwrap();
+
+        let (loaded, report) = AppConfig::load_or_create_with_report(&path);
+
+        assert_eq!(loaded.current_theme, "System");
+        assert_eq!(report.theme_reset.as_deref(), Some("Gone"));
+        assert!(report.parse_error.is_none());
+    }
+
+    #[test]
+    fn test_load_parse_failure_moves_file_to_bak_and_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let (loaded, report) = AppConfig::load_or_create_with_report(&path);
+
+        assert_eq!(loaded.current_theme, "System");
+        assert!(report.parse_error.is_some());
+        assert!(!report.save_blocked);
+        assert!(!path.exists(), "broken original must be moved aside");
+        assert!(dir.path().join("config.json.bak").exists());
+    }
+
+    #[test]
+    fn test_load_parse_failure_replaces_stale_bak() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let bak = dir.path().join("config.json.bak");
+        std::fs::write(&path, "{ fresh breakage").unwrap();
+        std::fs::write(&bak, "old backup").unwrap();
+
+        let (_, report) = AppConfig::load_or_create_with_report(&path);
+
+        assert!(!report.save_blocked);
+        assert_eq!(
+            std::fs::read_to_string(&bak).unwrap(),
+            "{ fresh breakage",
+            "the newer broken file replaces the stale backup"
+        );
     }
 
     #[test]
@@ -940,5 +1236,232 @@ mod tests {
         let json = r#"{"current_theme": "Dark"}"#;
         let parsed: AppConfig = serde_json::from_str(json).unwrap();
         assert!(!parsed.show_hidden_files);
+    }
+
+    // ── Window geometry tests ───────────────────────────────────────
+
+    fn plausible_geometry() -> WindowGeometry {
+        WindowGeometry {
+            x: -1920.0,
+            y: 10.0,
+            inner_w: 1200.0,
+            inner_h: 800.0,
+            maximized: false,
+            monitor_w: 1920.0,
+            monitor_h: 1080.0,
+        }
+    }
+
+    #[test]
+    fn test_geometry_serde_round_trip() {
+        let config = AppConfig {
+            window_geometry: Some(plausible_geometry()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.window_geometry, Some(plausible_geometry()));
+    }
+
+    #[test]
+    fn test_geometry_missing_field_stays_none_and_absent_in_json() {
+        let config = AppConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("window_geometry"));
+        let parsed: AppConfig = serde_json::from_str(r#"{"current_theme": "Dark"}"#).unwrap();
+        assert!(parsed.window_geometry.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_preserves_negative_multi_monitor_position() {
+        let mut config = AppConfig {
+            window_geometry: Some(plausible_geometry()),
+            ..Default::default()
+        };
+        config.sanitize();
+        assert_eq!(config.window_geometry, Some(plausible_geometry()));
+    }
+
+    #[test]
+    fn test_sanitize_drops_non_finite_geometry() {
+        let mut geometry = plausible_geometry();
+        geometry.inner_w = f32::INFINITY;
+        let mut config = AppConfig {
+            window_geometry: Some(geometry),
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!(config.window_geometry.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_drops_non_positive_sizes() {
+        let mut geometry = plausible_geometry();
+        geometry.inner_h = 0.0;
+        let mut config = AppConfig {
+            window_geometry: Some(geometry),
+            ..Default::default()
+        };
+        config.sanitize();
+        assert!(config.window_geometry.is_none());
+    }
+
+    #[test]
+    fn test_geometry_out_of_range_number_fails_parse_and_takes_backup_path() {
+        let json = r#"{"window_geometry": {"x": 0.0, "y": 0.0, "inner_w": 1e999, "inner_h": 800.0, "maximized": false, "monitor_w": 1920.0, "monitor_h": 1080.0}}"#;
+        assert!(serde_json::from_str::<AppConfig>(json).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, json).unwrap();
+        let (loaded, report) = AppConfig::load_or_create_with_report(&path);
+        assert!(loaded.window_geometry.is_none());
+        assert!(report.parse_error.is_some());
+        assert!(dir.path().join("config.json.bak").exists());
+    }
+
+    // ── Restore rules (Phase G / ADR-7) ─────────────────────────────
+
+    /// A geometry fully on a 1920×1080 primary monitor.
+    fn on_screen_geometry() -> WindowGeometry {
+        WindowGeometry {
+            x: 100.0,
+            y: 60.0,
+            inner_w: 1200.0,
+            inner_h: 800.0,
+            maximized: false,
+            monitor_w: 1920.0,
+            monitor_h: 1080.0,
+        }
+    }
+
+    #[test]
+    fn restore_inner_size_passes_valid_size_through() {
+        let (w, h, clamped) = on_screen_geometry().restore_inner_size();
+        assert!((w - 1200.0).abs() < f32::EPSILON);
+        assert!((h - 800.0).abs() < f32::EPSILON);
+        assert!(!clamped);
+    }
+
+    #[test]
+    fn restore_inner_size_clamps_tiny_sizes_up() {
+        let mut g = on_screen_geometry();
+        g.inner_w = 10.0;
+        g.inner_h = 5.0;
+        let (w, h, clamped) = g.restore_inner_size();
+        assert!((w - 800.0).abs() < f32::EPSILON);
+        assert!((h - 600.0).abs() < f32::EPSILON);
+        assert!(clamped);
+    }
+
+    #[test]
+    fn restore_inner_size_clamps_oversized_to_saved_monitor() {
+        let mut g = on_screen_geometry();
+        g.inner_w = 99_999.0;
+        g.inner_h = 99_999.0;
+        let (w, h, clamped) = g.restore_inner_size();
+        assert!((w - 1920.0).abs() < f32::EPSILON);
+        assert!((h - 1080.0).abs() < f32::EPSILON);
+        assert!(clamped);
+    }
+
+    #[test]
+    fn restore_inner_size_minimum_beats_a_tiny_monitor() {
+        let mut g = on_screen_geometry();
+        g.monitor_w = 640.0;
+        g.monitor_h = 480.0;
+        let (w, h, _) = g.restore_inner_size();
+        assert!((w - 800.0).abs() < f32::EPSILON);
+        assert!((h - 600.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn restore_position_accepts_on_screen_rect() {
+        assert_eq!(on_screen_geometry().restore_position(), Some((100.0, 60.0)));
+    }
+
+    #[test]
+    fn restore_position_never_zero_clamps_negative_coords() {
+        // A window straddling the left monitor edge: negative x, but the
+        // title strip still reaches into the monitor.
+        let mut g = on_screen_geometry();
+        g.x = -400.0;
+        assert_eq!(g.restore_position(), Some((-400.0, 60.0)));
+    }
+
+    #[test]
+    fn restore_position_rejects_rect_past_the_right_edge() {
+        let mut g = on_screen_geometry();
+        g.x = 2000.0; // entirely beyond the saved 1920-wide monitor
+        assert_eq!(g.restore_position(), None);
+    }
+
+    #[test]
+    fn restore_position_rejects_title_strip_above_the_screen() {
+        // The window body would still be visible, but the grabbable title
+        // strip is entirely above the screen, so the position is discarded.
+        let mut g = on_screen_geometry();
+        g.y = -(TITLE_STRIP_HEIGHT + 1.0);
+        assert_eq!(g.restore_position(), None);
+    }
+
+    #[test]
+    fn restore_position_rejects_rect_below_the_screen() {
+        let mut g = on_screen_geometry();
+        g.y = 1100.0; // strip top below the 1080-tall monitor
+        assert_eq!(g.restore_position(), None);
+    }
+
+    // ── peek_window_geometry ────────────────────────────────────────
+
+    #[test]
+    fn peek_window_geometry_reads_saved_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let config = AppConfig {
+            window_geometry: Some(on_screen_geometry()),
+            ..Default::default()
+        };
+        config.save(&path).unwrap();
+        assert_eq!(
+            AppConfig::peek_window_geometry(&path),
+            Some(on_screen_geometry())
+        );
+    }
+
+    #[test]
+    fn peek_window_geometry_missing_file_is_none_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(AppConfig::peek_window_geometry(&path), None);
+        assert!(!path.exists(), "peek must not create the config file");
+    }
+
+    #[test]
+    fn peek_window_geometry_broken_file_is_none_and_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{not json").unwrap();
+        assert_eq!(AppConfig::peek_window_geometry(&path), None);
+        assert!(path.exists());
+        assert!(
+            !dir.path().join("config.json.bak").exists(),
+            "peek must not move broken files aside"
+        );
+    }
+
+    #[test]
+    fn peek_window_geometry_filters_implausible_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut g = on_screen_geometry();
+        g.inner_w = -5.0;
+        let config = AppConfig {
+            window_geometry: Some(g),
+            ..Default::default()
+        };
+        // Bypass save-time sanitize by writing the JSON directly.
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(AppConfig::peek_window_geometry(&path), None);
     }
 }

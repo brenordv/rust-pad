@@ -27,7 +27,7 @@ impl<'a> EditorWidget<'a> {
         for event in &events {
             match event {
                 egui::Event::Text(text) => {
-                    // Suppress text insertion when ctrl or alt is held — those
+                    // Suppress text insertion when ctrl or alt is held; those
                     // key combos are handled as shortcuts, not text input.
                     // Without the alt check, Alt+Shift+. produces a ">" text
                     // event that gets inserted into the document.
@@ -89,7 +89,6 @@ impl<'a> EditorWidget<'a> {
                 | egui::Key::PageDown
         );
 
-        // Selection mode: if shift is held, start/extend selection on all cursors
         if shift && is_movement {
             self.doc.cursor.start_selection();
             for sc in &mut self.doc.secondary_cursors {
@@ -102,7 +101,6 @@ impl<'a> EditorWidget<'a> {
             }
         }
 
-        // Try each handler group; return early once one matches.
         if self.handle_navigation_key(key, ctrl, wrap_map) {
             return;
         }
@@ -110,7 +108,7 @@ impl<'a> EditorWidget<'a> {
             return;
         }
         self.handle_selection_key(key, ctrl);
-        // Note: Ctrl+Z/Y/X/C/V are handled by the App level
+        // Ctrl+Z/Y/X/C/V are handled at the App level
     }
 
     /// Handles navigation keys (arrows, Home, End, PageUp, PageDown).
@@ -313,12 +311,12 @@ fn move_cursor_visual(cursor: &mut Cursor, buffer: &TextBuffer, wm: &WrapMap, up
     let cur_visual = wm.position_to_visual_line(cursor.position.line, cursor.position.col);
     let target_visual = if up {
         if cur_visual == 0 {
-            return; // already on the first visual line — matches move_up's edge guard
+            return; // already on the first visual line; matches move_up's edge guard
         }
         cur_visual - 1
     } else {
         if cur_visual + 1 >= wm.total_visual_lines {
-            return; // already on the last visual line — matches move_down's edge guard
+            return; // already on the last visual line; matches move_down's edge guard
         }
         cur_visual + 1
     };
@@ -328,7 +326,7 @@ fn move_cursor_visual(cursor: &mut Cursor, buffer: &TextBuffer, wm: &WrapMap, up
     let desired_visual_col = desired % cpvl;
 
     let (logical_line, wrap_row) = wm.visual_to_logical(target_visual);
-    // line_len_chars already excludes the trailing newline, matching the
+    // line_len_chars already excludes the trailing newline; it matches the
     // content length WrapMap uses to compute segments.
     let content_len = buffer.line_len_chars(logical_line).unwrap_or(0);
     let seg_start = wrap_row * cpvl;
@@ -349,7 +347,7 @@ mod tests {
     use rust_pad_core::document::Document;
 
     /// Builds a `Document` containing `text` and a `WrapMap` with the given
-    /// chars-per-visual-line. Deterministic — no viewport-width dependency.
+    /// chars-per-visual-line. Deterministic: no viewport-width dependency.
     fn doc_and_wrap(text: &str, cpvl: usize) -> (Document, WrapMap) {
         let mut doc = Document::new();
         doc.insert_text(text);

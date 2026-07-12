@@ -254,7 +254,6 @@ impl Document {
 
     /// Inserts text at the current cursor position.
     pub fn insert_text(&mut self, text: &str) {
-        // Delete selection first if any
         if self.cursor.selection_anchor.is_some() {
             self.delete_selection();
         }
@@ -263,7 +262,6 @@ impl Document {
         let cursor_before = self.cursor.position;
 
         if self.buffer.insert(char_idx, text).is_ok() {
-            // Advance cursor past inserted text
             let new_pos = char_to_pos(&self.buffer, char_idx + text.chars().count());
             self.cursor.position = new_pos;
             self.cursor.desired_col = None;
@@ -409,7 +407,6 @@ impl Document {
     pub fn undo(&mut self) {
         if let Some(ops) = self.history.undo() {
             self.history.pause_recording();
-            // Apply operations in reverse
             for op in ops.iter().rev() {
                 // Reverse: remove what was inserted, insert what was deleted
                 if !op.inserted.is_empty() {
@@ -421,7 +418,6 @@ impl Document {
                     let _ = self.buffer.insert(op.position, &op.deleted);
                 }
             }
-            // Restore cursor to before position
             if let Some(first_op) = ops.first() {
                 self.cursor.position = first_op.cursor_before.into();
                 self.cursor.clear_selection();
@@ -439,7 +435,6 @@ impl Document {
     pub fn redo(&mut self) {
         if let Some(ops) = self.history.redo() {
             self.history.pause_recording();
-            // Apply operations in forward order
             for op in &ops {
                 if !op.deleted.is_empty() {
                     let _ = self
@@ -450,7 +445,6 @@ impl Document {
                     let _ = self.buffer.insert(op.position, &op.inserted);
                 }
             }
-            // Restore cursor to after position
             if let Some(last_op) = ops.last() {
                 self.cursor.position = last_op.cursor_after.into();
                 self.cursor.clear_selection();
@@ -494,7 +488,6 @@ impl Document {
 
     /// Merges cursors that overlap or are at the same position.
     pub fn merge_overlapping_cursors(&mut self) {
-        // Collect all cursor positions (as char indices) to detect duplicates
         let primary_idx = pos_to_char(&self.buffer, self.cursor.position).unwrap_or(0);
         self.secondary_cursors.retain(|sc| {
             let sc_idx = pos_to_char(&self.buffer, sc.position).unwrap_or(0);
@@ -623,7 +616,7 @@ impl Document {
     /// cursor's selection, or `None` if there is no non-empty selection.
     ///
     /// Returns `None` for an empty selection (`anchor == position`) so callers
-    /// can fall back to single-cursor-line behavior — see the Tab key handler
+    /// can fall back to single-cursor-line behavior; see the Tab key handler
     /// and the menu `Edit > Increase/Decrease Indent` fallback.
     fn primary_selection_line_range(&self) -> Option<(usize, usize)> {
         let sel = self.cursor.selection()?;
@@ -660,7 +653,7 @@ impl Document {
             let w = style.indent_text().chars().count() as isize;
             (w, w)
         } else {
-            // Dedent is per-line and, for Spaces, block-aware — read the exact
+            // Dedent is per-line and, for Spaces, block-aware: read the exact
             // removal each cursor line will see so the endpoints track the edit.
             let a = -(line_ops::dedent_removed_for_line(
                 &self.buffer,
@@ -1156,7 +1149,7 @@ mod tests {
         let mut doc = Document::new();
         doc.insert_text("hello world");
         doc.cursor.position = Position::new(0, 0);
-        // Add cursor at same position as primary — should be merged
+        // Add cursor at same position as primary; should be merged
         let sc = Cursor::new(); // position (0, 0) same as primary
         doc.add_secondary_cursor(sc);
         assert_eq!(doc.secondary_cursors.len(), 0);
@@ -1292,7 +1285,7 @@ mod tests {
         // Buffer should now be " bar\n qux"
         assert_eq!(doc.buffer.to_string(), " bar\n qux");
 
-        // Paste back — split by \n, one per cursor
+        // Paste back: split by \n, one per cursor
         let lines: Vec<&str> = copied.split('\n').collect();
         doc.insert_text_per_cursor(&lines);
         assert_eq!(doc.buffer.to_string(), "foo bar\nbaz qux");
@@ -1878,7 +1871,7 @@ mod tests {
         let mut doc = doc_with_text("hello\nworld");
         doc.cursor.position = Position::new(0, 3);
         assert!(!doc.indent_or_dedent_selection(true));
-        // Buffer is unchanged — caller must apply its own fallback.
+        // Buffer is unchanged; caller must apply its own fallback.
         assert_eq!(doc.buffer.to_string(), "hello\nworld");
     }
 
@@ -1896,7 +1889,7 @@ mod tests {
     fn indent_or_dedent_selection_single_line_indents() {
         let mut doc = doc_with_text("aaa\nbbb\nccc");
         doc.indent_style = IndentStyle::Spaces(2);
-        // Select part of line 0 — the selected text must NOT be erased.
+        // Select part of line 0; the selected text must NOT be erased.
         doc.cursor.selection_anchor = Some(Position::new(0, 0));
         doc.cursor.position = Position::new(0, 3);
         assert!(doc.indent_or_dedent_selection(true));
@@ -2024,7 +2017,7 @@ mod tests {
 
     #[test]
     fn indent_multiline_top_mid_line_snaps_to_col_zero() {
-        // A mid-first-line start snaps to col 0 — conventional whole-line
+        // A mid-first-line start snaps to col 0, the conventional whole-line
         // indent behaviour (chosen Option A). Documented so any future change
         // is intentional.
         let mut doc = doc_with_text("abcdef\nghi\njkl");

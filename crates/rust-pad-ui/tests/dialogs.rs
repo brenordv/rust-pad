@@ -51,10 +51,10 @@ fn test_find_replace_buttons_exist() {
     harness.key_press_modifiers(ctrl, Key::F);
     harness.run();
 
-    harness.get_by_label("  Find Next  ");
-    harness.get_by_label("  Find Prev  ");
-    harness.get_by_label("  Replace  ");
-    harness.get_by_label("  Replace All  ");
+    harness.get_by_label("Find Next");
+    harness.get_by_label("Find Prev");
+    harness.get_by_label("Replace");
+    harness.get_by_label("Replace All");
 }
 
 #[test]
@@ -88,6 +88,65 @@ fn test_find_replace_closes_on_escape() {
     assert!(harness.query_by_label("Find and Replace").is_none());
 }
 
+// ── Settings Dialog (centered + movable) ───────────────────────────────────
+
+/// The Settings window node: several UI elements carry the "Settings" label
+/// (activity-bar item, menu entries), so pick the one wide enough to be the
+/// dialog window itself.
+fn settings_window_rect(harness: &Harness<'_, App>) -> egui::Rect {
+    harness
+        .get_all_by_label("Settings")
+        .map(|node| node.rect())
+        .find(|rect| rect.width() > 300.0)
+        .expect("settings window node not found")
+}
+
+#[test]
+fn settings_dialog_opens_centered_and_can_be_dragged() {
+    let mut harness = create_harness();
+    harness.state_mut().settings_open = true;
+    harness.run();
+
+    // Opens centered in the 1024x768 viewport.
+    let before = settings_window_rect(&harness);
+    let center = before.center();
+    assert!(
+        (center.x - 512.0).abs() <= 2.0 && (center.y - 384.0).abs() <= 2.0,
+        "settings should open centered, got {center:?}"
+    );
+
+    // Drag from the header band (left of the close button). A centered
+    // dialog used to be anchored, and anchored egui areas are immovable.
+    let grab = egui::pos2(before.left() + 80.0, before.top() + 12.0);
+    let delta = egui::vec2(90.0, 60.0);
+    let primary = egui::PointerButton::Primary;
+    harness.event(egui::Event::PointerMoved(grab));
+    harness.step();
+    harness.event(egui::Event::PointerButton {
+        pos: grab,
+        button: primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    harness.step();
+    harness.event(egui::Event::PointerMoved(grab + delta));
+    harness.step();
+    harness.event(egui::Event::PointerButton {
+        pos: grab + delta,
+        button: primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    harness.run();
+
+    let after = settings_window_rect(&harness);
+    let moved = after.center() - before.center();
+    assert!(
+        (moved - delta).length() <= 2.0,
+        "settings window should move by the drag delta; moved {moved:?}, wanted {delta:?}"
+    );
+}
+
 // ── Go to Line Dialog ──────────────────────────────────────────────────────
 
 #[test]
@@ -118,8 +177,19 @@ fn test_go_to_line_buttons_exist() {
     harness.key_press_modifiers(ctrl, Key::G);
     harness.run();
 
-    harness.get_by_label("    Go    ");
-    harness.get_by_label("  I'm not going anywhere  ");
+    harness.get_by_label("Go");
+    harness.get_by_label("I'm not going anywhere");
+}
+
+// ── About dialog ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_about_dialog_shows_third_party_notices() {
+    let mut harness = create_harness();
+    harness.state_mut().about_open = true;
+    harness.run();
+    harness.get_by_label("About rust-pad");
+    harness.get_by_label("Third-Party Notices");
 }
 
 #[test]
@@ -175,7 +245,7 @@ fn test_search_case_sensitive_updates_count() {
     setup_search(&mut harness, "Hello HELLO hello", "hello");
     harness.run();
 
-    // Default is case-insensitive — should find all 3
+    // Default is case-insensitive: should find all 3
     assert_eq!(harness.state().find_replace.engine.match_count(), 3);
 
     // Toggle case-sensitive on
@@ -205,7 +275,7 @@ fn test_search_whole_word_updates_count() {
         "Should find at least 3 'cat' occurrences, got {initial_count}"
     );
 
-    // Toggle whole-word on — should only match standalone "cat"
+    // Toggle whole-word on: should only match standalone "cat"
     harness.state_mut().find_replace.options.whole_word = true;
     harness.run();
     harness.run();

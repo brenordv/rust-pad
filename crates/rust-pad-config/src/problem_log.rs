@@ -4,7 +4,7 @@
 ///
 /// Each entry has a unique auto-incrementing ID, a UTC timestamp, a human-
 /// readable message, and a read/unread flag. The database uses redb for
-/// crash safety — entries survive even if the process terminates unexpectedly.
+/// crash safety: entries survive even if the process terminates unexpectedly.
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -102,7 +102,7 @@ impl ProblemStore {
     pub fn open(path: &Path) -> Result<Self> {
         let db = open_or_create_db(path, "problem-log")?;
 
-        // Ensure the table exists.
+        // Create the table if it doesn't exist yet.
         let write_txn = db
             .begin_write()
             .context("Failed to begin initial problem-log write transaction")?;
@@ -193,7 +193,6 @@ impl ProblemStore {
     /// Marks all entries as read.
     pub fn mark_all_as_read(&self) -> Result<()> {
         write_table!(self.db, PROBLEM_TABLE, |table| {
-            // Collect entries that need updating.
             let unread: Vec<(u64, Vec<u8>)> = table
                 .iter()
                 .context("Failed to iterate problems")?

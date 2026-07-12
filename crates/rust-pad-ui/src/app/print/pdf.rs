@@ -27,7 +27,7 @@ pub struct PdfInput<'a> {
     pub generated_at: chrono::DateTime<chrono::Local>,
     /// Pages produced by [`layout::paginate`](super::layout::paginate).
     pub pages: &'a [Page],
-    /// Layout metrics — must match what was passed to `paginate`.
+    /// Layout metrics; must match what was passed to `paginate`.
     pub layout: &'a PageLayout,
     /// Total number of source lines in the document. Used to compute the
     /// gutter width so line numbers are right-aligned consistently across
@@ -108,7 +108,7 @@ fn encode_text(text: &str, char_to_gid: &BTreeMap<char, u16>) -> Vec<u8> {
 /// Renders `input` into a complete PDF byte buffer.
 ///
 /// Returns an error if the bundled font cannot be parsed (should not
-/// happen in practice — see the unit test in [`super::font`]) or if
+/// happen in practice; see the unit test in [`super::font`]) or if
 /// `pdf-writer` produces an invalid buffer.
 pub fn render_to_bytes(input: &PdfInput<'_>) -> Result<Vec<u8>> {
     let font_info = parse_font()?;
@@ -223,7 +223,7 @@ fn embed_font(
         f.to_unicode(cmap_id);
     }
 
-    // CID font (descendant — TrueType outlines).
+    // CID font (descendant, TrueType outlines).
     {
         let mut f = pdf.cid_font(cid_font_id);
         f.subtype(CidFontType::Type2);
@@ -255,7 +255,7 @@ fn embed_font(
     // Raw TTF stream (font file data).
     pdf.stream(font_stream_id, FONT_BYTES);
 
-    // ToUnicode CMap — enables text selection/search in the PDF.
+    // ToUnicode CMap: enables text selection/search in the PDF.
     let mut gid_to_char: BTreeMap<u16, char> = BTreeMap::new();
     for (&ch, &gid) in &info.char_to_gid {
         gid_to_char.entry(gid).or_insert(ch);
@@ -522,7 +522,7 @@ mod tests {
             "`Td` operator must not be used (it serializes relative positioning)"
         );
 
-        // Tm (absolute positioning) — header title + subtitle + timestamp
+        // Tm (absolute positioning): header title + subtitle + timestamp
         // + footer = 4 fixed, plus per-row gutter + body text.
         let tm_count = stream.lines().filter(|l| l.ends_with(" Tm")).count();
         assert!(
@@ -530,7 +530,7 @@ mod tests {
             "expected several Tm ops for header/body/footer, got {tm_count}"
         );
 
-        // Tj (show text) — at least one per emit.
+        // Tj (show text): at least one per emit.
         let tj_count = stream.lines().filter(|l| l.ends_with(" Tj")).count();
         assert!(
             tj_count >= 8,

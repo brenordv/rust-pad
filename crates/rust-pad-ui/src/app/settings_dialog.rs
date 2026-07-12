@@ -5,6 +5,7 @@
 use eframe::egui;
 use rust_pad_config::RecentFilesCleanup;
 
+use crate::app::chrome::{self, DialogOptions};
 use crate::tabs::DefaultLineEnding;
 
 use super::App;
@@ -38,13 +39,22 @@ impl App {
         }
 
         let mut open = true;
-        egui::Window::new("Settings")
-            .collapsible(false)
-            .resizable(true)
-            .default_size([620.0, 420.0])
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
-            .show(ctx, |ui| {
+        let chrome_theme = self.theme_ctrl.chrome.clone();
+        let metrics = self.theme_ctrl.metrics.clone();
+        chrome::show_dialog(
+            ctx,
+            "Settings",
+            &mut open,
+            &chrome_theme,
+            &metrics,
+            DialogOptions {
+                resizable: true,
+                default_width: 620.0,
+                default_height: Some(420.0),
+                center: true,
+                ..Default::default()
+            },
+            |ui| {
                 // Prevent the window from changing size when switching tabs.
                 ui.set_min_size(egui::vec2(
                     SIDEBAR_WIDTH + CONTENT_MIN_WIDTH,
@@ -112,7 +122,8 @@ impl App {
                         },
                     );
                 });
-            });
+            },
+        );
 
         if !open {
             self.settings_open = false;

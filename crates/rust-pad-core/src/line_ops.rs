@@ -409,7 +409,7 @@ pub fn leading_indent_removable(
 /// every line in `[start_line, end_line)`.
 ///
 /// Returns `0` for [`IndentStyle::Tabs`] (tabs dedent per line, not as a block)
-/// and when no line in the range is *constraining* — i.e. no line has both
+/// and when no line in the range is *constraining*: no line has both
 /// non-whitespace content and at least one leading space. Otherwise the amount
 /// is the smallest leading-space count among constraining lines, capped at the
 /// indent width `w`.
@@ -573,7 +573,7 @@ pub fn join_lines(buffer: &mut TextBuffer, start_line: usize, end_line: usize) -
         String::with_capacity(lines.iter().map(String::len).sum::<usize>() + lines.len());
     for (i, line) in lines.iter().enumerate() {
         let slice = match (i == 0, i == last_idx) {
-            (true, true) => line.as_str(), // single line — unreachable due to len check
+            (true, true) => line.as_str(), // single line; unreachable due to len check
             (true, false) => line.trim_end(), // first: keep leading, drop trailing
             (false, true) => line.trim_start(), // last: keep trailing, drop leading
             (false, false) => line.trim(), // middle: drop both
@@ -754,8 +754,8 @@ mod tests {
     #[test]
     fn test_dedent_spaces_partial() {
         // Block dedent removes the common minimum (2), capped at width (4), from
-        // every line — preserving the 2-space gap between the lines rather than
-        // smushing both to column 0.
+        // every line, so the 2-space gap between the lines survives rather than
+        // both lines smushing to column 0.
         let style = IndentStyle::Spaces(4);
         let mut buf = TextBuffer::from("  a\n    b");
         dedent_lines(&mut buf, 0, 2, &style).unwrap();
@@ -1065,8 +1065,8 @@ mod tests {
     #[test]
     fn block_dedent_preserves_relative_gaps() {
         // The brief's JSON: leading spaces (1, 2, 3, 1). Each Shift+Tab removes
-        // the common minimum, capped at width, preserving the ff/cc gap and
-        // marching to column 0.
+        // the common minimum, capped at width; the ff/cc gap survives and the
+        // block marches to column 0.
         let style = IndentStyle::Spaces(4);
         let mut buf = TextBuffer::from(" {\n  \"ff\":23,\n   \"cc\":32\n }");
 
@@ -1097,8 +1097,8 @@ mod tests {
     #[test]
     fn block_dedent_ignores_blank_and_flush_lines() {
         // A blank line and an already-flush content line must not freeze the
-        // block amount at 0 — the indented lines still dedent by their common
-        // minimum (4), preserving the 2-space gap between them.
+        // block amount at 0; the indented lines still dedent by their common
+        // minimum (4) and the 2-space gap between them survives.
         let style = IndentStyle::Spaces(4);
         let mut buf = TextBuffer::from("flush\n\n    a\n      b");
         dedent_lines(&mut buf, 0, 4, &style).unwrap();
@@ -1126,7 +1126,7 @@ mod tests {
 
     #[test]
     fn block_dedent_tabs_unchanged() {
-        // Tabs dedent one tab per line — deeper lines stay deeper.
+        // Tabs dedent one tab per line; deeper lines stay deeper.
         let style = IndentStyle::Tabs;
         let mut buf = TextBuffer::from("\ta\n\t\tb\n\t\t\tc");
         dedent_lines(&mut buf, 0, 3, &style).unwrap();

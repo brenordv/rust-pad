@@ -1,7 +1,8 @@
 //! Word-wrap map for the editor widget.
 //!
 //! Precomputes how logical lines map to visual (wrapped) lines,
-//! enabling efficient rendering and cursor placement in wrap mode.
+//! so rendering and cursor placement in wrap mode don't recompute
+//! the wrapping on every access.
 
 use rust_pad_core::document::Document;
 

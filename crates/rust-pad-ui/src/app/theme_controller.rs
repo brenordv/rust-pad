@@ -1,12 +1,15 @@
 //! Manages theme state: editor colors, syntax highlighting, zoom, and accent color.
 //!
-//! Encapsulates all theme-related fields that were previously spread across `App`,
-//! providing a focused API for theme switching, zoom control, and visual configuration.
+//! Encapsulates all theme-related fields that were previously spread across `App`
+//! behind a focused API for theme switching, zoom control, and visual configuration.
 
 use egui::Color32;
 
-use rust_pad_config::{ThemeDefinition, UiColors};
+use rust_pad_config::ThemeDefinition;
 
+use crate::app::resolved_theme::{
+    apply_spacing, build_visuals, ChromeTheme, Metrics, MetricsStyle,
+};
 use crate::editor::{EditorTheme, SyntaxHighlighter};
 
 use super::ThemeMode;
@@ -15,6 +18,10 @@ use super::ThemeMode;
 pub struct ThemeController {
     /// The resolved editor theme (colors, font, etc.).
     pub theme: EditorTheme,
+    /// The resolved chrome palette used by custom-painted UI.
+    pub chrome: ChromeTheme,
+    /// Metrics (radii, spacing, per-direction rendering choices).
+    pub metrics: Metrics,
     /// Which theme mode is active (System, Dark, Light, or a custom name).
     pub theme_mode: ThemeMode,
     /// All available theme definitions (built-in + user-defined).
@@ -42,39 +49,26 @@ impl ThemeController {
         ctx: &egui::Context,
     ) -> Self {
         let mut theme_mode = ThemeMode(current_theme.to_string());
-        let resolved_name = theme_mode.resolve().to_string();
+        let theme_def = Self::resolve_definition(&themes, &mut theme_mode);
 
-        // Resolve theme definition; fall back to System if the theme doesn't exist
-        let theme_def = match themes.iter().find(|t| t.name == resolved_name).cloned() {
-            Some(def) => def,
-            None => {
-                tracing::warn!(
-                    "Theme '{}' not found, falling back to System",
-                    resolved_name
-                );
-                theme_mode = ThemeMode::system();
-                let fallback_name = theme_mode.resolve().to_string();
-                themes
-                    .iter()
-                    .find(|t| t.name == fallback_name)
-                    .cloned()
-                    .unwrap_or_else(rust_pad_config::theme::builtin_dark)
-            }
-        };
-
-        let editor_theme = EditorTheme::from_config(&theme_def.editor, font_size);
-        Self::apply_theme_visuals(ctx, &theme_def.ui, theme_def.dark_mode);
-        let ac = theme_def.ui.accent_color;
-        let accent_color = Color32::from_rgba_premultiplied(ac.r, ac.g, ac.b, ac.a);
+        let metrics = Metrics::for_definition(&theme_def);
+        let (chrome, derived) = ChromeTheme::from_definition(&theme_def);
+        let editor_theme =
+            EditorTheme::from_config(&theme_def.editor, font_size, metrics.line_height_factor)
+                .with_chrome(&chrome, &metrics);
+        Self::apply_to_context(ctx, &theme_def, &chrome, &metrics);
+        Self::log_resolution(&theme_def, &metrics, derived);
 
         let mut syntax_highlighter = SyntaxHighlighter::new();
         syntax_highlighter.set_theme(&theme_def.syntax_theme);
 
         Self {
             theme: editor_theme,
+            accent_color: chrome.accent,
+            chrome,
+            metrics,
             theme_mode,
             available_themes: themes,
-            accent_color,
             syntax_highlighter,
             default_zoom_level: zoom_level,
             max_zoom_level,
@@ -84,91 +78,70 @@ impl ThemeController {
     /// Switches to a new theme mode and applies all theme changes.
     pub fn set_mode(&mut self, mode: ThemeMode, ctx: &egui::Context) {
         self.theme_mode = mode;
-        let resolved_name = self.theme_mode.resolve().to_string();
+        let theme_def = Self::resolve_definition(&self.available_themes, &mut self.theme_mode);
 
-        // Fall back to System if the resolved theme doesn't exist
-        let theme_def = match self
-            .available_themes
-            .iter()
-            .find(|t| t.name == resolved_name)
-            .cloned()
-        {
-            Some(def) => def,
-            None => {
-                tracing::warn!(
-                    "Theme '{}' not found, falling back to System",
-                    resolved_name
-                );
-                self.theme_mode = ThemeMode::system();
-                let fallback_name = self.theme_mode.resolve().to_string();
-                self.available_themes
-                    .iter()
-                    .find(|t| t.name == fallback_name)
-                    .cloned()
-                    .unwrap_or_else(rust_pad_config::theme::builtin_dark)
-            }
-        };
-
-        self.theme = EditorTheme::from_config(&theme_def.editor, self.theme.font_size);
-        Self::apply_theme_visuals(ctx, &theme_def.ui, theme_def.dark_mode);
-        let ac = theme_def.ui.accent_color;
-        self.accent_color = Color32::from_rgba_premultiplied(ac.r, ac.g, ac.b, ac.a);
+        self.metrics = Metrics::for_definition(&theme_def);
+        let (chrome, derived) = ChromeTheme::from_definition(&theme_def);
+        self.theme = EditorTheme::from_config(
+            &theme_def.editor,
+            self.theme.font_size,
+            self.metrics.line_height_factor,
+        )
+        .with_chrome(&chrome, &self.metrics);
+        Self::apply_to_context(ctx, &theme_def, &chrome, &self.metrics);
+        Self::log_resolution(&theme_def, &self.metrics, derived);
+        self.accent_color = chrome.accent;
+        self.chrome = chrome;
         self.syntax_highlighter.set_theme(&theme_def.syntax_theme);
     }
 
-    /// Applies egui visuals from config UI colors.
-    pub fn apply_theme_visuals(ctx: &egui::Context, ui_colors: &UiColors, dark_mode: bool) {
-        let hex = |c: rust_pad_config::HexColor| -> Color32 {
-            Color32::from_rgba_premultiplied(c.r, c.g, c.b, c.a)
-        };
-        let mut visuals = if dark_mode {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
+    /// Resolves `mode` against `themes`, falling back to System (and telling
+    /// the user via the Problems log) when the named theme doesn't exist.
+    fn resolve_definition(themes: &[ThemeDefinition], mode: &mut ThemeMode) -> ThemeDefinition {
+        let resolved_name = mode.resolve().to_string();
+        match themes.iter().find(|t| t.name == resolved_name).cloned() {
+            Some(def) => def,
+            None => {
+                crate::problem_log::info_problem(&format!(
+                    "Theme '{resolved_name}' not found, using System instead"
+                ));
+                *mode = ThemeMode::system();
+                let fallback_name = mode.resolve().to_string();
+                themes
+                    .iter()
+                    .find(|t| t.name == fallback_name)
+                    .cloned()
+                    .unwrap_or_else(rust_pad_config::theme::aurora_dark)
+            }
+        }
+    }
 
-        // Fill colors
-        visuals.panel_fill = hex(ui_colors.panel_fill);
-        visuals.window_fill = hex(ui_colors.window_fill);
-        visuals.faint_bg_color = hex(ui_colors.faint_bg_color);
-        visuals.extreme_bg_color = hex(ui_colors.extreme_bg_color);
-        visuals.widgets.noninteractive.bg_fill = hex(ui_colors.widget_noninteractive_bg);
-        visuals.widgets.inactive.bg_fill = hex(ui_colors.widget_inactive_bg);
-        visuals.widgets.hovered.bg_fill = hex(ui_colors.widget_hovered_bg);
-        visuals.widgets.active.bg_fill = hex(ui_colors.widget_active_bg);
+    /// Pushes the resolved visuals and spacing into the egui context.
+    fn apply_to_context(
+        ctx: &egui::Context,
+        def: &ThemeDefinition,
+        chrome: &ChromeTheme,
+        metrics: &Metrics,
+    ) {
+        ctx.set_visuals(build_visuals(def, chrome, metrics));
+        apply_spacing(ctx, metrics);
+    }
 
-        // Widget rounding — consistent 4px on all states
-        let widget_rounding = egui::CornerRadius::same(4);
-        visuals.widgets.noninteractive.corner_radius = widget_rounding;
-        visuals.widgets.inactive.corner_radius = widget_rounding;
-        visuals.widgets.hovered.corner_radius = widget_rounding;
-        visuals.widgets.active.corner_radius = widget_rounding;
-        visuals.widgets.open.corner_radius = widget_rounding;
+    /// One `info!` per resolution. Resolution only happens on theme-change
+    /// events, so this line spamming the log is the tell that something
+    /// started resolving per frame.
+    fn log_resolution(def: &ThemeDefinition, metrics: &Metrics, derived_chrome: bool) {
+        tracing::info!(
+            theme = %def.name,
+            style = ?metrics.style,
+            derived_chrome,
+            "Resolved theme"
+        );
+    }
 
-        // Window/menu rounding
-        visuals.window_corner_radius = egui::CornerRadius::same(6);
-        visuals.menu_corner_radius = egui::CornerRadius::same(4);
-
-        // Clean borders
-        visuals.widgets.noninteractive.bg_stroke.width = 0.0;
-        visuals.window_stroke.width = 1.0;
-
-        // Popup shadow — minimal
-        visuals.popup_shadow = egui::Shadow {
-            offset: [0, 2],
-            blur: 8,
-            spread: 0,
-            color: Color32::from_black_alpha(40),
-        };
-
-        ctx.set_visuals(visuals);
-
-        // Spacing
-        ctx.global_style_mut(|style| {
-            style.spacing.item_spacing = egui::Vec2::new(8.0, 6.0);
-            style.spacing.button_padding = egui::Vec2::new(8.0, 4.0);
-            style.spacing.window_margin = egui::Margin::same(12);
-        });
+    /// Whether the current theme renders with legacy (pre-redesign) metrics.
+    pub fn is_legacy_style(&self) -> bool {
+        self.metrics.style == MetricsStyle::Legacy
     }
 }
 
@@ -182,6 +155,8 @@ mod tests {
     fn test_theme_ctrl() -> ThemeController {
         ThemeController {
             theme: EditorTheme::default(),
+            chrome: ChromeTheme::default(),
+            metrics: Metrics::default(),
             theme_mode: ThemeMode::dark(),
             available_themes: rust_pad_config::theme::all_builtin_themes(),
             accent_color: Color32::from_rgb(80, 180, 200),
@@ -189,6 +164,42 @@ mod tests {
             default_zoom_level: 1.0,
             max_zoom_level: 15.0,
         }
+    }
+
+    #[test]
+    fn resolve_definition_finds_named_theme() {
+        let themes = rust_pad_config::theme::all_builtin_themes();
+        let mut mode = ThemeMode("Graphite Dark".to_string());
+        let def = ThemeController::resolve_definition(&themes, &mut mode);
+        assert_eq!(def.name, "Graphite Dark");
+        assert_eq!(mode.0, "Graphite Dark");
+    }
+
+    #[test]
+    fn resolve_definition_falls_back_to_system_for_unknown_name() {
+        let themes = rust_pad_config::theme::all_builtin_themes();
+        let mut mode = ThemeMode("DoesNotExist".to_string());
+        let def = ThemeController::resolve_definition(&themes, &mut mode);
+        assert!(mode.is_system());
+        assert!(
+            def.name.starts_with("Aurora"),
+            "System resolves to an Aurora theme"
+        );
+    }
+
+    #[test]
+    fn resolve_definition_last_resort_is_aurora_dark() {
+        let mut mode = ThemeMode("Anything".to_string());
+        let def = ThemeController::resolve_definition(&[], &mut mode);
+        assert_eq!(def.name, "Aurora Dark");
+    }
+
+    #[test]
+    fn legacy_style_detection_follows_metrics() {
+        let mut ctrl = test_theme_ctrl();
+        assert!(!ctrl.is_legacy_style());
+        ctrl.metrics = Metrics::for_style(MetricsStyle::Legacy);
+        assert!(ctrl.is_legacy_style());
     }
 
     // ── Per-document zoom (inline clamping, same logic as shortcuts/menu) ──

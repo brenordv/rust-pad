@@ -7,7 +7,7 @@
 //! The propagation runs *after* both panes have rendered, so it observes
 //! whatever the editor widgets wrote to `Document::scroll_y` /
 //! `Document::scroll_x` (mouse wheel, scrollbar drag, etc.). Programmatic
-//! scrolls — Go to Line, Find/Replace navigation, bookmark jumps — are
+//! scrolls (Go to Line, Find/Replace navigation, bookmark jumps) are
 //! filtered out via [`rust_pad_core::document::ScrollOrigin`]: only writes
 //! tagged `UserInput` are propagated.
 //!
@@ -85,7 +85,7 @@ impl App {
                         dst.scroll_x = (dst.scroll_x + dx).max(0.0);
                     }
                     // The destination pane's `clamp_scroll_values` (next
-                    // frame) caps any overshoot — we don't need to know
+                    // frame) caps any overshoot; we don't need to know
                     // its content height here.
                 }
             }

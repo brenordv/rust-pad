@@ -26,7 +26,7 @@ struct Cli {
 ///
 /// macOS `.app` bundles (and some shells) inherit a low `RLIMIT_NOFILE` soft
 /// limit (historically 256). With a filesystem watcher, font/GPU handles, and
-/// concurrent file I/O, that ceiling is easy to hit, surfacing as
+/// concurrent file I/O, that ceiling is easy to hit; the failure surfaces as
 /// `EMFILE` ("Too many open files") on the next open/read/write. Raising the
 /// soft limit to the already-permitted hard limit costs nothing and removes a
 /// whole class of spurious I/O failures. No-op on non-Unix.
@@ -45,8 +45,8 @@ fn raise_fd_limit() {
             return;
         }
         // macOS reports an "unlimited" (`RLIM_INFINITY`) hard limit for NOFILE
-        // but actually refuses to set the soft limit above `OPEN_MAX` (10240) —
-        // a naive `rlim_cur = rlim_max` would fail there, the very platform this
+        // but actually refuses to set the soft limit above `OPEN_MAX` (10240).
+        // A naive `rlim_cur = rlim_max` would fail there, the very platform this
         // guards. Clamp to a finite target when the hard limit is unbounded;
         // finite hard limits (Linux) pass through unchanged.
         const FD_LIMIT_TARGET: libc::rlim_t = 10_240;
@@ -78,7 +78,6 @@ fn raise_fd_limit() {}
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -99,20 +98,57 @@ fn main() -> Result<()> {
     // crash information in Help > Problems after a restart.
     rust_pad_ui::problem_log::install_panic_hook();
 
-    let startup_args = rust_pad_ui::StartupArgs {
-        files: cli.files,
-        new_file_text: cli.new_file,
-        portable: cli.portable,
+    // Peek the saved window geometry with a pure read; the App owns the real
+    // config load (with its create/backup side effects) later.
+    let config_path = if cli.portable {
+        rust_pad_config::paths::portable_config_file_path()
+    } else {
+        rust_pad_config::AppConfig::config_path()
     };
+    let geometry = rust_pad_config::AppConfig::peek_window_geometry(&config_path);
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/logo2.png"))
         .map_err(|e| anyhow::anyhow!("failed to load app icon: {e}"))?;
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1200.0, 800.0])
+        .with_min_inner_size([400.0, 300.0])
+        .with_icon(icon);
+    let mut restored_position = false;
+    if let Some(g) = geometry {
+        let (w, h, clamped) = g.restore_inner_size();
+        if clamped {
+            tracing::warn!(
+                saved = ?(g.inner_w, g.inner_h),
+                applied = ?(w, h),
+                "Saved window size clamped to the plausible range"
+            );
+        }
+        viewport = viewport.with_inner_size([w, h]).with_maximized(g.maximized);
+        match g.restore_position() {
+            Some((x, y)) => {
+                viewport = viewport.with_position([x, y]);
+                restored_position = true;
+            }
+            None => {
+                tracing::warn!(
+                    saved = ?(g.x, g.y),
+                    monitor = ?(g.monitor_w, g.monitor_h),
+                    "Saved window position discarded: title bar would be off the saved monitor"
+                );
+            }
+        }
+    }
+
+    let startup_args = rust_pad_ui::StartupArgs {
+        files: cli.files,
+        new_file_text: cli.new_file,
+        portable: cli.portable,
+        restored_position,
+    };
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([400.0, 300.0])
-            .with_icon(icon),
+        viewport,
         ..Default::default()
     };
 

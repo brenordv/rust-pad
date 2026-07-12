@@ -14,7 +14,7 @@ use crate::app::{App, DialogState};
 pub(crate) const TEMP_PRINT_PREFIX: &str = "rust-pad-print-";
 
 impl App {
-    /// "Print..." — builds a snapshot of the active document and dispatches
+    /// "Print...": builds a snapshot of the active document and dispatches
     /// a PDF-to-temp-plus-viewer job to the background worker.
     pub(crate) fn request_print(&mut self) {
         if self.print_in_progress {
@@ -28,7 +28,7 @@ impl App {
             .send(PrintRequest::PrintToViewer(snapshot));
     }
 
-    /// "Export as PDF..." — shows a synchronous save dialog on the UI
+    /// "Export as PDF...": shows a synchronous save dialog on the UI
     /// thread, then dispatches a render-and-write job to the background
     /// worker. The dialog itself is quick; the CPU-bound generation is
     /// what we care about keeping off the UI thread.
@@ -68,7 +68,7 @@ impl App {
         let dialog_result = dialog.save_file();
 
         let Some(mut target) = dialog_result else {
-            // User cancelled — nothing to do.
+            // User cancelled: nothing to do.
             return;
         };
         if target.extension().is_none() {
@@ -142,7 +142,7 @@ impl App {
     }
 
     /// Best-effort cleanup of stale temp PDFs produced by previous
-    /// sessions. Runs once at startup. Failures are swallowed — a leaked
+    /// sessions. Runs once at startup. Failures are swallowed; a leaked
     /// temp file is not worth surfacing to the user.
     pub(crate) fn cleanup_stale_print_temp_files() {
         let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {

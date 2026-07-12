@@ -1,7 +1,7 @@
 /// Cross-platform file and directory permission helpers.
 ///
 /// On Unix, restricts access to the owning user only (0700 for directories,
-/// 0600 for files). On Windows, this is a no-op — NTFS user profile
+/// 0600 for files). On Windows, this is a no-op: NTFS user profile
 /// directories already have user-scoped ACLs by default.
 ///
 /// All functions log a warning on failure but never return an error,
@@ -57,7 +57,7 @@ pub fn set_owner_only_file_permissions(path: &Path) {
 mod tests {
     use super::*;
 
-    /// Verifying the functions don't panic on a valid path.
+    /// Verifies the functions don't panic on a valid path.
     #[test]
     fn test_set_dir_permissions_on_valid_dir() {
         let dir = tempfile::tempdir().expect("create temp dir");

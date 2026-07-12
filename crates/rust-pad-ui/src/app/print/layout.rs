@@ -1,6 +1,6 @@
 //! Pure pagination + line-wrapping logic for the print/export pipeline.
 //!
-//! This module has no egui, printpdf, or threading dependencies — it turns
+//! This module has no egui, printpdf, or threading dependencies: it turns
 //! a document string plus a [`PageLayout`] into a `Vec<Page>` that the
 //! [`pdf`](super::pdf) module can render verbatim.
 //!
@@ -112,7 +112,7 @@ pub fn gutter_width_chars(total_source_lines: usize, show_line_numbers: bool) ->
         return 0;
     }
     let digits = digit_count(total_source_lines.max(1));
-    // "<digits> │ " — the separator itself is 3 columns: space, bar, space.
+    // "<digits> │ "; the separator itself is 3 columns: space, bar, space.
     digits + 3
 }
 
@@ -194,7 +194,7 @@ fn wrap_line(text: &str, body_chars_per_line: usize) -> Vec<String> {
 /// Paginates `document_text` according to `layout`.
 ///
 /// An empty document produces a single empty page so the PDF is never
-/// truly blank — the header and footer still render, which is useful
+/// truly blank; the header and footer still render, which is useful
 /// feedback that the "Print" action did something.
 pub fn paginate(document_text: &str, layout: &PageLayout) -> Vec<Page> {
     // Split on `\n` and strip a trailing `\r` for CRLF safety. We do not

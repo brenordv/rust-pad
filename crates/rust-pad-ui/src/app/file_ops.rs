@@ -189,7 +189,7 @@ impl App {
 
     /// Closes all tabs that have no unsaved changes.
     ///
-    /// Pinned tabs are always skipped, even if unchanged — the user explicitly
+    /// Pinned tabs are always skipped, even if unchanged; the user explicitly
     /// asked the editor to keep them around. Iterates in reverse to keep
     /// indices stable.
     pub(crate) fn close_unchanged_tabs(&mut self) {
@@ -212,8 +212,8 @@ impl App {
     /// Iterates in reverse so removals don't shift indices we still need
     /// to visit. The active tab is identified by comparing against the
     /// live `self.tabs.active`, which `TabManager::close_tab` keeps in
-    /// sync after each removal — guaranteeing the originally-active
-    /// document remains active throughout.
+    /// sync after each removal, so the originally-active document remains
+    /// active throughout.
     pub(crate) fn close_all_but_active(&mut self) {
         let mut i = self.tabs.tab_count();
         while i > 0 {
@@ -266,7 +266,6 @@ impl App {
             return;
         }
 
-        // Find the next modified, unpinned tab
         if let Some(idx) = self
             .tabs
             .documents
@@ -276,7 +275,7 @@ impl App {
             self.tabs.switch_to(idx);
             self.dialog_state = DialogState::ConfirmClose(idx);
         } else {
-            // No more modified tabs — close-all is complete
+            // No more modified tabs: close-all is complete
             self.closing_all = false;
         }
     }

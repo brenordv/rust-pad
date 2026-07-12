@@ -7,8 +7,8 @@
 //!
 //! [`deserialize_record`] centralizes the hardened bincode-decode-or-warn
 //! pattern used by every redb-backed store (`workspace`, `session`,
-//! `view_state`). Keeping it in one place ensures the OOM-bounding
-//! `with_limit` chain cannot regress at one site while remaining intact
+//! `view_state`). Keeping it in one place stops the OOM-bounding
+//! `with_limit` chain from regressing at one site while remaining intact
 //! at others.
 
 use std::path::Path;
@@ -106,8 +106,8 @@ pub(crate) use write_table;
 /// redb-backed stores share: fixed-int encoding, trailing-bytes tolerance,
 /// and a size cap to bound memory use on corrupted/oversize input.
 ///
-/// Returns `None` (with a `tracing::warn!`) on any decode failure —
-/// including the size-cap rejection — so callers can fall back to a
+/// Returns `None` (with a `tracing::warn!`) on any decode failure,
+/// including the size-cap rejection, so callers can fall back to a
 /// default without bubbling corruption errors up to the UI layer.
 ///
 /// `kind` is restricted to `&'static str` to enforce that the value can
@@ -172,7 +172,7 @@ mod tests {
         let mut bytes = Vec::new();
         let declared_len: u64 = 10_000;
         bytes.extend_from_slice(&declared_len.to_le_bytes());
-        // Padding bytes — bincode will reject on the size check
+        // Padding bytes; bincode will reject on the size check
         // before reading them, so their content is irrelevant.
         bytes.extend_from_slice(&[0xABu8; 16]);
 
@@ -184,8 +184,7 @@ mod tests {
     }
 
     // Companion: same wire shape, but the declared length fits within
-    // the limit. The decode itself fails (the payload isn't long enough),
-    // but the rejection is for an unrelated reason — confirming the
+    // the limit and the decode succeeds. That confirms the
     // oversize-rejection test isn't a false positive driven by some
     // other wire-format error.
     #[test]
