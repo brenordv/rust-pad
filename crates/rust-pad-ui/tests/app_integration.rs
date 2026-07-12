@@ -329,7 +329,7 @@ fn test_breadcrumb_shows_path_segments_and_toggle_hides_them() {
     let mut harness = create_harness();
     {
         let doc = harness.state_mut().tabs.active_doc_mut();
-        doc.file_path = Some(std::path::PathBuf::from("Z:\\bc-test\\notes\\plan.md"));
+        doc.file_path = Some(["bc-test", "notes", "plan.md"].iter().collect());
         doc.title = "plan.md".to_string();
     }
     harness.run();
