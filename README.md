@@ -32,9 +32,9 @@ The app has even more features. :)
 ## Motivation
 I absolutely love Notepad++, so whenever I consider moving away from Windows, I end up looking for a way to run it on Linux.
 Since I prefer native applications, I decided to take the longer route and write my own text editor in Rust.
-This isn’t a port of Notepad++, and it doesn’t include all of its features—nor am I trying to compete with it.
-Instead, my goal is to build a cross-platform Notepad-like editor with a few neat features, keeping it as simple,
-stable, and fast as possible.
+This isn’t a port of Notepad++, and it doesn’t include all of its features, nor am I trying to compete with it.
+Instead, my goal is to build a cross-platform Notepad-like editor with a few neat features, one that stays as
+simple, stable, and fast as possible.
 
 ## Features
 
@@ -64,7 +64,7 @@ stable, and fast as possible.
 - Remove empty lines
 - Move line up/down (Alt+Up / Alt+Down)
 - Duplicate line (`Ctrl+D`)
-- Increase/Decrease indent (Tab / Shift+Tab) — applies to every line covered by a multi-line selection, preserving the selection
+- Increase/Decrease indent (Tab / Shift+Tab): applies to every line covered by a multi-line selection and keeps the selection
 - **Join Lines**: collapse the selected lines into one, with exactly one space at each junction (whitespace at the joins is stripped)
 - **Trim Whitespace**: trim trailing, leading, or both from every line in the selection (or the current line when there is no selection)
 
@@ -96,7 +96,7 @@ stable, and fast as possible.
 - **Live file monitoring** (`tail -f mode`): auto-refresh when file changes on disk
 - **External change detection**: for any open document (not just live-monitored ones), a modification on disk prompts a dialog to reload or keep your version
 - **Auto-save** for file-backed documents (configurable interval)
-- **Async file I/O**: file dialogs, reads, and writes run on background threads with a status bar spinner, keeping the UI responsive
+- **Async file I/O**: file dialogs, reads, and writes run on background threads with a status bar spinner, so the UI stays responsive
 - **File size validation**: configurable size limit (default 512 MB) prevents out-of-memory crashes from opening very large files. Applied to all open paths (dialogs, recent files, CLI, session restore, live monitoring)
 - **UTF-16 odd-byte validation**: truncated or malformed UTF-16 files are rejected with a clear error instead of silently dropping the last byte
 - **Encoding support**: UTF-8, UTF-8 with BOM, UTF-16 LE, UTF-16 BE, ASCII
@@ -130,7 +130,7 @@ stable, and fast as possible.
 - **CLI support**: open files from the command line, `--new-file` flag to create a tab with given text
 - **Portable mode** (`--portable` flag): store all config and data next to the executable for USB/portable installs
 - **Platform-standard directories**: config and data stored in OS-standard locations (`%APPDATA%`, `~/.config`, `~/Library/Application Support`) with automatic migration from older versions
-- **Security hardening**: data directories (0700) and history/session database files (0600) use restrictive permissions on Unix; bounded bincode deserialization (50 MB per edit group, 1 KB metadata, 10 MB session) prevents OOM from corrupted redb databases — corrupted records are skipped with a warning instead of blocking startup
+- **Security hardening**: data directories (0700) and history/session database files (0600) use restrictive permissions on Unix; bounded bincode deserialization (50 MB per edit group, 1 KB metadata, 10 MB session) prevents OOM from corrupted redb databases. Corrupted records are skipped with a warning instead of blocking startup
 - **Reproducible builds**: Rust toolchain pinned via `rust-toolchain.toml` (1.93.1 + `rustfmt`/`clippy`); all third-party GitHub Actions in CI/release/SonarCloud workflows pinned to full commit SHAs
 - **Release integrity**: SHA256 checksums (`SHA256SUMS.txt`) published alongside release binaries for download verification
 - **Custom application icon**

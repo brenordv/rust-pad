@@ -184,7 +184,6 @@ impl Document {
         self.last_saved_at = Some(chrono::Local::now());
         self.last_known_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
 
-        // Mark all modified lines as saved
         for change in &mut self.line_changes {
             if *change == LineChangeState::Modified {
                 *change = LineChangeState::Saved;

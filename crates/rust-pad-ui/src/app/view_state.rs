@@ -2,7 +2,7 @@
 //!
 //! Saves cursor + scroll position when a file-backed tab is closed or
 //! the app exits, and restores them when a file is opened. Keying is
-//! done by canonical path string — see `rust_pad_config::paths::canonical_path_key`.
+//! done by canonical path string; see `rust_pad_config::paths::canonical_path_key`.
 
 use std::path::Path;
 
@@ -14,7 +14,7 @@ use super::App;
 impl App {
     /// Opens (or creates) the per-file view-state database.
     ///
-    /// Returns `None` if the store cannot be opened — a failed open is
+    /// Returns `None` if the store cannot be opened. A failed open is
     /// non-fatal; the app still works, restored cursor/scroll just won't
     /// persist across sessions.
     pub(crate) fn init_view_state_store(portable: bool) -> Option<ViewStateStore> {
@@ -34,7 +34,7 @@ impl App {
 
     /// Applies persisted view-state (cursor + scroll) to every currently
     /// open file-backed document. Called once during `App::new` after the
-    /// session has been restored — `try_open_file_from_bytes` covers
+    /// session has been restored. `try_open_file_from_bytes` covers
     /// runtime opens, but session restore opens files synchronously via
     /// `tabs.open_file`, bypassing that hook.
     ///

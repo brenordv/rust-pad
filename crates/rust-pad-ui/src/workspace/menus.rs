@@ -37,7 +37,7 @@ pub(crate) struct CopyPathRequest {
 /// `relative_root` is `Some(root)` when a relative representation is meaningful
 /// (the entry lives under a known root); the `Relative Path` item is then
 /// enabled and the request carries that root. When `relative_root` is `None`
-/// the `Relative Path` item is rendered **disabled** — `Name` and `Full Path`
+/// the `Relative Path` item is rendered **disabled**; `Name` and `Full Path`
 /// remain available. `Name`/`Full Path` set the request root to `path` since
 /// those scopes do not consult it.
 pub(crate) fn copy_path_menu(
@@ -54,8 +54,8 @@ pub(crate) fn copy_path_menu(
 /// Builds the request for a chosen `scope`.
 ///
 /// `Name`/`Full` ignore the root (set to `path`). `Relative` needs the
-/// containing root; returns `None` when it is absent — though the caller
-/// disables that item in that case, so the `None` branch is a safety net.
+/// containing root; returns `None` when it is absent. The caller disables
+/// that item in that case, so the `None` branch is a safety net.
 fn copy_path_request(
     path: &Path,
     relative_root: Option<&Path>,

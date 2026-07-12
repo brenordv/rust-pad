@@ -49,10 +49,10 @@ fn test_portable_paths_are_exe_relative() {
 
 #[test]
 fn test_migrate_legacy_paths_end_to_end() {
-    // This test simulates a full migration:
+    // Sets up the legacy layout:
     // 1. Create "old" files in a temp dir (acting as exe dir)
-    // 2. Create "new" target dirs (acting as platform dirs)
-    // 3. Verify migration copies files correctly
+    // 2. Create "new" target paths (acting as platform dirs)
+    // 3. Verify the originals stay put and nothing lands in the targets
 
     let old_dir = tempfile::tempdir().expect("old dir");
     let new_dir = tempfile::tempdir().expect("new dir");

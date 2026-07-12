@@ -106,7 +106,7 @@ mod tests {
     fn test_tick_returns_false_before_interval_elapsed() {
         let mut ctrl = AutoSaveController::new(true, 3600);
         let mut tabs = TabManager::new();
-        // Interval is 1 hour — tick should return false immediately
+        // Interval is 1 hour: tick should return false immediately
         assert!(!ctrl.tick(&mut tabs));
     }
 

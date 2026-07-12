@@ -116,7 +116,7 @@ mod tests {
 
     /// Smoke test: every icon constant resolves to a non-empty string. If a
     /// Phosphor rename ever removes one of the upstream constants this
-    /// fails to compile — the assertion is a belt to the suspenders.
+    /// fails to compile; the assertion is a belt to the suspenders.
     #[test]
     fn all_constants_are_non_empty() {
         for (value, name) in ALL {

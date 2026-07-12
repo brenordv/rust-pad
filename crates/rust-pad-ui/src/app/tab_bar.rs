@@ -188,7 +188,7 @@ fn compute_drag_indicator_x(
         }
         seen += 1;
     }
-    // Pointer is past every non-source tab — draw at the right edge of the
+    // Pointer is past every non-source tab; draw at the right edge of the
     // last non-source tab in the section.
     for (i, rect) in tab_rects
         .iter()
@@ -559,7 +559,7 @@ fn tab_copy_path_menu(
 
 /// Requests a repaint when a tab activation was detected.
 ///
-/// Single call site for every strip-activation repaint — both strips, and
+/// Single call site for every strip-activation repaint: both strips, and
 /// both detection points per strip (top-of-pass and end-of-pass). Keeping
 /// one `request_repaint` line gives all these edges one `#[track_caller]`
 /// repaint cause, which the tests (and the F0 pass-trace log) key on.
@@ -586,12 +586,10 @@ impl App {
         let visuals = ui.visuals().clone();
         let style = TabStyle::from_controller(&self.theme_ctrl);
 
-        // Detect whether the active tab or tab count changed since last frame.
         let active_changed = self.tabs.active != self.prev_active_tab;
         let count_changed = self.tabs.tab_count() != self.prev_tab_count;
         let need_auto_scroll = active_changed || count_changed;
 
-        // Update tracked state for next frame.
         self.prev_active_tab = self.tabs.active;
         self.prev_tab_count = self.tabs.tab_count();
 
@@ -633,7 +631,6 @@ impl App {
             let reserved = arrows_width + new_tab_btn_width;
             let scroll_max_width = (ui.available_width() - reserved).max(0.0);
 
-            // 1. Render scrollable tab area.
             // Enable vertical-wheel → horizontal-scroll mapping so the user
             // can scroll tabs with a normal mouse wheel.
             ui.style_mut().always_scroll_the_only_direction = true;
@@ -665,11 +662,9 @@ impl App {
                     self.process_tab_drag(ui, &tab_rects, &mut drag_commit);
                 });
 
-            // 2. Update scroll state from ScrollArea output.
             self.tab_scroll_offset = scroll_output.state.offset.x;
             self.tabs_overflow = scroll_output.content_size.x > scroll_output.inner_rect.width();
 
-            // 3. Auto-scroll to the active tab if it changed.
             if need_auto_scroll {
                 if let Some(active_rect) = tab_rects.get(self.tabs.active).copied() {
                     self.tab_scroll_offset = auto_scroll_offset(
@@ -681,18 +676,16 @@ impl App {
                 }
             }
 
-            // 4. Render scroll arrows (only when overflow).
             if self.tabs_overflow {
                 let max_offset =
                     (scroll_output.content_size.x - scroll_output.inner_rect.width()).max(0.0);
                 self.render_scroll_arrows(ui, &style, max_offset);
             }
 
-            // 5. "+" button and empty area (unchanged).
             self.render_new_tab_button(ui, &style);
             self.render_empty_tab_bar_area(ui);
 
-            // 6. Commit any completed drag. The drop was detected inside
+            // Commit any completed drag. The drop was detected inside
             // process_tab_drag, but the actual move happens here to keep
             // mutations of `self.tabs.documents` out of the render loop.
             if let Some((from, to)) = drag_commit {
@@ -700,7 +693,6 @@ impl App {
                 self.tab_drag = None;
             }
 
-            // 7. Execute deferred actions after the rendering loop.
             if let Some(idx) = tab_to_close {
                 self.request_close_tab(idx);
             }
@@ -776,7 +768,6 @@ impl App {
         };
         let accent = resolve_accent_color(doc.tab_color, is_active, self.theme_ctrl.accent_color);
 
-        // -- Allocate the single rect for the entire tab --
         let (tab_rect, response) = ui.allocate_exact_size(tab_size, Sense::click_and_drag());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &title_for_widget_info)
@@ -796,7 +787,6 @@ impl App {
         };
         let (close_rect, pointer_in_close) = paint_tab_chrome(ui, visuals, &chrome);
 
-        // -- Interaction handling --
         // `clicked()` does NOT fire if the widget was dragged, so the click
         // and drag handlers are naturally mutually exclusive.
         if response.clicked() {
@@ -811,7 +801,6 @@ impl App {
             *tab_to_close = Some(idx);
         }
 
-        // -- Drag start detection --
         // Ignore drags that originated on the close button: the user is
         // about to click close, not reorder. We check `press_origin` (the
         // point the button was first pressed) rather than the current
@@ -832,7 +821,6 @@ impl App {
             }
         }
 
-        // -- 1px full-height border between tabs --
         if idx < self.tabs.tab_count() - 1 {
             crate::app::chrome::segment_divider(
                 ui.painter(),
@@ -1039,7 +1027,7 @@ impl App {
     /// `pane`. Used by [`App::render_split_panes`] when split view is active.
     ///
     /// Includes horizontal scroll support with overflow detection, scroll
-    /// arrows, and auto-scroll to active tab — mirroring the main tab bar.
+    /// arrows, and auto-scroll to active tab, same as the main tab bar.
     pub(crate) fn show_pane_tab_bar(&mut self, ui: &mut egui::Ui, pane: PaneId) {
         let visuals = ui.visuals().clone();
         let style = TabStyle::from_controller(&self.theme_ctrl);
@@ -1052,7 +1040,6 @@ impl App {
             PaneId::Right => 1,
         };
 
-        // Detect active tab change for auto-scroll.
         let need_auto_scroll = self.prev_pane_active[pane_idx] != active_doc;
         self.prev_pane_active[pane_idx] = active_doc;
 
@@ -1095,12 +1082,10 @@ impl App {
                     }
                 });
 
-            // Update scroll state.
             self.pane_tab_scroll_offset[pane_idx] = scroll_output.state.offset.x;
             self.pane_tabs_overflow[pane_idx] =
                 scroll_output.content_size.x > scroll_output.inner_rect.width();
 
-            // Auto-scroll to active tab on change.
             if need_auto_scroll {
                 if let Some(pos) = order.iter().position(|&idx| idx == active_doc) {
                     if let Some(active_rect) = tab_rects.get(pos).copied() {
@@ -1114,7 +1099,6 @@ impl App {
                 }
             }
 
-            // Scroll arrows when overflow.
             if self.pane_tabs_overflow[pane_idx] {
                 let max_offset =
                     (scroll_output.content_size.x - scroll_output.inner_rect.width()).max(0.0);
@@ -1325,7 +1309,7 @@ fn render_pane_new_tab_button(ui: &mut egui::Ui, style: &TabStyle, actions: &mut
     }
 
     // Double-click on the empty area to the right of the "+" button also
-    // opens a new tab — matches the single-pane bar's behavior in
+    // opens a new tab; matches the single-pane bar's behavior in
     // `render_empty_tab_bar_area`.
     let remaining = ui.available_size();
     if remaining.x > 0.0 {
@@ -1438,7 +1422,7 @@ mod tests {
             "switching tabs must eagerly schedule the follow-up frame that \
              applies the deferred auto-scroll offset"
         );
-        // The request must be attributed to the shared strip helper — every
+        // The request must be attributed to the shared strip helper: every
         // strip-activation repaint (top-of-pass AND end-of-pass, both
         // strips) routes through `repaint_on_tab_activation`, so a refactor
         // that reroutes it shows up here as a changed cause site.
@@ -1555,7 +1539,7 @@ mod tests {
     fn insert_idx_clamped_to_pinned_section() {
         let r = rects(5);
         // 5 tabs, pinned_count = 2, source = 0 (pinned). Section = [0, 2).
-        // Pointer far right — should still clamp inside pinned section.
+        // Pointer far right; should still clamp inside pinned section.
         // Non-source in section: only tab 1. left_count = 1 → insert_idx = 1.
         assert_eq!(compute_insert_idx(&r, 0, 0, 2, 9999.0), 1);
     }
@@ -1641,7 +1625,7 @@ mod tests {
     #[test]
     fn indicator_x_single_tab_section_falls_back_to_source_left_edge() {
         let r = rects(3);
-        // Section [0, 1) with source = 0 — the source is the only tab in
+        // Section [0, 1) with source = 0: the source is the only tab in
         // the section. No non-source tabs found; fallback returns source
         // left edge. (In practice process_tab_drag skips drawing in this
         // case, but the function should still be safe.)
@@ -1842,7 +1826,7 @@ mod tests {
 
     #[test]
     fn auto_scroll_left_clamps_to_zero() {
-        // Tab far to the left — scroll should not go negative.
+        // Tab far to the left; scroll should not go negative.
         let result = scroll_scenario(0.0, 500.0, 1000.0, 10.0, -500.0);
         assert_eq!(result, 0.0);
     }
@@ -1872,7 +1856,7 @@ mod tests {
             ..Default::default()
         };
         app.apply_pane_tab_actions(PaneId::Left, actions);
-        // switch_pane_to + focus_pane were called — verify no panic.
+        // switch_pane_to + focus_pane were called; verify no panic.
     }
 
     #[test]
@@ -1935,7 +1919,7 @@ mod tests {
 
     #[test]
     fn tab_copy_path_menu_renders_for_saved_and_unsaved_tabs() {
-        // Render-only (no clicks): exercises both branches of the helper —
+        // Render-only (no clicks). Exercises both branches of the helper:
         // a saved tab (delegates to copy_path_menu) and an unsaved buffer
         // (disabled wrapper). No interaction → no request emitted.
         let ctx = egui::Context::default();
@@ -1966,7 +1950,7 @@ mod tests {
     #[test]
     fn apply_pane_tab_actions_copy_path_runs_without_panic() {
         let mut app = test_app();
-        // No clipboard handle in test_app — exercise the dispatch path and
+        // No clipboard handle in test_app; exercise the dispatch path and
         // confirm `handle_copy_path` is reached cleanly via the drained action.
         let actions = PaneTabActions {
             copy_path: Some(CopyPathRequest {

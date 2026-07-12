@@ -89,7 +89,7 @@ pub fn view_state_file_path() -> PathBuf {
 /// or workspace sidebar. Falls back to a lossy display string when the
 /// file does not exist or cannot be canonicalized.
 ///
-/// The canonical key MUST be computed on save and stored verbatim — do
+/// The canonical key MUST be computed on save and stored verbatim. Do
 /// not canonicalize again on read, since that introduces a TOCTOU window
 /// where a swapped file could cause restored state to land on the wrong
 /// document.
@@ -121,7 +121,7 @@ pub fn history_data_dir() -> PathBuf {
 /// Migrates config and data files from legacy exe-relative paths to
 /// platform-standard directories.
 ///
-/// Safe to call multiple times — files are only copied if the
+/// Safe to call multiple times: files are only copied if the
 /// destination does not already exist. Originals are preserved so
 /// that older versions of the application continue to work.
 ///
@@ -210,7 +210,7 @@ fn migrate_file(old: &Path, new: &Path, label: &str) {
         return;
     }
 
-    // Already at the new location — nothing to do.
+    // Already at the new location; nothing to do.
     if new.exists() {
         return;
     }
@@ -220,7 +220,6 @@ fn migrate_file(old: &Path, new: &Path, label: &str) {
         return;
     }
 
-    // Ensure the target directory exists.
     if let Some(parent) = new.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::warn!(

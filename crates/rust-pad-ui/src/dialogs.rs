@@ -371,7 +371,7 @@ pub struct GoToTarget {
 /// Accepted formats (all 1-indexed):
 ///   - `"42"`      → line 42, column 1
 ///   - `"42:10"`   → line 42, column 10
-///   - `":10"`     → current line (None), column 10  — rejected (line required)
+///   - `":10"`     → current line (None), column 10: rejected (line required)
 ///
 /// Returns `None` if the input is empty, non-numeric, or the line is out of
 /// range. The column is clamped to `1..=max_col` (never rejected).

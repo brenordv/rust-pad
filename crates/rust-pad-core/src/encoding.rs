@@ -85,8 +85,7 @@ pub fn detect_encoding(bytes: &[u8]) -> TextEncoding {
 
     // Try UTF-8
     if std::str::from_utf8(bytes).is_ok() {
-        // Check if pure ASCII
-        if bytes.iter().all(|&b| b < 128) {
+        if bytes.is_ascii() {
             return TextEncoding::Ascii;
         }
         return TextEncoding::Utf8;
@@ -432,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_detect_line_ending_mixed_prefers_crlf() {
-        // Contains both \r\n and bare \n — \r\n check comes first
+        // Contains both \r\n and bare \n; the \r\n check comes first
         assert_eq!(detect_line_ending("a\r\nb\nc"), LineEnding::CrLf);
     }
 
@@ -522,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_decode_utf16le_odd_bytes_without_bom_returns_error() {
-        // 5 bytes, no BOM — odd
+        // 5 bytes, no BOM; odd
         let bytes = vec![0x48, 0x00, 0x65, 0x00, 0x6C];
         let result = decode_bytes(&bytes, TextEncoding::Utf16Le);
         assert!(result.is_err());
@@ -532,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_decode_utf16be_odd_bytes_without_bom_returns_error() {
-        // 5 bytes, no BOM — odd
+        // 5 bytes, no BOM; odd
         let bytes = vec![0x00, 0x48, 0x00, 0x65, 0x6C];
         let result = decode_bytes(&bytes, TextEncoding::Utf16Be);
         assert!(result.is_err());
@@ -542,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_decode_utf16le_even_bytes_still_works() {
-        // BOM + 4 content bytes ("He") — even, should succeed
+        // BOM + 4 content bytes ("He"): even, should succeed
         let bytes = vec![0xFF, 0xFE, 0x48, 0x00, 0x65, 0x00];
         let decoded = decode_bytes(&bytes, TextEncoding::Utf16Le).unwrap();
         assert_eq!(decoded, "He");
@@ -550,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_decode_utf16be_even_bytes_still_works() {
-        // BOM + 4 content bytes ("He") — even, should succeed
+        // BOM + 4 content bytes ("He"): even, should succeed
         let bytes = vec![0xFE, 0xFF, 0x00, 0x48, 0x00, 0x65];
         let decoded = decode_bytes(&bytes, TextEncoding::Utf16Be).unwrap();
         assert_eq!(decoded, "He");
@@ -558,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_decode_utf16le_empty_after_bom_is_ok() {
-        // Just the BOM, no content — 0 bytes after BOM, which is even
+        // Just the BOM, no content: 0 bytes after BOM, which is even
         let bytes = vec![0xFF, 0xFE];
         let decoded = decode_bytes(&bytes, TextEncoding::Utf16Le).unwrap();
         assert_eq!(decoded, "");
@@ -573,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_decode_utf16le_single_byte_after_bom_returns_error() {
-        // BOM + 1 byte — odd
+        // BOM + 1 byte; odd
         let bytes = vec![0xFF, 0xFE, 0x48];
         let result = decode_bytes(&bytes, TextEncoding::Utf16Le);
         assert!(result.is_err());

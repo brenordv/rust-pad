@@ -13,7 +13,7 @@ use notify_debouncer_mini::{new_debouncer, DebounceEventResult, DebouncedEventKi
 /// A filesystem event relevant to the workspace sidebar.
 ///
 /// Note: the original plan included a `Renamed { from, to }` variant, but
-/// `notify-debouncer-mini` cannot reliably detect renames — they surface as
+/// `notify-debouncer-mini` cannot reliably detect renames: they surface as
 /// a `Removed` followed by a `Created`, which is sufficient for the sidebar
 /// tree's incremental update logic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -22,7 +22,7 @@ pub enum FsEvent {
     ///
     /// Note: this variant is only produced by manual tree updates in
     /// `workspace_ops` (e.g., after creating a file or applying a rename).
-    /// The filesystem watcher itself never emits `Created` — new paths
+    /// The filesystem watcher itself never emits `Created`; new paths
     /// surface as `Modified` (since the debouncer only sees that the path exists).
     Created(PathBuf),
     /// A file or directory was removed.
@@ -168,7 +168,6 @@ mod tests {
         let mut watcher = WorkspaceWatcher::new().expect("create watcher");
         watcher.watch(dir.path()).expect("watch");
 
-        // Create a file in the watched directory
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "hello").expect("write file");
 
@@ -176,7 +175,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(800));
 
         let events = watcher.poll_events();
-        // We should get at least one event for the created file
         assert!(
             !events.is_empty(),
             "Should receive events after file creation"
@@ -338,7 +336,6 @@ mod tests {
         std::thread::sleep(Duration::from_millis(600));
         let _ = watcher.poll_events();
 
-        // Delete the file
         std::fs::remove_file(&file_path).expect("delete");
 
         // Wait for debounce

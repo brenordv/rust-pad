@@ -6,7 +6,7 @@
 //! ## observability
 //!
 //! Never include decoded clipboard text in `tracing` lines or
-//! `problem_log` entries — the bytes may be sensitive (credentials,
+//! `problem_log` entries; the bytes may be sensitive (credentials,
 //! private keys). Log only metadata: path, length, rejection reason.
 
 use super::App;
@@ -30,7 +30,7 @@ pub(crate) enum ContentKind {
 
 /// Returns `true` if `ch` is a control character that we refuse to push to
 /// the clipboard as part of a path. C0 controls (`U+0000..U+001F`), DEL
-/// (`U+007F`), and C1 controls (`U+0080..U+009F`) are all rejected — they
+/// (`U+007F`), and C1 controls (`U+0080..U+009F`) are all rejected; they
 /// are the byte values that interpret as shell separators, ANSI escapes,
 /// terminal control sequences, or otherwise allow a file system entry's
 /// name to silently inject behaviour into the paste target.
@@ -91,10 +91,10 @@ impl App {
     /// rejected or there was no clipboard handle.
     ///
     /// ## sanitization rules
-    /// * `ContentKind::Path` — refuses if `text` contains any C0 control
+    /// * `ContentKind::Path`: refuses if `text` contains any C0 control
     ///   character, DEL, or any C1 control. Emits `[CP01]` to the problem
     ///   log on refusal.
-    /// * `ContentKind::FileContent` — refuses only on NUL (`\0`). Legitimate
+    /// * `ContentKind::FileContent`: refuses only on NUL (`\0`). Legitimate
     ///   file content can carry `\n`/`\t`/`\r` and must reach the clipboard
     ///   intact. The decode step already filters NUL upstream, so a
     ///   refusal here means the upstream check was bypassed (defence in
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn bidi_detection_ignores_legitimate_rtl_text() {
-        // Hebrew, Arabic — printable RTL letters with no override controls.
+        // Hebrew, Arabic: printable RTL letters with no override controls.
         assert!(!contains_bidi_override("שלום עולם"));
         assert!(!contains_bidi_override("مرحبا بالعالم"));
     }

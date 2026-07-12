@@ -4,7 +4,7 @@ Rust-Pad is distributed under the GNU GPL v3 (see `LICENSE.md`). It also
 embeds and depends on third-party components with their own licenses,
 reproduced here.
 
-This file does **not** cover transitive Cargo dependencies — those are
+This file does **not** cover transitive Cargo dependencies. Those are
 governed by their respective crate manifests. It lists only assets and
 components bundled directly into the source tree.
 

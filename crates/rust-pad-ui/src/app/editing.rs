@@ -69,10 +69,8 @@ impl App {
                 let byte_end: usize = text.chars().take(*end).map(char::len_utf8).sum();
                 let selected = &text[byte_start..byte_end];
                 let converted = line_ops::convert_case(selected, conversion);
-                // Apply to result (byte offsets are the same since we go descending
-                // and each replacement has the same byte length for case conversions...
-                // but actually UTF-8 case conversion can change byte lengths, so we
-                // need to recalculate in the result string)
+                // UTF-8 case conversion can change byte lengths, so recompute
+                // byte offsets in `result` instead of reusing the originals.
                 let result_byte_start: usize =
                     result.chars().take(*start).map(char::len_utf8).sum();
                 let result_byte_end: usize = result.chars().take(*end).map(char::len_utf8).sum();
@@ -80,7 +78,7 @@ impl App {
             }
             if result != text {
                 doc.buffer = result.as_str().into();
-                // Preserve all cursor selections — positions remain valid since
+                // Preserve all cursor selections: positions remain valid since
                 // case conversion preserves character count at the same offsets.
                 doc.record_undo_from_snapshot(snapshot);
             }
@@ -190,7 +188,6 @@ impl App {
             text.len()
         });
 
-        // Find next occurrence after last cursor
         if let Some(byte_offset) = text[last_byte_idx..].find(&word) {
             // Convert byte offset to char offset
             let char_start = last_char_idx
@@ -228,7 +225,7 @@ impl App {
         let doc = self.tabs.active_doc_mut();
         let primary_line = doc.cursor.position.line;
 
-        // Phase 1 — shrink: remove the furthest secondary *below* primary
+        // Phase 1 (shrink): remove the furthest secondary *below* primary
         if let Some(idx) = doc
             .secondary_cursors
             .iter()
@@ -241,7 +238,7 @@ impl App {
             return;
         }
 
-        // Phase 2 — add above the topmost cursor
+        // Phase 2: add above the topmost cursor
         let min_line = std::iter::once(&doc.cursor)
             .chain(doc.secondary_cursors.iter())
             .map(|c| c.position.line)
@@ -266,7 +263,7 @@ impl App {
         let doc = self.tabs.active_doc_mut();
         let primary_line = doc.cursor.position.line;
 
-        // Phase 1 — shrink: remove the furthest secondary *above* primary
+        // Phase 1 (shrink): remove the furthest secondary *above* primary
         if let Some(idx) = doc
             .secondary_cursors
             .iter()
@@ -279,7 +276,7 @@ impl App {
             return;
         }
 
-        // Phase 2 — add below the bottommost cursor
+        // Phase 2: add below the bottommost cursor
         let max_line = std::iter::once(&doc.cursor)
             .chain(doc.secondary_cursors.iter())
             .map(|c| c.position.line)
@@ -344,7 +341,7 @@ impl App {
     /// returns `true` when the edit should be committed (i.e. the underlying
     /// `line_ops` call succeeded). When `clamp_after` is set and the scope is
     /// `Selection`, cursors are clamped after a successful edit so they cannot
-    /// point past lines the operation removed — used by ops that can reduce the
+    /// point past lines the operation removed. Used by ops that can reduce the
     /// line count (remove-duplicates, remove-empty, join).
     fn run_scoped_line_op<F>(&mut self, scope: OperationScope, clamp_after: bool, op: F)
     where
@@ -519,7 +516,7 @@ impl App {
     ///
     /// Selection-aware path delegates to [`Document::indent_or_dedent_selection`]
     /// so the editor's Tab key and this menu entry share the same logic.
-    /// No-selection fallback indents/dedents the cursor's current line —
+    /// No-selection fallback indents/dedents the cursor's current line; it
     /// preserves the menu-entry semantics from before the Tab-key rewire.
     pub(crate) fn indent_selection(&mut self, indent: bool) {
         let doc = self.tabs.active_doc_mut();
@@ -679,7 +676,7 @@ mod tests {
         );
     }
 
-    /// ASCII sanity check — the conversion must not regress the common path.
+    /// ASCII sanity check: the conversion must not regress the common path.
     #[test]
     fn select_next_occurrence_ascii_adds_cursor() {
         let mut app = test_app();

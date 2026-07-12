@@ -124,7 +124,7 @@ fn test_status_bar_line_ending_change() {
     assert!(app.tabs.active_doc().modified);
 }
 
-// ── B2. Status Bar — Indent Style ──────────────────────────────────────────
+// ── B2. Status Bar: Indent Style ───────────────────────────────────────────
 
 #[test]
 fn test_status_bar_shows_indent_style() {
@@ -148,7 +148,6 @@ fn test_status_bar_indent_style_change_to_tabs() {
     let mut harness = create_harness();
     harness.get_by_label("Spaces: 4").click();
     harness.run();
-    // Select Tabs
     harness.get_by_label("Tabs").click();
     harness.run();
 
@@ -230,7 +229,7 @@ fn test_zoom_max_limit() {
         ctrl: true,
         ..Default::default()
     };
-    // Zoom in 150 times — should cap at max_zoom_level (15.0)
+    // Zoom in 150 times: should cap at max_zoom_level (15.0)
     for _ in 0..150 {
         harness.key_press_modifiers(ctrl, Key::Plus);
         harness.run();
@@ -246,7 +245,7 @@ fn test_zoom_min_limit() {
         ctrl: true,
         ..Default::default()
     };
-    // Zoom out 20 times — should cap at 0.5
+    // Zoom out 20 times: should cap at 0.5
     for _ in 0..20 {
         harness.key_press_modifiers(ctrl, Key::Minus);
         harness.run();
@@ -397,7 +396,7 @@ fn test_all_tabs_have_accessible_labels() {
     harness.run();
     assert_eq!(harness.state().tabs.tab_count(), 3);
 
-    // All tabs — both active and inactive — must be discoverable by label.
+    // All tabs (both active and inactive) must be discoverable by label.
     // Guards the widget_info accessibility annotation on the custom-painted tab rect.
     // Naming: first tab is "Untitled", then "Untitled 2", "Untitled 3".
     harness.get_by_label_contains("Untitled 2");
@@ -465,7 +464,6 @@ fn test_encoding_menu_exists() {
 #[test]
 fn test_ctrl_z_undo() {
     let mut harness = create_harness();
-    // Insert text
     harness
         .state_mut()
         .tabs
@@ -526,14 +524,13 @@ fn test_escape_closes_find_replace() {
     harness.key_press_modifiers(ctrl, Key::F);
     harness.run();
 
-    // Find dialog should now be visible — query for "Find:" label
+    // Find dialog should now be visible: the "Find and Replace" title exists
     assert!(harness.query_by_label("Find and Replace").is_some());
 
-    // Press Escape
     harness.key_press(Key::Escape);
     harness.run();
 
-    // Dialog should be closed — no "Find and Replace" title
+    // Dialog should be closed: no "Find and Replace" title
     assert!(harness.query_by_label("Find and Replace").is_none());
 }
 
@@ -671,7 +668,7 @@ fn test_alt_shift_down_adds_cursor_on_correct_lines() {
         rust_pad_core::cursor::Position::new(0, 3);
     harness.run();
 
-    // Press Alt+Shift+Down — should add cursor on line 1, primary stays on line 0
+    // Press Alt+Shift+Down: should add cursor on line 1, primary stays on line 0
     let alt_shift = Modifiers {
         alt: true,
         shift: true,
@@ -761,7 +758,7 @@ fn test_alt_shift_period_no_text_insertion() {
     doc.cursor.position = rust_pad_core::cursor::Position::new(0, 3);
     harness.run();
 
-    // Press Alt+Shift+. — this should add a secondary cursor, NOT insert ">"
+    // Alt+Shift+. should add a secondary cursor, NOT insert ">"
     let alt_shift = Modifiers {
         alt: true,
         shift: true,
@@ -998,7 +995,7 @@ fn test_enter_with_tab_indent_inherits() {
 ///
 /// We push events directly to `input_mut().events` so that each click's
 /// events are batched into a single frame (0.25s step_dt). Using
-/// `harness.event()` would give each event its own frame, exceeding
+/// `harness.event()` would give each event its own frame and exceed
 /// egui's 0.3s double-click threshold.
 fn double_click_at(harness: &mut Harness<'_, rust_pad_ui::App>, pos: egui::Pos2) {
     // First click: hover + press + release in one frame
@@ -1074,7 +1071,7 @@ fn test_single_click_empty_tab_bar_does_not_create_tab() {
     let mut harness = create_harness();
     assert_eq!(harness.state().tabs.tab_count(), 1);
 
-    // Single click on empty tab bar space — should NOT create a new tab
+    // Single click on empty tab bar space should NOT create a new tab
     let pos = egui::Pos2::new(800.0, 46.0);
     harness.event(egui::Event::PointerMoved(pos));
     harness.event(egui::Event::PointerButton {
@@ -1115,7 +1112,6 @@ fn test_go_to_line_dialog_opens_with_ctrl_g() {
 fn test_go_to_line_dialog_closes_with_escape() {
     let mut harness = create_harness();
 
-    // Open the dialog
     harness.state_mut().go_to_line.open();
     harness.run();
     assert!(harness.state().go_to_line.visible);
@@ -1170,14 +1166,13 @@ fn test_go_to_line_dialog_does_not_steal_editor_input() {
         .active_doc_mut()
         .insert_text("line1\nline2\nline3\nline4\nline5");
 
-    // Open the Go to Line dialog
     harness.state_mut().go_to_line.open();
     harness.run();
 
     // The editor content should not change when dialog is open
     let content_before = harness.state().tabs.active_doc().buffer.to_string();
 
-    // Simulate typing digits — these should NOT be inserted into the editor
+    // Simulate typing digits. These should NOT be inserted into the editor.
     harness.event(egui::Event::Text("3".into()));
     harness.run();
 
@@ -1361,7 +1356,7 @@ fn test_ctrl_f2_toggles_bookmark() {
     harness.key_press_modifiers(ctrl, Key::F2);
     harness.run();
 
-    // Bookmarks are on App, not the doc — but we verify through behavior.
+    // Bookmarks are on App, not the doc, so we verify through behavior.
     // Toggle again should un-bookmark (F2 nav should return None if only bookmark removed).
     harness.key_press_modifiers(ctrl, Key::F2);
     harness.run();
@@ -1788,7 +1783,7 @@ fn test_ctrl_s_saves_file_backed_document() {
         ..Default::default()
     };
     harness.key_press_modifiers(ctrl, Key::S);
-    // Save is async — run frames with brief pauses so the background thread
+    // Save is async: run frames with brief pauses so the background thread
     // has time to write the file and handle_io_responses can pick up the result.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -1839,7 +1834,7 @@ fn test_open_same_file_twice_switches_tab() {
     assert_eq!(harness.state().tabs.tab_count(), 2);
     assert_eq!(harness.state().tabs.active, 1);
 
-    // Open again — should switch to existing tab, not add new one
+    // Open again: should switch to existing tab, not add new one
     harness.state_mut().tabs.switch_to(0);
     harness.state_mut().tabs.open_file(&file_path).unwrap();
     harness.run();
@@ -1963,7 +1958,7 @@ fn test_tab_scroll_no_overflow_with_few_tabs() {
         ctrl: true,
         ..Default::default()
     };
-    // Create 3 tabs total — should fit in 1024px window
+    // Create 3 tabs total: should fit in 1024px window
     harness.key_press_modifiers(ctrl, Key::N);
     harness.run();
     harness.key_press_modifiers(ctrl, Key::N);
@@ -2065,7 +2060,6 @@ fn test_tab_scroll_switch_to_first_tab_scrolls_left() {
     let offset_at_end = harness.state().tab_scroll_offset;
     assert!(offset_at_end > 0.0);
 
-    // Switch to the first tab
     harness.state_mut().tabs.switch_to(0);
     harness.run();
 

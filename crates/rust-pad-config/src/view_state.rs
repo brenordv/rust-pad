@@ -4,7 +4,7 @@
 ///
 /// The store is keyed by a canonical path string (see
 /// [`crate::paths::canonical_path_key`]). Canonicalization is performed
-/// on **save**, never on read — this avoids a TOCTOU window where a
+/// on **save**, never on read; this avoids a TOCTOU window where a
 /// swapped file could cause restored state to land on the wrong document.
 ///
 /// Persistence schema is intentionally separate from [`crate::session`]
@@ -92,7 +92,7 @@ impl ViewStateStore {
     pub fn open(path: &Path) -> Result<Self> {
         let db = open_or_create_db(path, "view_state")?;
 
-        // Ensure the table exists.
+        // Create the table if it doesn't exist yet.
         let write_txn = db
             .begin_write()
             .context("Failed to begin initial view-state write transaction")?;
@@ -110,7 +110,7 @@ impl ViewStateStore {
 
     /// Loads the `ViewState` for `key`, or `None` if no entry exists.
     ///
-    /// Corrupt records are silently discarded — same convention as
+    /// Corrupt records are silently discarded; same convention as
     /// [`crate::workspace::WorkspaceStore`] and [`crate::session::SessionStore`].
     ///
     /// # Errors
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn prune_removes_oldest_when_over_cap() {
         let (store, _dir) = open_test_store();
-        // Insert one more than the cap with monotonically increasing
+        // Insert five more than the cap with monotonically increasing
         // timestamps so prune order is deterministic.
         for i in 0..(VIEW_STATE_ENTRY_CAP + 5) {
             let s = ViewState {

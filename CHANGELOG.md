@@ -78,20 +78,20 @@ is not resurrected).
 ## [2.12.2]
 
 ### Fixed
-- **Hovering the workspace sidebar stole the arrow keys from the editor.** After clicking into a document, moving the mouse over the workspace panel — without clicking anything — caused the next arrow-key press to move the selection in the file tree instead of the caret in the text. Keyboard ownership was tied to the pointer *hovering* the sidebar; it is now strictly **click-to-focus** — the sidebar only takes the arrow/Enter/F2 keys after you click one of its rows, and releases them the moment you click back in the editor. Pointer position no longer affects where keystrokes go. (This supersedes the narrower 2.12.1 fix, which only covered the arrow press immediately after opening a file with Enter.)
+- **Hovering the workspace sidebar stole the arrow keys from the editor.** After clicking into a document, moving the mouse over the workspace panel (without clicking anything) caused the next arrow-key press to move the selection in the file tree instead of the caret in the text. Keyboard ownership was tied to the pointer *hovering* the sidebar; it is now strictly **click-to-focus**: the sidebar only takes the arrow/Enter/F2 keys after you click one of its rows, and releases them the moment you click back in the editor. Pointer position no longer affects where keystrokes go. (This supersedes the narrower 2.12.1 fix, which only covered the arrow press immediately after opening a file with Enter.)
 - **`Shift+Tab` flattened unevenly indented lines to the left margin.** Dedenting a multi-line selection removed "a tab's worth" of spaces from every line independently, so lines indented with fewer spaces than the tab width collapsed all the way to column 0 and their relative indentation was lost. Dedent is now a **block operation**: it removes the smallest common amount of leading whitespace (capped at one indent level) from every selected line at once, preserving the relative indentation between them, and repeated presses march the block left until it reaches the margin. Tab-indented files and single-line dedent are unchanged.
 
 ## [2.12.1]
 
 ### Fixed
-- **Unsaved tab content lost after an unexpected shutdown (power loss / hard kill).** Unsaved buffers were written to the session store only on a *clean* exit. The restore step then wiped the stored content — so if the app was killed (power loss, OOM, panic) before the next clean exit, tabs came back present but empty, with nothing reported in the Problems menu. The session is now persisted as a single **atomic snapshot** (tab list + unsaved content committed together) on a periodic timer while you edit, immediately after a restore, and on clean exit. A hard abort now loses at most the last autosave interval of edits instead of everything, and on the next launch a recovery is reported in the Problems menu ("Recovered N unsaved document(s) after an unexpected shutdown"). Note: unsaved content is now persisted continuously while editing (bounded by the existing session content size limit), not only between restarts.
+- **Unsaved tab content lost after an unexpected shutdown (power loss / hard kill).** Unsaved buffers were written to the session store only on a *clean* exit. The restore step then wiped the stored content, so if the app was killed (power loss, OOM, panic) before the next clean exit, tabs came back present but empty, with nothing reported in the Problems menu. The session is now persisted as a single **atomic snapshot** (tab list + unsaved content committed together) on a periodic timer while you edit, immediately after a restore, and on clean exit. A hard abort now loses at most the last autosave interval of edits instead of everything, and on the next launch a recovery is reported in the Problems menu ("Recovered N unsaved document(s) after an unexpected shutdown"). Note: unsaved content is now persisted continuously while editing (bounded by the existing session content size limit), not only between restarts.
 
 ## [2.12.0]
 
 ### Added
-- **Find All results panel (Notepad++ style).** The Find/Replace dialog has a new **Find All** button that lists every match — in the current tab or across all open tabs, following the Scope selector — in a dockable results panel above the status bar. Each result shows `tab:line  text`; double-clicking a result activates its tab, selects the match, and hands keyboard focus to the editor. The panel stays in sync with the dialog's case/whole-word/regex options.
-- **"Dusk" theme — a low-glare light theme.** A warm, parchment-toned light theme (never pure white) paired with the Solarized-light syntax palette, for users who find the high-contrast `Light` theme harsh. Available in Settings → Appearance alongside Dark, Light, and Wacky, and auto-added to existing configurations on upgrade.
-- **Hide-sidebar button in the workspace toolbar.** The workspace sidebar header has a new collapse button that hides the panel without closing the workspace (reopen with `Ctrl+B` or the Workspace menu) — distinct from the existing "Close workspace" action.
+- **Find All results panel (Notepad++ style).** The Find/Replace dialog has a new **Find All** button that lists every match (in the current tab or across all open tabs, following the Scope selector) in a dockable results panel above the status bar. Each result shows `tab:line  text`; double-clicking a result activates its tab, selects the match, and hands keyboard focus to the editor. The panel stays in sync with the dialog's case/whole-word/regex options.
+- **"Dusk" theme: a low-glare light theme.** A warm, parchment-toned light theme (never pure white) paired with the Solarized-light syntax palette, for users who find the high-contrast `Light` theme harsh. Available in Settings → Appearance alongside Dark, Light, and Wacky, and auto-added to existing configurations on upgrade.
+- **Hide-sidebar button in the workspace toolbar.** The workspace sidebar header has a new collapse button that hides the panel without closing the workspace (reopen with `Ctrl+B` or the Workspace menu), distinct from the existing "Close workspace" action.
 
 ### Changed
 - **Dark theme contrast.** The dark theme's text selection and occurrence-highlight colors are brighter and more opaque so selected and highlighted text stays legible.
@@ -104,10 +104,10 @@ is not resurrected).
 
 ### Added
 - **Shift+click to extend a selection.** Clicking to place the caret and then Shift+clicking elsewhere now selects the text in between, matching standard text-editor behavior. The anchor is taken from the caret's current position (or the existing selection's anchor), so repeated Shift+clicks keep extending from the *original* anchor rather than resetting to each new click. Works in both directions (forward and backward), and a Shift+click on the caret's own position leaves nothing highlighted. Plain click (clears selection and moves the caret) and Shift+drag selection are unchanged.
-- **Workspace context menu: `Reload from disk` for folders.** Right-clicking a folder (including a workspace root) now offers a "Reload from disk" item that re-reads that directory and its currently-expanded sub-tree from the filesystem and reconciles the tree with on-disk changes — new entries appear, deleted ones disappear — while preserving which folders are expanded. It is a deterministic, cross-platform way to refresh the tree when the live filesystem watcher misses a change.
+- **Workspace context menu: `Reload from disk` for folders.** Right-clicking a folder (including a workspace root) now offers a "Reload from disk" item that re-reads that directory and its currently-expanded sub-tree from the filesystem and reconciles the tree with on-disk changes (new entries appear, deleted ones disappear) while preserving which folders are expanded. It is a deterministic, cross-platform way to refresh the tree when the live filesystem watcher misses a change.
 
 ### Fixed
-- **macOS: folders created while the workspace was open could stay unlisted.** The sidebar's tree was updated incrementally from filesystem-watcher events that assume each event names the exact file or folder that changed — true for the Windows and Linux backends, but not for macOS, where the `notify` FSEvents backend coalesces a burst of changes into a single event for the *containing* directory. Such an event found the directory already present and was treated as a no-op, so entries created inside it during the session never surfaced (most visible with a folder like `.mcp-vault` that is written to in the background). The watcher now re-reads and reconciles a directory (and its expanded sub-tree) when an event targets the directory itself, and the new `Reload from disk` context-menu item provides a guaranteed manual refresh in any remaining edge case. Windows and Linux keep their existing per-entry fast path unchanged.
+- **macOS: folders created while the workspace was open could stay unlisted.** The sidebar's tree was updated incrementally from filesystem-watcher events that assume each event names the exact file or folder that changed. That is true for the Windows and Linux backends, but not for macOS, where the `notify` FSEvents backend coalesces a burst of changes into a single event for the *containing* directory. Such an event found the directory already present and was treated as a no-op, so entries created inside it during the session never surfaced (most visible with a folder like `.mcp-vault` that is written to in the background). The watcher now re-reads and reconciles a directory (and its expanded sub-tree) when an event targets the directory itself, and the new `Reload from disk` context-menu item provides a guaranteed manual refresh in any remaining edge case. Windows and Linux keep their existing per-entry fast path unchanged.
 
 ## [2.10.0]
 
@@ -125,7 +125,7 @@ is not resurrected).
 
 ### Fixed
 - **Crash when multi-selecting around multi-byte characters.** Selecting the next occurrence of a word (`Alt+Shift+.`) in text containing a multi-byte codepoint (e.g. an em dash `—`) could panic with a char-boundary error and lose the affected tabs' contents. Occurrence search now converts between character and byte offsets correctly.
-- **Renaming a folder that appears in the workspace more than once.** When the same physical folder was present both as a workspace root and nested under another root (possible since overlapping roots were allowed in 2.8.1), an inline rename could land on the wrong copy and leave the workspace root pointing at the old name. The rename now targets the exact row you selected, and the new name propagates to every other row for that physical folder — updating and persisting the affected workspace root(s).
+- **Renaming a folder that appears in the workspace more than once.** When the same physical folder was present both as a workspace root and nested under another root (possible since overlapping roots were allowed in 2.8.1), an inline rename could land on the wrong copy and leave the workspace root pointing at the old name. The rename now targets the exact row you selected, and the new name propagates to every other row for that physical folder, which updates and persists the affected workspace root(s).
 - **macOS: pointer stuck as a hand cursor after switching windows.** Returning to the window via Cmd/Alt-Tab could leave the cursor showing the folder-row hand until it crossed between panels a few times; the cursor is now reset when the window regains focus.
 
 ### Changes
@@ -226,7 +226,7 @@ is not resurrected).
 
 ### Changed
 
-- `ThemeController::zoom_level` renamed to `default_zoom_level` — it now only sets the initial zoom for newly-created documents and is persisted to config on exit. The per-document zoom starts at this default.
+- `ThemeController::zoom_level` renamed to `default_zoom_level`: it now only sets the initial zoom for newly-created documents and is persisted to config on exit. The per-document zoom starts at this default.
 - Removed `zoom_in()`, `zoom_out()`, and `zoom_reset()` methods from `ThemeController`; zoom mutations are now applied directly to `Document::zoom_level`.
 - Removed the `zoom_request` output field from `EditorWidget` and the associated propagation logic in the single-pane and split-pane render paths.
 - Status bar now displays the active document's zoom level rather than the global zoom.
@@ -240,7 +240,7 @@ is not resurrected).
 
 ### Changed
 
-- Extracted shared database-opening boilerplate (`open_or_create_db`) into a reusable helper, eliminating code duplication between `ProblemStore::open()` and `SessionStore::open()`.
+- Extracted shared database-opening boilerplate (`open_or_create_db`) into a reusable helper, which removes the code duplication between `ProblemStore::open()` and `SessionStore::open()`.
 - Removed leftover mock problem entries added during development.
 
 ## [2.4.0]
@@ -250,7 +250,7 @@ is not resurrected).
 #### Problems Panel (Help → Problems)
 - New **Help → Problems** menu entry opens a dialog listing all application errors and warnings in reverse chronological order (newest first). Each entry shows a timestamp and a human-readable error message.
 - Users can **mark individual entries as read**, **mark all as read**, **copy** an error message to the clipboard, or **clear** the entire log.
-- The **Help** menu shows a warning indicator (`Help ⚠`) and an unread count badge (e.g. `Problems (3)`) whenever there are unread entries, providing at-a-glance visibility into background failures.
+- The **Help** menu shows a warning indicator (`Help ⚠`) and an unread count badge (e.g. `Problems (3)`) whenever there are unread entries, so background failures are visible at a glance.
 - Problem entries are stored in a dedicated crash-safe database (`rust-pad-problems.redb`) so they survive unexpected termination. The database is created in the platform-standard data directory (or next to the executable in portable mode).
 - The following errors are now captured in the problem log:
   - File open failures (encoding errors, I/O errors)
@@ -276,7 +276,7 @@ is not resurrected).
 - **Copy selection into find field**: Pressing Ctrl+F or Ctrl+H with text selected automatically populates the find field with the selected text (single-line selections only).
 - **Scroll to match on Find Next/Prev**: The viewport now scrolls to keep the current match visible when cycling through results with Find Next or Find Prev.
 - **Search history dropdown**: A small dropdown button next to the find field lets the user recall recent search queries (session-only, up to 20 entries, deduplicated). History is recorded on Find Next, Find Prev, Replace, and Replace All actions.
-- **Non-modal Find/Replace**: The Find/Replace dialog no longer blocks editing. Users can click into the editor to type, use shortcuts, and make changes while the dialog stays open. The dialog becomes semi-transparent when it loses focus, providing a clear visual cue of which surface is active.
+- **Non-modal Find/Replace**: The Find/Replace dialog no longer blocks editing. Users can click into the editor to type, use shortcuts, and make changes while the dialog stays open. The dialog becomes semi-transparent when it loses focus, a visual cue of which surface is active.
 - **Default line ending setting**: New "Default Line Ending" option in Settings → Editor. Choose between System (OS default), Unix (LF), or Windows (CRLF) for new documents. Files opened from disk keep their detected line ending.
 
 ## [2.2.0]
@@ -308,7 +308,7 @@ is not resurrected).
 
 #### Replace `printpdf` with `pdf-writer` for PDF generation
 - Replaced the `printpdf 0.9.1` PDF backend with `pdf-writer 0.14.0` (from the typst team) to resolve RUSTSEC-2023-0019 (`kuchiki 0.8.1` unmaintained advisory).
-- Added `ttf-parser 0.25.1` for font metric extraction and cmap parsing, enabling proper Type0/CIDFont embedding with a ToUnicode CMap (text is now selectable and searchable in generated PDFs).
+- Added `ttf-parser 0.25.1` for font metric extraction and cmap parsing. This enables proper Type0/CIDFont embedding with a ToUnicode CMap (text is now selectable and searchable in generated PDFs).
 - Eliminated 53 transitive dependency warnings from the azul/html5ever/kuchiki subtree. The new `pdf-writer` brings only 4 transitive deps (`bitflags`, `itoa`, `ryu`, `memchr`).
 - PDF output is functionally identical: same A4 layout, same header/footer/gutter, same monospace DejaVu Sans Mono font, same Unicode coverage. No user-facing changes.
 
@@ -319,7 +319,7 @@ is not resurrected).
 #### Print / Export as PDF
 - New **File → Print...** entry (Ctrl+P) renders the active document to a temporary PDF and opens it in the system's default PDF viewer, so the user can print from there. Works on Windows, macOS, and Linux with no per-platform configuration.
 - New **File → Export as PDF...** entry uses the same pipeline but writes the PDF to a user-chosen path instead of opening a viewer.
-- PDF output: A4 portrait, monospace (DejaVu Sans Mono, bundled — OFL-compatible license), header with filename + full path + generation timestamp, footer with `Page N of M`, optional line-number gutter.
+- PDF output: A4 portrait, monospace (DejaVu Sans Mono, bundled, OFL-compatible license), header with filename + full path + generation timestamp, footer with `Page N of M`, optional line-number gutter.
 - Pagination, tab expansion, CRLF handling, and soft-wrap of very long lines are all correct for documents of any size. Unicode content (Latin supplement, Cyrillic, CJK) renders natively; glyphs not in the bundled font fall back to `.notdef`.
 - PDF generation runs on a dedicated background worker thread so the UI stays responsive during large jobs. A `Generating PDF…` indicator appears in the status bar while a job is in flight, and the menu entries plus shortcut gate on in-flight state to prevent duplicate jobs.
 - On startup, any stale `rust-pad-print-*.pdf` temp files older than 24 hours are cleaned up best-effort.
@@ -347,12 +347,12 @@ is not resurrected).
   - "Close Unchanged Tabs" keeps pinned tabs even if they are unchanged.
   - "Close Others" keeps pinned tabs other than the right-clicked one.
   - "Close All" leaves pinned tabs alone (modified or not) and only prompts for unpinned modified tabs.
-- The × button and middle-click still close pinned tabs individually — pinning prevents accidental bulk close, not deliberate per-tab close.
+- The × button and middle-click still close pinned tabs individually: pinning prevents accidental bulk close, not deliberate per-tab close.
 - Pin state is persisted across app restarts via the session store.
 
 #### Tab Coloring
 - Right-click any tab → "Set Tab Color" submenu with a 9-color palette (Red, Orange, Yellow, Green, Cyan, Blue, Purple, Pink, Gray) plus "Clear Color".
-- A tab with an assigned color always shows its colored accent stripe at the top, even when inactive — useful for visually grouping related tabs at a glance.
+- A tab with an assigned color always shows its colored accent stripe at the top, even when inactive, useful for visually grouping related tabs at a glance.
 - Inactive tabs without an assigned color still show no accent. Active tabs without an assigned color continue to show the theme accent.
 - Tab color is persisted across app restarts via the session store.
 
@@ -394,7 +394,7 @@ is not resurrected).
 
 #### Bincode Deserialization Size Limits
 - Deserialization of undo history entries, document metadata, and session data from redb databases is now bounded to prevent out-of-memory crashes from corrupted database files.
-- Corrupted records are now gracefully skipped with a warning log instead of preventing the app from starting. History limits: 50 MB per edit group, 1 KB for metadata, 10 MB for session data.
+- Corrupted records are now skipped with a warning log instead of preventing the app from starting. History limits: 50 MB per edit group, 1 KB for metadata, 10 MB for session data.
 
 #### Data Directory Permissions
 - The history data directory is now created with owner-only permissions (0700 on Unix) to prevent other local users from listing database files.
@@ -409,10 +409,10 @@ is not resurrected).
 - All third-party GitHub Actions in CI, release, and SonarCloud workflows are now pinned to full commit SHAs instead of mutable version tags. This prevents supply chain attacks where a compromised action could inject malicious code into builds or release artifacts.
 
 #### Release Artifact SHA256 Checksums
-- Release builds now generate a `SHA256SUMS.txt` file containing SHA256 checksums for all release artifacts (Windows .zip, macOS .zip, Linux .tar.gz, .deb). The checksum file is uploaded alongside the binaries in GitHub Releases, allowing users to verify download integrity.
+- Release builds now generate a `SHA256SUMS.txt` file containing SHA256 checksums for all release artifacts (Windows .zip, macOS .zip, Linux .tar.gz, .deb). The checksum file is uploaded alongside the binaries in GitHub Releases so users can verify download integrity.
 
 #### Rust Toolchain Version Pinning
-- Added `rust-toolchain.toml` pinning the Rust compiler to version 1.93.1 with `rustfmt` and `clippy` components. This ensures reproducible builds across all developer machines and CI environments, preventing surprise failures from new Rust releases.
+- Added `rust-toolchain.toml` pinning the Rust compiler to version 1.93.1 with `rustfmt` and `clippy` components. This makes builds reproducible across all developer machines and CI environments and prevents surprise failures from new Rust releases.
 
 #### Platform-Standard Config and Data Directories
 - Configuration (`rust-pad.json`) is now stored in the platform-standard config directory: `~/.config/rust-pad/` (Linux), `~/Library/Application Support/rust-pad/` (macOS), `%APPDATA%\rust-pad\` (Windows).
@@ -456,15 +456,15 @@ is not resurrected).
 - Added a configurable size limit (`session_content_max_kb`) for unsaved tab content persisted in the session store. Default: 10,240 KB (10 MB).
 - Tabs exceeding the limit are saved as metadata only (title preserved, content skipped). On restore, these tabs appear empty with the original title.
 - Setting the limit to 0 disables the check (unlimited, backward-compatible).
-- Each tab is checked independently — one large tab does not block others.
+- Each tab is checked independently: one large tab does not block others.
 - Configurable via the Settings dialog under the History tab ("Max unsaved content to restore (KB)").
 
 #### Async File I/O
-- File open dialogs, save-as dialogs, file reads, and file writes now run on background threads, keeping the UI responsive during slow I/O (network drives, USB sticks, large files).
+- File open dialogs, save-as dialogs, file reads, and file writes now run on background threads, so the UI stays responsive during slow I/O (network drives, USB sticks, large files).
 - The status bar shows an activity indicator with a spinner ("Opening...", "Saving...", "Reading...") while I/O is in progress.
-- Editing is blocked while a file dialog is open, preventing modifications to content that is being saved.
+- Editing is blocked while a file dialog is open, so content that is being saved cannot be modified.
 - Opening the same file concurrently is de-duplicated: the existing tab is activated instead.
-- Content version tracking ensures the modified flag is preserved correctly if the user edits between save initiation and completion.
+- Content version tracking preserves the modified flag correctly if the user edits between save initiation and completion.
 
 ### Changed
 
@@ -478,11 +478,11 @@ is not resurrected).
 
 #### Architecture: Decompose App Struct
 - Decomposed the monolithic `App` struct (which held ~40 fields and ~26 methods) into five focused, composable sub-structs. `App` is now a thin orchestrator that wires these components together in the update loop.
-  - **ThemeController** — owns editor theme, theme mode, available themes, accent color, syntax highlighter, and zoom level. Provides `set_mode()`, `zoom_in/out/reset()`, and `apply_theme_visuals()`.
-  - **RecentFilesManager** — owns the recent files list, enabled flag, max count, and cleanup strategy. Provides `track()`, `cleanup_on_menu_open()`, and config serialization.
-  - **FileDialogState** — owns remember-last-folder preference, default work folder, last-used folder, and default extension. Provides `resolve_directory()` and `update_last_folder()`.
-  - **AutoSaveController** — owns enabled flag, interval, and timer. Provides `tick(&mut TabManager)` which checks timing and saves all modified file-backed documents.
-  - **LiveMonitorController** — owns the file-check timer. Provides `tick(&mut TabManager)` which polls for external file changes and reloads live-monitored documents.
+  - **ThemeController**: owns editor theme, theme mode, available themes, accent color, syntax highlighter, and zoom level. Provides `set_mode()`, `zoom_in/out/reset()`, and `apply_theme_visuals()`.
+  - **RecentFilesManager**: owns the recent files list, enabled flag, max count, and cleanup strategy. Provides `track()`, `cleanup_on_menu_open()`, and config serialization.
+  - **FileDialogState**: owns remember-last-folder preference, default work folder, last-used folder, and default extension. Provides `resolve_directory()` and `update_last_folder()`.
+  - **AutoSaveController**: owns enabled flag, interval, and timer. Provides `tick(&mut TabManager)` which checks timing and saves all modified file-backed documents.
+  - **LiveMonitorController**: owns the file-check timer. Provides `tick(&mut TabManager)` which polls for external file changes and reloads live-monitored documents.
 
 ## [1.1.0] - 2026-04-05
 

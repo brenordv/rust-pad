@@ -87,8 +87,8 @@ impl App {
 
     /// Drops the UI-side `split` state when `tabs.panes` has been
     /// auto-collapsed underneath us. Without this, the next toggle would
-    /// see stale `Some(...)` state and treat the toggle as "remove split"
-    /// — making the user click twice to re-enable the split.
+    /// see stale `Some(...)` state, treat the toggle as "remove split",
+    /// and make the user click twice to re-enable the split.
     fn normalize_split_state(&mut self) {
         if self.split.is_some() && !self.tabs.is_split() {
             self.split = None;
@@ -289,7 +289,6 @@ impl App {
             }
         }
 
-        // ── Render each pane in its own child UI. ──────────────────────
         self.render_one_pane(ui, PaneId::Left, left_rect, dialog_open, modal_dialog_open);
         self.render_one_pane(
             ui,
@@ -320,10 +319,8 @@ impl App {
             |ui| {
                 ui.set_clip_rect(pane_rect);
 
-                // Pane-aware tab strip.
                 self.show_pane_tab_bar(ui, pane);
 
-                // Editor for this pane's active document.
                 let response = {
                     let doc = self.tabs.pane_active_doc_mut(pane);
                     let mut editor = EditorWidget::new(

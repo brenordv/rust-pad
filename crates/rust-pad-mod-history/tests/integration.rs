@@ -260,7 +260,7 @@ fn test_clear_then_reload_gives_empty_history() {
 
 #[test]
 fn test_spill_and_cold_load_cycle() {
-    // Test that hot -> cold -> hot transitions work seamlessly
+    // Test that hot -> cold -> hot transitions work
     let dir = tempfile::tempdir().unwrap();
     let config = HistoryConfig {
         hot_capacity: 5,

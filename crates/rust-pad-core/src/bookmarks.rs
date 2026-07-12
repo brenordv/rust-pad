@@ -31,7 +31,6 @@ impl BookmarkManager {
         if self.bookmarked_lines.is_empty() {
             return None;
         }
-        // Find first bookmark after current line
         self.bookmarked_lines
             .range((current_line + 1)..)
             .next()
@@ -44,7 +43,6 @@ impl BookmarkManager {
         if self.bookmarked_lines.is_empty() {
             return None;
         }
-        // Find last bookmark before current line
         self.bookmarked_lines
             .range(..current_line)
             .next_back()

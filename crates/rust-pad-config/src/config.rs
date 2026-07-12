@@ -240,7 +240,7 @@ impl AppConfig {
         Self::load_or_create_with_report(path).0
     }
 
-    /// Reads only the persisted window geometry from `path` — a pure read
+    /// Reads only the persisted window geometry from `path`: a pure read
     /// with none of [`load_or_create_with_report`](Self::load_or_create_with_report)'s
     /// side effects (no file creation, no `.bak` move-aside), for use before
     /// the app owns config loading. Returns `None` on any error or when the
@@ -346,7 +346,7 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Ensures every built-in theme is present, so configs serialized by
+    /// Adds any built-in theme that is missing, so configs serialized by
     /// older versions gain themes added since.
     /// User-defined themes with matching names take priority over built-ins.
     /// The deletable "Wacky" sample is intentionally not force-merged.
@@ -407,7 +407,7 @@ impl AppConfig {
 
     /// Returns the Copy Contents warning threshold in bytes.
     ///
-    /// `0` in `copy_contents_warning_mb` means "always prompt" — the
+    /// `0` in `copy_contents_warning_mb` means "always prompt": the
     /// caller treats a `0` return value as "every file triggers the
     /// confirmation dialog".
     pub fn copy_contents_warning_bytes(&self) -> u64 {
@@ -458,7 +458,7 @@ impl AppConfig {
             self.copy_contents_max_mb = self.copy_contents_max_mb.clamp(1, 10_240);
         }
         // The Copy Contents warning threshold cannot exceed the Copy Contents
-        // hard cap — otherwise the user would never see the prompt before
+        // hard cap; otherwise the user would never see the prompt before
         // hitting the outright refusal. `0` on either side means "no limit /
         // always prompt" and is preserved as-is.
         if self.copy_contents_warning_mb > 0 && self.copy_contents_max_mb > 0 {
@@ -1399,7 +1399,7 @@ mod tests {
     #[test]
     fn restore_position_rejects_title_strip_above_the_screen() {
         // The window body would still be visible, but the grabbable title
-        // strip is entirely above the screen — discarded.
+        // strip is entirely above the screen, so the position is discarded.
         let mut g = on_screen_geometry();
         g.y = -(TITLE_STRIP_HEIGHT + 1.0);
         assert_eq!(g.restore_position(), None);

@@ -142,8 +142,8 @@ impl<'a> EditorWidget<'a> {
     /// Returns the path used for syntax detection.
     ///
     /// Falls back to the document title when there is no file path,
-    /// allowing untitled tabs with extensions (e.g. "Untitled.txt")
-    /// to get appropriate syntax highlighting.
+    /// so untitled tabs with extensions (e.g. "Untitled.txt")
+    /// get appropriate syntax highlighting.
     pub(crate) fn syntax_path(&self) -> Option<std::path::PathBuf> {
         if self.doc.file_path.is_some() {
             return self.doc.file_path.clone();
@@ -194,7 +194,6 @@ impl<'a> EditorWidget<'a> {
         self.handle_focus_and_keyboard(ui, &response, wrap_map.as_ref());
         self.follow_cursor(cursor_pos_before, &layout, wrap_map.as_ref());
 
-        // Rebuild wrap map after input only if the buffer actually changed
         if self.word_wrap && self.doc.content_version != version_before_input {
             wrap_map = self.rebuild_wrap_map(rect, &layout);
         }
@@ -231,7 +230,7 @@ impl<'a> EditorWidget<'a> {
         // write that clamps back to the original value nets to "no change",
         // which keeps this edge-triggered: a settled frame requests nothing.
         // External writers between frames (sync-scroll mirror, session
-        // restore) must converge in one pass for that to hold — the mirror
+        // restore) must converge in one pass for that to hold: the mirror
         // only copies on `ScrollOrigin::UserInput`, which is reset at the top
         // of every pass.
         if viewport_bits(self.doc) != viewport_before {
@@ -515,12 +514,12 @@ impl<'a> EditorWidget<'a> {
 
     /// Applies a mouse press/click at `click_pos` to the primary cursor.
     ///
-    /// * `shift` — extend the selection: anchor at the existing selection start
+    /// * `shift`: extend the selection: anchor at the existing selection start
     ///   (or the current caret if none, via the idempotent
     ///   [`Cursor::start_selection`]), then move the caret (head) to
     ///   `click_pos`. Never clears, so repeated shift+clicks extend from the
     ///   original anchor.
-    /// * `is_click` — a true click (press+release, no drag). When `shift` is
+    /// * `is_click`: a true click (press+release, no drag). When `shift` is
     ///   false, a true click clears any selection; a drag-start
     ///   (`is_click == false`) does not, matching the drag handler's own
     ///   selection bookkeeping.
@@ -566,8 +565,8 @@ impl<'a> EditorWidget<'a> {
     ) {
         // Don't auto-grab focus when any dialog is open; focus transfers
         // to the editor via mouse click (handle_mouse_input calls
-        // response.request_focus()).  In split view, only the focused
-        // pane's editor has `auto_focus = true` — the unfocused pane
+        // response.request_focus()). In split view, only the focused
+        // pane's editor has `auto_focus = true`; the unfocused pane
         // must not steal focus, otherwise both editors process the same
         // keyboard events and text appears in both panels.
         if self.auto_focus && !self.dialog_open && !response.has_focus() && !response.lost_focus() {
@@ -631,7 +630,6 @@ impl<'a> EditorWidget<'a> {
             .map(|needle| self.find_occurrence_ranges(&needle, &all_selection_ranges))
             .unwrap_or_default();
 
-        // Bracket matching: find matched pair for primary cursor position.
         let bracket_positions = {
             use rust_pad_core::bracket::find_matching_bracket;
             use rust_pad_core::cursor::pos_to_char;
@@ -703,7 +701,7 @@ impl<'a> EditorWidget<'a> {
                 last_visual,
                 Some(wm),
             );
-            // Use visual line indices for pruning — matches the cache keys
+            // Use visual line indices for pruning; matches the cache keys
             // used in render_lines_wrapped (visual_line as key).
             (first_visual, last_visual.saturating_sub(1))
         } else {
@@ -891,7 +889,7 @@ impl<'a> EditorWidget<'a> {
     ) -> Vec<(usize, usize)> {
         let version = self.doc.content_version;
 
-        // Check cache — the cached ranges include ALL occurrences (before selection filtering)
+        // Check the cache; the cached ranges include ALL occurrences (before selection filtering)
         let all_ranges = if let Some((v, ref cached_needle, ref ranges)) =
             self.doc.cached_occurrences
         {
@@ -1271,7 +1269,6 @@ impl<'a> EditorWidget<'a> {
             ui.fonts_mut(|f| f.layout_job(job))
         };
 
-        // Store in cache when applicable.
         if let Some(line_idx) = cache_line_idx {
             let cache = get_render_cache(&mut self.doc.render_cache);
             cache.insert(line_idx, content_hash, galley.clone());
@@ -1679,7 +1676,7 @@ impl<'a> EditorWidget<'a> {
                     .unwrap_or(false);
 
             // Use visual_line as cache key for wrapped segments.
-            // Content-hash validation ensures correctness across edits.
+            // Content-hash validation keeps this correct across edits.
             let cache_line_idx = Some(visual_line);
 
             // Tab-replace the full line for highlighting context (tabs are
@@ -1795,7 +1792,7 @@ impl<'a> EditorWidget<'a> {
     ) {
         let margin = 2.0;
 
-        // Vertical scroll — in wrap mode use the visual line, otherwise use the logical line.
+        // Vertical scroll: in wrap mode use the visual line, otherwise the logical line.
         let cursor_visual_y = wrap_map.map_or(self.doc.cursor.position.line as f32, |wm| {
             wm.position_to_visual_line(self.doc.cursor.position.line, self.doc.cursor.position.col)
                 as f32
@@ -1811,7 +1808,7 @@ impl<'a> EditorWidget<'a> {
             moved = true;
         }
 
-        // Horizontal scroll — only in non-wrap mode.
+        // Horizontal scroll: only in non-wrap mode.
         if wrap_map.is_some() {
             self.doc.scroll_x = 0.0;
         } else {
@@ -2348,7 +2345,7 @@ mod tests {
 
         let text_area = Rect::from_min_max(Pos2::new(50.0, 0.0), Pos2::new(500.0, 200.0));
 
-        // screen_to_position doesn't clamp — cursor clamping happens elsewhere
+        // screen_to_position doesn't clamp; cursor clamping happens elsewhere
         let pos = widget.screen_to_position(Pos2::new(50.0, 500.0), text_area, 20.0, 10.0, None);
         assert!(pos.line > 1);
     }
@@ -2374,7 +2371,7 @@ mod tests {
 
     #[test]
     fn screen_to_position_wrapped_empty_line_click_far_below() {
-        // Empty document, but click at a high y — visual_to_logical can
+        // Empty document, but click at a high y; visual_to_logical can
         // return a wrap_row beyond the (empty) line content.
         let mut doc = Document {
             buffer: "".into(),
@@ -2386,7 +2383,7 @@ mod tests {
         let theme = EditorTheme::default();
         let widget = EditorWidget::new(&mut doc, &theme, None);
 
-        // Click way below — should not panic.
+        // Click way below; should not panic.
         let pos =
             widget.screen_to_position(Pos2::new(60.0, 500.0), text_area, 20.0, 10.0, Some(&wm));
         assert_eq!(pos.col, 0);
@@ -2640,7 +2637,7 @@ mod tests {
     #[test]
     fn drag_start_without_shift_does_not_clear() {
         // is_click == false (drag start): a non-shift drag start must NOT clear
-        // an existing selection — the drag handler manages it from here.
+        // an existing selection; the drag handler manages it from here.
         let mut doc = doc_with_caret("hello world", 0);
         doc.cursor.start_selection();
         doc.cursor.position = Position::new(0, 5);
@@ -2844,7 +2841,7 @@ mod tests {
     }
 
     // Pathological-content guard: a wrapped long-line document parked at max
-    // scroll must converge (clamp once, repaint once) and then go quiet —
+    // scroll must converge (clamp once, repaint once) and then go quiet;
     // the viewport-moved edge must not oscillate into a repaint loop.
     #[test]
     fn wrapped_long_line_at_max_scroll_settles_without_repaint_requests() {

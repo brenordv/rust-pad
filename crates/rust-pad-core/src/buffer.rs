@@ -223,7 +223,7 @@ impl TextBuffer {
     ///
     /// The inverse of [`byte_to_char`](Self::byte_to_char). Callers that
     /// slice a materialised `String` by a char index must convert through
-    /// this first — char indices are not valid byte offsets once the text
+    /// this first: char indices are not valid byte offsets once the text
     /// contains multi-byte codepoints.
     ///
     /// # Errors
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn test_remove_empty_range() {
         let mut buf = TextBuffer::from("hello");
-        buf.remove(2, 2).unwrap(); // empty range — no-op
+        buf.remove(2, 2).unwrap(); // empty range; no-op
         assert_eq!(buf.to_string(), "hello");
     }
 

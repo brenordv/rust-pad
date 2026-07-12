@@ -387,7 +387,7 @@ The project has undergone multiple security hardening phases. Maintain these sta
 1. Test coverage on new code must be at least 50%.
 2. Code duplication must stay at 0%.
 
-Before submitting a PR, run these commands and ensure they all pass:
+Before submitting a PR, run these commands and make sure they all pass:
 
 ```bash
 # Full workspace checks

@@ -6,7 +6,7 @@ use crate::app::chrome::{self, DialogOptions};
 impl App {
     /// Returns the index of the active document iff it has a pending
     /// external change. Inactive tabs with the flag set are deliberately
-    /// ignored — the prompt only surfaces when the user is actually looking
+    /// ignored; the prompt only surfaces when the user is actually looking
     /// at the affected tab. Switching to a flagged tab will surface the
     /// prompt on the next frame.
     pub(crate) fn pending_external_change_idx(&self) -> Option<usize> {

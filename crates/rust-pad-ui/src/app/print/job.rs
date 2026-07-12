@@ -53,7 +53,7 @@ pub enum PrintResponse {
     /// `ExportToPath` succeeded; the PDF is at `path`.
     Exported { path: PathBuf },
     /// Something went wrong. `temp_path` is set when the PDF was written
-    /// successfully but the viewer could not be launched — the UI layer
+    /// successfully but the viewer could not be launched; the UI layer
     /// can then offer "Reveal in file manager" as a fallback.
     Failed {
         message: String,

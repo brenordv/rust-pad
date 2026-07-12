@@ -11,7 +11,7 @@ use egui::Galley;
 /// Hash of the active syntect colour theme (e.g. `"base16-eighties.dark"`).
 ///
 /// Newtype rather than a bare `u64` so [`RenderCache::validate`] cannot
-/// silently take a syntax-language hash in this slot (or vice versa) —
+/// silently take a syntax-language hash in this slot (or vice versa):
 /// both invalidation keys are `u64` and an argument swap would only
 /// surface as a visual glitch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +48,7 @@ pub(crate) struct RenderCache {
     /// Hash of the syntax colour-theme name (invalidate on theme change).
     last_syntax_theme: SyntaxThemeHash,
     /// Hash of the active syntax-language name (invalidate when the file
-    /// extension changes — e.g. Untitled saved as `*.md`).
+    /// extension changes, e.g. Untitled saved as `*.md`).
     last_syntax_name: SyntaxNameHash,
 }
 
@@ -70,7 +70,7 @@ impl RenderCache {
     /// Font size, colour theme, and syntax-language changes all require a
     /// full clear: every galley embeds font metrics, highlight colours, and
     /// the per-token colouring produced by the active language definition.
-    /// Content version changes do **not** clear the cache — per-line content
+    /// Content version changes do **not** clear the cache: per-line content
     /// hashes in [`get`] already handle correctness by returning `None` when
     /// a line's content has changed.
     pub fn validate(
@@ -277,7 +277,7 @@ mod tests {
     }
 
     // Regression: Aurora Dark and Graphite Dark share a syntect theme, so a
-    // theme switch at constant font size only differs in line height — the
+    // theme switch at constant font size only differs in line height; the
     // cache must still invalidate or rows render with stale metrics until
     // the next edit.
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         cache.validate(1, 14.0, 19.6, SyntaxThemeHash(0), SyntaxNameHash(0));
         cache.insert(10, 42, test_galley());
 
-        // Bump version — line 10 content unchanged (same hash)
+        // Bump version; line 10 content unchanged (same hash)
         cache.validate(2, 14.0, 19.6, SyntaxThemeHash(0), SyntaxNameHash(0));
         assert!(
             cache.get(10, 42).is_some(),
@@ -428,7 +428,7 @@ mod tests {
         cache.validate(1, 14.0, 19.6, SyntaxThemeHash(0), SyntaxNameHash(0));
         cache.insert(10, 42, test_galley());
 
-        // Bump version — line 10 content changed (different hash)
+        // Bump version; line 10 content changed (different hash)
         cache.validate(2, 14.0, 19.6, SyntaxThemeHash(0), SyntaxNameHash(0));
         assert!(
             cache.get(10, 99).is_none(),

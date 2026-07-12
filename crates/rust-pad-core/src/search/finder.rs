@@ -116,13 +116,11 @@ impl SearchEngine {
             return Ok(());
         }
 
-        // Build/cache regex
         let cache_key = format!(
             "{}:{}:{}:{}",
             options.query, options.use_regex, options.case_sensitive, options.whole_word
         );
 
-        // Check if we can reuse cached results
         if let Some(version) = content_version {
             if self.last_search_version == Some(version)
                 && self.last_search_key.as_deref() == Some(&cache_key)
@@ -167,7 +165,6 @@ impl SearchEngine {
             self.current_match = Some(0);
         }
 
-        // Store cache key
         self.last_search_version = content_version;
         self.last_search_key = Some(cache_key);
 
@@ -386,22 +383,22 @@ mod tests {
         assert_eq!(engine.match_count(), 3);
         // Matches at char positions: 0, 8, 16
 
-        // Find next from position 0 — match at 0 starts at cursor, should find it
+        // Find next from position 0: match at 0 starts at cursor, should find it
         let idx = engine.find_next(0).unwrap();
         assert_eq!(idx, 0);
         assert_eq!(engine.matches[idx].start, 0);
 
-        // Find next from position 3 (end of first match) — next match at 8
+        // Find next from position 3 (end of first match); next match at 8
         let idx = engine.find_next(3).unwrap();
         assert_eq!(idx, 1);
         assert_eq!(engine.matches[idx].start, 8);
 
-        // Find prev from position 16 — previous match at 8
+        // Find prev from position 16; previous match at 8
         let idx = engine.find_prev(16).unwrap();
         assert_eq!(idx, 1);
         assert_eq!(engine.matches[idx].start, 8);
 
-        // Find prev from position 8 — previous match at 0
+        // Find prev from position 8; previous match at 0
         let idx = engine.find_prev(8).unwrap();
         assert_eq!(idx, 0);
         assert_eq!(engine.matches[idx].start, 0);
@@ -516,7 +513,7 @@ mod tests {
             cursor = mat.start; // FindPrev uses selection start
         }
 
-        // Should visit 2, 1, 0 — or wrap around
+        // Should visit 2, 1, 0 (or wrap around)
         // From start=16, prev < 16 => idx 1 (start=8)
         // From start=8,  prev < 8  => idx 0 (start=0)
         // From start=0,  prev < 0  => wraps to idx 2 (last)

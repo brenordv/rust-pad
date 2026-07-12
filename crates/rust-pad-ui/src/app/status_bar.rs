@@ -50,12 +50,10 @@ fn format_char_count(count: usize) -> String {
 fn system_uses_24h() -> bool {
     #[cfg(target_os = "windows")]
     {
-        // Read the Windows locale time format from the registry or GetLocaleInfoW.
-        // A simpler heuristic: format a known time with chrono's locale and check,
-        // but chrono doesn't read Windows locale. Use winapi GetLocaleInfoEx.
+        // chrono can't read the Windows locale, so query the registry time
+        // format (HKCU\Control Panel\International, iTime) directly.
         use std::sync::LazyLock;
         static IS_24H: LazyLock<bool> = LazyLock::new(|| {
-            // Try reading the registry key for time format
             let output = std::process::Command::new("reg")
                 .args(["query", r"HKCU\Control Panel\International", "/v", "iTime"])
                 .output();

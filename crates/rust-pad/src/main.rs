@@ -26,7 +26,7 @@ struct Cli {
 ///
 /// macOS `.app` bundles (and some shells) inherit a low `RLIMIT_NOFILE` soft
 /// limit (historically 256). With a filesystem watcher, font/GPU handles, and
-/// concurrent file I/O, that ceiling is easy to hit, surfacing as
+/// concurrent file I/O, that ceiling is easy to hit; the failure surfaces as
 /// `EMFILE` ("Too many open files") on the next open/read/write. Raising the
 /// soft limit to the already-permitted hard limit costs nothing and removes a
 /// whole class of spurious I/O failures. No-op on non-Unix.
@@ -45,8 +45,8 @@ fn raise_fd_limit() {
             return;
         }
         // macOS reports an "unlimited" (`RLIM_INFINITY`) hard limit for NOFILE
-        // but actually refuses to set the soft limit above `OPEN_MAX` (10240) —
-        // a naive `rlim_cur = rlim_max` would fail there, the very platform this
+        // but actually refuses to set the soft limit above `OPEN_MAX` (10240).
+        // A naive `rlim_cur = rlim_max` would fail there, the very platform this
         // guards. Clamp to a finite target when the hard limit is unbounded;
         // finite hard limits (Linux) pass through unchanged.
         const FD_LIMIT_TARGET: libc::rlim_t = 10_240;
@@ -78,7 +78,6 @@ fn raise_fd_limit() {}
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

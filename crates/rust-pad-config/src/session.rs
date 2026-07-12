@@ -47,7 +47,7 @@ pub fn generate_session_id() -> String {
 ///
 /// Serialization format note: this enum is persisted via **bincode**, which
 /// is a positional binary format with no per-field schema. Adding fields to
-/// existing variants is therefore a breaking change — old session files will
+/// existing variants is therefore a breaking change: old session files will
 /// fail to deserialize and the existing corruption handler in
 /// [`SessionStore::load_session`] will discard them, starting fresh. This
 /// trade-off is intentional; documented in `CHANGELOG.md` for v2.0.0.
@@ -101,7 +101,7 @@ pub struct SessionSplit {
 /// The full session state: ordered list of tabs + which one was active +
 /// optional split view layout.
 ///
-/// **Versioning note:** see [`SessionTabEntry`] — adding fields is a
+/// **Versioning note:** see [`SessionTabEntry`]; adding fields is a
 /// breaking change for the bincode format. Old session files that
 /// predate this struct's `split` field will fail to deserialize and be
 /// discarded by [`SessionStore::load_session`]'s corruption handler;
@@ -141,7 +141,7 @@ impl SessionStore {
     pub fn open(path: &Path) -> Result<Self> {
         let db = open_or_create_db(path, "session")?;
 
-        // Ensure tables exist
+        // Create the tables if they don't exist yet.
         let write_txn = db
             .begin_write()
             .context("Failed to begin initial session write transaction")?;
@@ -165,7 +165,7 @@ impl SessionStore {
     /// metadata + clean-shutdown flag are written, all committed together.
     ///
     /// Because redb is ACID per transaction, a crash mid-commit leaves the
-    /// previous consistent snapshot intact — `session_meta` and
+    /// previous consistent snapshot intact: `session_meta` and
     /// `session_content` can never disagree on disk. This replaces the older
     /// `save_session` + per-tab `save_content` + `clear_all_content` trio.
     ///
@@ -263,7 +263,7 @@ impl SessionStore {
     /// Enforces [`MAX_SESSION_CONTENT_BYTES`] on the stored value *before*
     /// materializing it, so a corrupt or tampered row cannot force an
     /// unbounded allocation on startup. An oversized row is skipped (treated
-    /// as absent) with a count-only `tracing::warn!` — never echoing content.
+    /// as absent) with a count-only `tracing::warn!` that never echoes content.
     pub fn load_content(&self, session_id: &str) -> Result<Option<String>> {
         read_table!(self.db, SESSION_CONTENT, |table| {
             match table
@@ -372,7 +372,7 @@ mod tests {
         }
     }
 
-    /// Builds a `SessionData` of `n` unsaved tabs named `sess-0..sess-n`.
+    /// Builds a `SessionData` with one unsaved tab per id in `ids`.
     fn unsaved_session(ids: &[&str]) -> SessionData {
         SessionData {
             tabs: ids
@@ -468,7 +468,7 @@ mod tests {
         );
     }
 
-    /// Every `Unsaved` meta entry must have matching content after a snapshot —
+    /// Every `Unsaved` meta entry must have matching content after a snapshot:
     /// the invariant whose violation caused the reported bug.
     #[test]
     fn test_snapshot_meta_and_content_consistent() {

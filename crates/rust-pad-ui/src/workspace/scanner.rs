@@ -56,7 +56,6 @@ pub fn scan_directory(path: &Path, show_hidden: bool) -> Result<Vec<TreeEntry>> 
 
         let name = entry.file_name().to_string_lossy().into_owned();
 
-        // Skip hidden files/folders unless show_hidden is enabled
         if !show_hidden && is_hidden(&name, &entry.path()) {
             continue;
         }
@@ -100,7 +99,6 @@ pub fn scan_directory(path: &Path, show_hidden: bool) -> Result<Vec<TreeEntry>> 
 /// (case-insensitive).
 fn sort_entries(entries: &mut [TreeEntry]) {
     entries.sort_by(|a, b| {
-        // Directories before files
         let kind_ord = match (a.kind, b.kind) {
             (EntryKind::Directory, EntryKind::File) => std::cmp::Ordering::Less,
             (EntryKind::File, EntryKind::Directory) => std::cmp::Ordering::Greater,
@@ -161,7 +159,7 @@ pub fn reconcile_directory(
 /// *visible* subtree.
 ///
 /// This is what lets a reload pick up folders created deep inside an
-/// already-expanded tree — the case the one-level [`reconcile_directory`]
+/// already-expanded tree: the case the one-level [`reconcile_directory`]
 /// alone would miss. Symlinks are classified as files by [`scan_directory`],
 /// so recursion never follows them (no cycles, no tree escape). A read
 /// failure on one nested directory is logged and skipped so it cannot abort
@@ -255,13 +253,13 @@ fn reconcile_if_loaded_dir(roots: &mut [FolderRoot], path: &Path, show_hidden: b
 
 /// Inserts a new tree entry for `path` if it doesn't already exist.
 ///
-/// Used for both Created and Modified events — Modified events on existing
+/// Used for both Created and Modified events. Modified events on existing
 /// entries are no-ops, while new paths are inserted and sorted.
 fn insert_entry_if_new(roots: &mut [FolderRoot], path: &Path, show_hidden: bool) {
     let Some(parent_entries) = find_parent_entries(roots, path) else {
         // No parent node in the tree. On macOS this is the tell-tale of a
         // canonicalised (symlink-resolved) event path that no longer matches
-        // the stored root path — see the FSEvents notes on `apply_fs_event`.
+        // the stored root path; see the FSEvents notes on `apply_fs_event`.
         tracing::debug!(path = %path.display(), "fs event dropped: parent not in tree");
         return;
     };
@@ -275,7 +273,6 @@ fn insert_entry_if_new(roots: &mut [FolderRoot], path: &Path, show_hidden: bool)
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    // Skip hidden files unless show_hidden is enabled
     if !show_hidden && is_hidden(&name, path) {
         return;
     }
@@ -714,7 +711,7 @@ mod tests {
             expanded: true,
         }];
 
-        // Event for a file under /other (not in the tree) — should be a no-op
+        // Event for a file under /other (not in the tree); should be a no-op
         apply_fs_event(
             &mut roots,
             &FsEvent::Created(PathBuf::from("/other/file.rs")),

@@ -153,7 +153,6 @@ impl UndoManager {
         let now = Instant::now();
         let timeout = Duration::from_millis(self.config.group_timeout_ms);
 
-        // Try to group with the last group if within timeout
         if let Some(last_group) = self.hot_undo.last_mut() {
             if let Some(last_time) = self.last_edit_time {
                 if now.duration_since(last_time) < timeout {
@@ -166,7 +165,6 @@ impl UndoManager {
             }
         }
 
-        // Create a new group
         let group = EditGroup {
             operations: vec![op],
             seq: self.next_seq,
@@ -200,7 +198,6 @@ impl UndoManager {
     /// Returns the operations that should be applied in reverse order
     /// to undo the edit. Returns `None` if there's nothing to undo.
     pub fn undo(&mut self) -> Option<Vec<EditOperation>> {
-        // If hot cache is empty, try loading from cold storage
         if self.hot_undo.is_empty() {
             if let Err(e) = self.load_from_cold() {
                 tracing::warn!("Failed to load history from disk: {e}");
@@ -610,7 +607,7 @@ mod tests {
 
         let total_groups = mgr.hot_undo.len() + mgr.cold_count;
 
-        // Undo all — should load from cold when hot is empty
+        // Undo all; should load from cold when hot is empty
         let mut undo_count = 0;
         while mgr.can_undo() {
             mgr.undo();
@@ -699,7 +696,7 @@ mod tests {
         };
         let mut mgr = UndoManager::new("evict-doc".to_string(), config, Some(Arc::clone(&pl)));
 
-        // Record 15 groups — should trigger spill and eviction
+        // Record 15 groups; should trigger spill and eviction
         for i in 0..15 {
             mgr.force_group_break();
             mgr.record(make_op(i, &format!("g{i}"), ""));

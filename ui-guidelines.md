@@ -1,4 +1,4 @@
-# rust-pad — UI Guidelines
+# rust-pad UI Guidelines
 
 > Updated for the current redesign. Supersedes the earlier "Material-on-desktop"
 > draft: rust-pad no longer targets Material's purple palette or mobile
@@ -45,7 +45,7 @@ without touching code.
   gray ramp (Graphite). No pure `#000`/`#FFF` chrome; editor surfaces may reach
   `#FBFCFE` (light) / `#151A20`–`#0E0F13` (dark).
 - **Typography:**
-    - **UI:** IBM Plex Sans (400/500/600). Fallbacks by platform — Segoe UI
+    - **UI:** IBM Plex Sans (400/500/600). Fallbacks by platform: Segoe UI
       (Windows), SF Pro (macOS), Inter/Roboto (Linux).
     - **Editor + code + timestamps:** JetBrains Mono (400/500).
     - Sizes: UI body **13 px**, section labels 11 px (uppercase, +0.13em tracking),
@@ -96,7 +96,7 @@ Left-to-right, the main window is:
   vertical `ImageButton`s; paint the active pill/bar via `ui.painter().rect_filled`.
 
 ### 3.2 Workspace explorer (the file tree)
-This is a first-class feature — the panel between the activity bar and the editor.
+This is a first-class feature: the panel between the activity bar and the editor.
 - Width **248 px** (Aurora) / **232 px** (Graphite); **resizable** by dragging the
   right edge; toggled by the activity bar's Files icon. Persist width + collapsed
   state per workspace.
@@ -107,7 +107,7 @@ This is a first-class feature — the panel between the activity bar and the edi
   glyph. Open folders may tint their glyph with the dimmed accent.
 - **Selection = the open document.** The active file uses the *same* treatment as
   its active tab: accent text, accent-tint row background, and a 2-px accent
-  left bar — so tree and tabs always agree.
+  left bar, so tree and tabs always agree.
 - egui: a scrollable `ui.vertical` inside the side panel; each row is one
   `Response` (`sense(hover|click)`), painting its own hover/selected background;
   a `collapsing`-style chevron per folder. Double-click a file to open, single
@@ -141,7 +141,7 @@ This is a first-class feature — the panel between the activity bar and the edi
 
 ### 3.6 Status bar
 - 27 px, segmented with 1-px dividers: `Ln, Col`, encoding, EOL, indentation,
-  line count, char count, size — then right-aligned `Zoom` and `Auto-Save`
+  line count, char count, size, then right-aligned `Zoom` and `Auto-Save`
   (with a "saved" green dot).
 - **Cursor segment emphasis:** Graphite paints the `Ln, Col` segment with a
   filled accent rect (dark text); Aurora simply colors that text with the accent.
@@ -280,7 +280,7 @@ Light themes use the darkened accent, `window_fill` `#FBFCFE`/`#FFFFFF`,
 
 > Semantic colors (shared): warning/modified `#E0A93C` (dark) / `#C4881F`
 > (light), error `#E0443E`, success/saved as above. The 8-digit hex suffixes
-> (`5A`, `33`, `59`, `B4`) are alpha — keep them when hand-editing.
+> (`5A`, `33`, `59`, `B4`) are alpha. Keep them when hand-editing.
 
 ---
 
@@ -310,7 +310,7 @@ Light themes use the darkened accent, `window_fill` `#FBFCFE`/`#FFFFFF`,
 | Old Material notion      | rust-pad desktop equivalent                                  |
 |--------------------------|--------------------------------------------------------------|
 | Top app bar              | Title bar + menu bar (+ optional toolbar)                    |
-| Bottom nav / FAB         | **Removed** — use the activity bar + menu/toolbar actions    |
+| Bottom nav / FAB         | **Removed**: use the activity bar + menu/toolbar actions     |
 | Navigation drawer        | **Workspace explorer** side panel                            |
 | Tabs                     | Document tab strip with accent top-bar + modified dot        |
 | Snackbar / toast         | Status-bar messages; Problems dialog for anything actionable |
@@ -348,16 +348,16 @@ rust-pad is keyboard- and **numpad**-first; preserve those bindings:
   sets above are tuned for this; light-mode accent is darkened specifically so
   accent-on-light passes. Verify any custom theme before shipping.
 - **Focus visibility:** the accent focus ring is mandatory on every interactive
-  control; do not rely on color alone — pair the ring with the selected bar/fill.
+  control; do not rely on color alone. Pair the ring with the selected bar/fill.
 - **Screen readers:** label every icon button and tree row (name + kind, e.g.
   "notes, folder, expanded"; "Untitled 3, file, modified"). Announce dialog
   titles and Problems entries.
 - **Scaling:** support egui `zoom_factor` (Ctrl+`+`/`-`) and OS scale at 125% /
-  150%; the whole layout must reflow — the tree and editor keep min widths and
+  150%; the whole layout must reflow: the tree and editor keep min widths and
   the window minimum is **800×600**.
 - **Hit targets:** ≥ 20×20 px clickable, ≥ 8-px spacing between interactive
   elements (tree rows and status segments already satisfy this).
-- **Reduced motion:** honor the OS setting — drop caret blink to a steady caret
+- **Reduced motion:** honor the OS setting. Drop caret blink to a steady caret
   and disable panel fades.
 
 ---
@@ -412,11 +412,11 @@ switch; high-DPI reflow at 125/150%.
 ## 11. Trade-offs & Notes
 
 - **Native menus vs custom chrome:** rust-pad draws its own menu bar/tabs/tree in
-  egui (immediate-mode has no native menu bar). Keep the *behavior* native —
-  mnemonics, ordering, "Preferences" placement — even though pixels are custom.
+  egui (immediate-mode has no native menu bar). Keep the *behavior* native
+  (mnemonics, ordering, "Preferences" placement) even though pixels are custom.
 - **Direction choice:** pick **one** direction to ship as the default; the other
   can live as an alternate theme pair. Aurora reads friendlier for general use;
   Graphite reads more "pro tool" and denser for power users.
 - **Scope:** the activity bar, workspace tree, and breadcrumb are the only
-  structural additions — everything else is restyling, so migration is mostly a
+  structural additions: everything else is restyling, so migration is mostly a
   `Visuals`/tokens swap plus three new panels.

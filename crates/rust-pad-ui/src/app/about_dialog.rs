@@ -44,7 +44,6 @@ impl App {
             },
             |ui| {
                 ui.vertical_centered(|ui| {
-                    // Logo
                     if let Some(texture) = &self.about_logo {
                         let size = egui::Vec2::new(96.0, 96.0);
                         ui.image(egui::load::SizedTexture::new(texture.id(), size));

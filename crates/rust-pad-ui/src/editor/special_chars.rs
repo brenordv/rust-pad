@@ -587,9 +587,9 @@ mod tests {
 
     #[test]
     fn test_eol_badges_width_wider_than_char_width() {
-        // The eol badge should be wider than a single char_width,
-        // confirming that the old selection extension (1*char_width)
-        // was insufficient to cover the badge.
+        // The eol badge should be wider than a single char_width; the
+        // old selection extension (1*char_width) was too narrow to
+        // cover the badge.
         for ending in [LineEnding::Lf, LineEnding::Cr, LineEnding::CrLf] {
             let w = EditorWidget::eol_badges_width(ending, BADGE_CHAR_W);
             assert!(

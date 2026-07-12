@@ -245,7 +245,7 @@ fn test_search_case_sensitive_updates_count() {
     setup_search(&mut harness, "Hello HELLO hello", "hello");
     harness.run();
 
-    // Default is case-insensitive — should find all 3
+    // Default is case-insensitive: should find all 3
     assert_eq!(harness.state().find_replace.engine.match_count(), 3);
 
     // Toggle case-sensitive on
@@ -275,7 +275,7 @@ fn test_search_whole_word_updates_count() {
         "Should find at least 3 'cat' occurrences, got {initial_count}"
     );
 
-    // Toggle whole-word on — should only match standalone "cat"
+    // Toggle whole-word on: should only match standalone "cat"
     harness.state_mut().find_replace.options.whole_word = true;
     harness.run();
     harness.run();

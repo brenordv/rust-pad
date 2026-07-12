@@ -61,7 +61,7 @@ fn generate_workspace_name(existing: &[WorkspaceEntry]) -> String {
         }
     }
 
-    // Unreachable in practice — u32::MAX candidates
+    // Unreachable in practice: u32::MAX candidates
     base.to_string()
 }
 
@@ -99,7 +99,7 @@ fn try_watch_folder(watcher: &mut Option<WorkspaceWatcher>, folder_path: &Path) 
 }
 
 /// Rewrites workspace-root paths after `old` was renamed to `new`, so roots
-/// that *are* the renamed folder — or live under it — track the new location.
+/// that *are* the renamed folder (or live under it) track the new location.
 /// Returns the count of roots changed. Pure: touches only the passed slice.
 ///
 /// `Path::strip_prefix` is component-wise, so a sibling like `…/ab` is not
@@ -172,9 +172,9 @@ pub(crate) fn is_valid_simple_name(name: &str) -> bool {
 /// Renders the relative representation of `path` against `root`.
 ///
 /// * When `path == root` (the user clicked Copy Path > Relative on the
-///   workspace root itself) the result is the root's file name — falling
-///   back to its full display when it has no terminal component.
-/// * When `strip_prefix` fails (path is not under root — should not happen
+///   workspace root itself) the result is the root's file name, or its
+///   full display when it has no terminal component.
+/// * When `strip_prefix` fails (path is not under root; should not happen
 ///   given the tree only renders descendants, but defensive nonetheless)
 ///   the absolute display string is returned and a warning is logged.
 fn render_relative_path(path: &std::path::Path, root: &std::path::Path) -> String {
@@ -204,7 +204,7 @@ fn render_relative_path(path: &std::path::Path, root: &std::path::Path) -> Strin
 /// **longest** matching prefix when roots are nested (e.g. both `/proj` and
 /// `/proj/sub` are open and `file` is under `/proj/sub`).
 ///
-/// Returns `None` when `file` is not under any root — the caller then disables
+/// Returns `None` when `file` is not under any root; the caller then disables
 /// the `Copy Path > Relative Path` item, since "relative to what?" is undefined
 /// for a tab opened outside every workspace folder.
 pub(crate) fn copy_path_root_for<'a>(roots: &'a [FolderRoot], file: &Path) -> Option<&'a Path> {
@@ -220,9 +220,9 @@ pub(crate) fn copy_path_root_for<'a>(roots: &'a [FolderRoot], file: &Path) -> Op
 /// Distinguishes the three terminal states the caller needs to log:
 /// hard-cap refusal, dialog-now-pending, and read-dispatched. The
 /// problem-log entry (when applicable) is emitted inside the helper,
-/// not the caller — keeping the variants pure markers for tracing.
+/// not the caller, which keeps the variants pure markers for tracing.
 pub(crate) enum CopyContentsDecision {
-    /// `[CC04]` hard-cap refusal — problem-log already emitted.
+    /// `[CC04]` hard-cap refusal; problem-log already emitted.
     Refused,
     /// Size exceeds soft warning; the dialog is now pending.
     NeedsPrompt,
@@ -245,8 +245,8 @@ const WATCHER_OVERFLOW_LOG_INTERVAL: std::time::Duration = std::time::Duration::
 /// Detects whether `folder_path` contains a symlink loop within the first
 /// `SYMLINK_LOOP_DEPTH` directories reached by a depth-first walk.
 ///
-/// Returns true if the same canonical path is observed twice during the walk
-/// — the classic signature of a symlink cycle. Best-effort: a return value
+/// Returns true if the same canonical path is observed twice during the walk,
+/// the classic signature of a symlink cycle. Best-effort: a return value
 /// of `false` does not guarantee the absence of a loop deeper in the tree,
 /// but catches the foot-gun configurations users are likely to create.
 fn has_symlink_loop(folder_path: &Path) -> bool {
@@ -500,7 +500,7 @@ impl App {
 
     /// Checks if a folder path exactly matches an existing workspace root.
     ///
-    /// Overlapping roots (nested or parent of an existing root) are allowed —
+    /// Overlapping roots (nested or parent of an existing root) are allowed:
     /// the watcher deduplicates events and the tree displays each root
     /// independently. Only exact path equality is rejected.
     fn is_duplicate_folder(&self, folder_path: &Path) -> bool {
@@ -660,7 +660,7 @@ impl App {
         self.notify_tree(&FsEvent::Created(new_path.clone()));
 
         // A renamed folder may itself be a workspace root, or contain roots, so
-        // reconcile those root paths (live tree + persisted) — otherwise the
+        // reconcile those root paths (live tree + persisted); otherwise the
         // root keeps its stale path and shows as "unavailable".
         self.propagate_root_rename(old_path, &new_path);
 
@@ -677,7 +677,7 @@ impl App {
     /// Reconciles workspace-root paths after `old_path` was renamed to
     /// `new_path`: rewrites affected roots in the live tree and in the persisted
     /// workspace, re-points the watcher, and re-scans so every duplicate row
-    /// reflects the new name. No-op when no root is affected (the common case —
+    /// reflects the new name. No-op when no root is affected (the common case:
     /// a plain nested-entry rename is handled by `notify_tree` alone).
     fn propagate_root_rename(&mut self, old_path: &Path, new_path: &Path) {
         let old_roots: Vec<PathBuf> = self
@@ -820,7 +820,7 @@ impl App {
         path: &std::path::Path,
         workspace_root: &std::path::Path,
     ) {
-        // SAFETY/TOCTOU: `canonical_path` is captured before the confirmation dialog
+        // INVARIANT/TOCTOU: `canonical_path` is captured before the confirmation dialog
         // and consumed by the worker after the user clicks Copy. An attacker with
         // write access to the parent directory can replace the entry (symlink,
         // hardlink, or unlink+create) in that window; `std::fs::read` in the worker
@@ -834,7 +834,7 @@ impl App {
         let Some(canonical) = self.security_gate_for_copy_contents(path, workspace_root) else {
             return;
         };
-        // SAFETY: enforce_size_caps_and_dispatch consumes the canonical_path
+        // INVARIANT: enforce_size_caps_and_dispatch consumes the canonical_path
         // returned by security_gate_for_copy_contents; never re-canonicalize.
         match self.enforce_size_caps_and_dispatch(canonical) {
             CopyContentsDecision::Refused => {
@@ -849,7 +849,7 @@ impl App {
         }
     }
 
-    /// Runs the `[CC01]` / `[CC02]` / `[CC03]` security gates — canonicalize
+    /// Runs the `[CC01]` / `[CC02]` / `[CC03]` security gates: canonicalize
     /// the path and the workspace root, verify containment, and require a
     /// regular file.
     ///
@@ -1092,8 +1092,8 @@ impl App {
     /// Reloads a workspace root (or a directory within one) and its expanded
     /// subtree from disk, reconciling the tree with changes the filesystem
     /// watcher may have missed. This is the "Reload from disk" context-menu
-    /// action and the deterministic, cross-platform recovery for stale trees —
-    /// notably on macOS, where the `notify` FSEvents backend coalesces
+    /// action and the deterministic, cross-platform recovery for stale trees.
+    /// On macOS in particular, the `notify` FSEvents backend coalesces
     /// directory events and can leave nested folders unlisted.
     ///
     /// Only paths that are a known root or resolve to a directory node already
@@ -1354,7 +1354,7 @@ mod tests {
     fn test_try_watch_folder_with_none_watcher() {
         let dir = tempfile::tempdir().unwrap();
         let mut watcher: Option<WorkspaceWatcher> = None;
-        // Should not panic — no-op when watcher is None
+        // Should not panic: no-op when watcher is None
         try_watch_folder(&mut watcher, dir.path());
         assert!(watcher.is_none());
     }
@@ -1490,7 +1490,6 @@ mod tests {
         assert!(app.cached_workspace_list.is_some());
 
         app.rename_workspace(&ws_id, "New Name");
-        // Cache should be invalidated
         assert!(app.cached_workspace_list.is_none());
     }
 
@@ -1590,7 +1589,7 @@ mod tests {
         app.add_folder_path_to_workspace(parent.path());
         assert_eq!(app.workspace_sidebar.tree.len(), 1);
 
-        // Overlapping (nested) folders are allowed — only exact match is rejected.
+        // Overlapping (nested) folders are allowed; only exact match is rejected.
         app.add_folder_path_to_workspace(&child);
         assert_eq!(app.workspace_sidebar.tree.len(), 2);
     }
@@ -1876,8 +1875,8 @@ mod tests {
         assert_eq!(app.workspace_sidebar.tree.len(), 1);
         assert!(app.workspace_sidebar.tree[0].entries.is_empty());
 
-        // A folder appears on disk after the workspace was loaded — the case
-        // a coalesced macOS FSEvents notification can leave unlisted.
+        // A folder appears on disk after the workspace was loaded, the case a
+        // coalesced macOS FSEvents notification can leave unlisted.
         std::fs::create_dir(folder.path().join("appeared")).unwrap();
         app.handle_sidebar_action(SidebarAction::ReloadFromDisk(folder.path().to_path_buf()));
 
@@ -1922,7 +1921,7 @@ mod tests {
         app.create_workspace("Watcher Test");
         app.add_folder_path_to_workspace(folder.path());
 
-        // Poll immediately — no events expected
+        // Poll immediately: no events expected
         app.tick_workspace_watcher();
         // Should not crash or change tree (beyond initial scan)
     }
@@ -1935,7 +1934,6 @@ mod tests {
 
         let list = app.get_cached_workspace_list().clone();
         assert_eq!(list.len(), 2);
-        // Should be cached now
         assert!(app.cached_workspace_list.is_some());
 
         // Second call returns same cached data
@@ -1977,7 +1975,7 @@ mod tests {
     #[test]
     fn test_app_restore_workspace_on_startup_no_active() {
         let (mut app, _dir) = app_with_workspace();
-        // No active workspace set — should be a no-op
+        // No active workspace set: should be a no-op
         app.restore_workspace_on_startup();
         assert!(!app.workspace_sidebar.visible);
         assert!(app.workspace_sidebar.workspace_id.is_none());
@@ -2063,7 +2061,7 @@ mod tests {
     #[test]
     fn test_app_create_workspace_no_store() {
         let mut app = super::super::tests::test_app();
-        // workspace_store is None — should return early
+        // workspace_store is None: should return early
         app.create_workspace("No Store");
         assert!(!app.workspace_sidebar.visible);
         assert!(app.workspace_sidebar.workspace_id.is_none());
@@ -2212,7 +2210,7 @@ mod tests {
 
     #[test]
     fn test_expand_all_does_not_pre_mutate_descendant_flags() {
-        // ExpandAll/CollapseAll only affect workspace roots — descendants
+        // ExpandAll/CollapseAll only affect workspace roots; descendants
         // must not be touched at action-dispatch time. Cascading expansion
         // through render_directory_entry would lazy-load the entire tree
         // and freeze the UI on large workspaces.
@@ -2396,7 +2394,7 @@ mod tests {
         let file = folder.path().join("huge.txt");
         std::fs::write(&file, "x".repeat(200)).unwrap();
 
-        // The copy-contents cap — NOT the editor open limit — governs refusal.
+        // The copy-contents cap (NOT the editor open limit) governs refusal.
         app.copy_contents_max_bytes = Some(100);
         app.copy_contents_warning_bytes = 50;
         app.handle_copy_file_contents(&file, folder.path());
@@ -2410,14 +2408,14 @@ mod tests {
         // Regression for Section 6: a file larger than the editor open limit
         // must still be copyable (with a confirm prompt) when it is under the
         // separate copy-contents cap. Previously the editor limit was reused
-        // as the copy cap, refusing the copy outright.
+        // as the copy cap and refused the copy outright.
         let (mut app, _dir) = app_with_workspace();
         let folder = tempfile::tempdir().unwrap();
         let file = folder.path().join("bigger_than_editor.txt");
         std::fs::write(&file, "x".repeat(500)).unwrap();
 
-        app.max_file_size_bytes = Some(100); // editor open limit — must not apply
-        app.copy_contents_max_bytes = Some(10_000); // copy cap — file is under it
+        app.max_file_size_bytes = Some(100); // editor open limit: must not apply
+        app.copy_contents_max_bytes = Some(10_000); // copy cap: file is under it
         app.copy_contents_warning_bytes = 50; // above warn → prompt
 
         app.handle_copy_file_contents(&file, folder.path());
@@ -2548,7 +2546,7 @@ mod tests {
         let sub = folder.path().join("subdir");
         std::fs::create_dir(&sub).unwrap();
 
-        // [CC03] — refused because it is not a regular file.
+        // [CC03]: refused because it is not a regular file.
         let result = assert_emits_problem_code("[CC03]", || {
             app.security_gate_for_copy_contents(&sub, folder.path())
         });
@@ -2563,7 +2561,7 @@ mod tests {
         let file = outside.path().join("not_in_workspace.txt");
         std::fs::write(&file, "content").unwrap();
 
-        // [CC02] — outside workspace containment.
+        // [CC02]: outside workspace containment.
         let result = assert_emits_problem_code("[CC02]", || {
             app.security_gate_for_copy_contents(&file, workspace.path())
         });
@@ -2581,7 +2579,7 @@ mod tests {
         let canonical = result.expect("gate must succeed for valid in-workspace file");
         assert!(canonical.is_absolute());
         assert!(canonical.is_file());
-        // The returned path is canonicalised — must equal what fs::canonicalize sees.
+        // The returned path is canonicalised; must equal what fs::canonicalize sees.
         assert_eq!(canonical, std::fs::canonicalize(&file).unwrap());
     }
 
@@ -2597,7 +2595,7 @@ mod tests {
 
         app.copy_contents_max_bytes = Some(100);
         app.copy_contents_warning_bytes = 50;
-        // [CC04] — hard-cap refusal for an oversize file.
+        // [CC04]: hard-cap refusal for an oversize file.
         let decision =
             assert_emits_problem_code("[CC04]", || app.enforce_size_caps_and_dispatch(canonical));
         assert!(matches!(decision, CopyContentsDecision::Refused));

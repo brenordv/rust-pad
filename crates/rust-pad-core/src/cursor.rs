@@ -516,7 +516,7 @@ mod tests {
         let mut cursor = Cursor::new();
         cursor.position = Position::new(0, 3);
         cursor.move_right(&buf);
-        // Single line, at end — should not move
+        // Single line, at end; should not move
         assert_eq!(cursor.position, Position::new(0, 3));
     }
 

@@ -17,8 +17,9 @@ const MIN_WIDTH: f32 = 150.0;
 /// Maximum sidebar width in pixels.
 const MAX_WIDTH: f32 = 500.0;
 /// Default sidebar width in pixels. Kept at the pre-redesign value so a
-/// config carrying it reads as "never resized" — [`WorkspaceSidebar::effective_width`]
-/// then substitutes the theme's metric default.
+/// config carrying it reads as "never resized".
+/// [`WorkspaceSidebar::effective_width`] then substitutes the theme's
+/// metric default.
 const DEFAULT_WIDTH: f32 = 250.0;
 
 /// Width of the chevron column at the start of a tree row.
@@ -82,7 +83,7 @@ pub enum SidebarAction {
     CollapseAll,
     /// Copy a file's contents to the system clipboard, gated by the
     /// configured size-warning threshold. `workspace_root` is the
-    /// `FolderRoot.path` that owns the entry — required by the
+    /// `FolderRoot.path` that owns the entry, required by the
     /// canonical-containment security gate.
     CopyFileContents {
         path: PathBuf,
@@ -131,7 +132,7 @@ pub(crate) struct RenameEntryState {
     pub original_path: PathBuf,
     /// Index of the workspace root whose row initiated the rename. Pairs with
     /// `original_path` so a physical folder that surfaces under two roots only
-    /// shows the inline field on the row the user actually selected — mirrors
+    /// shows the inline field on the row the user actually selected. Mirrors
     /// the [`SelectedNode`] identity model.
     pub root_index: usize,
     /// Current name in the text field.
@@ -202,7 +203,7 @@ pub struct WorkspaceSidebar {
     /// user clicks a tree row; cleared by `App` when the editor (or another
     /// panel) is clicked. The keyboard-nav gate and the single-pane editor's
     /// `auto_focus` both read this so arrow/Enter/F2 keys route to whichever
-    /// panel the user last *clicked* — click-to-focus, independent of egui's
+    /// panel the user last *clicked* (click-to-focus), independent of egui's
     /// implicit widget focus. Pointer hover deliberately does not affect it, so
     /// a mouse merely resting over the tree can never steal keys from the
     /// focused editor.
@@ -285,7 +286,6 @@ impl WorkspaceSidebar {
 
         ui.separator();
 
-        // Tree view (scrollable)
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -310,7 +310,7 @@ impl WorkspaceSidebar {
     /// Renders the sidebar header: the workspace label (11 px uppercase,
     /// muted) on the left and the primary tree actions (New File, New
     /// Folder, Collapse All) plus an overflow menu on the right. The
-    /// label keeps its pre-redesign behaviors — double-click renames the
+    /// label keeps its pre-redesign behaviors: double-click renames the
     /// workspace and right-click opens the workspace menu.
     fn render_header(
         &mut self,
@@ -333,7 +333,7 @@ impl WorkspaceSidebar {
             // always keep their full width; the label gets whatever remains
             // and truncates. Emitting the label first let a long name shrink
             // the buttons' region below their width, and egui does not clip
-            // that overflow — the buttons painted over the label on narrow
+            // that overflow: the buttons painted over the label on narrow
             // sidebars.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.render_header_overflow_menu(ui, action);
@@ -570,7 +570,7 @@ impl WorkspaceSidebar {
             let folder_exists = root_path.is_dir();
 
             // A root selected for rename shows its inline field in place of
-            // its row, so the rename targets the row the user picked — not a
+            // its row, so the rename targets the row the user picked, not a
             // same-path duplicate nested under another root.
             let renaming_this_root = rename_state
                 .as_ref()
@@ -689,8 +689,8 @@ impl WorkspaceSidebar {
     /// Used for keyboard navigation and selection identity.
     ///
     /// Lazy-loaded children that have not yet been scanned simply aren't
-    /// included — keyboard nav cannot reveal an entry the renderer hasn't
-    /// materialised, matching what the user sees.
+    /// included; keyboard nav cannot reveal an entry the renderer hasn't
+    /// materialised, which matches what the user sees.
     pub(crate) fn visible_nodes(&self) -> Vec<SelectedNode> {
         let mut out = Vec::new();
         for (root_index, root) in self.tree.iter().enumerate() {
@@ -709,7 +709,7 @@ impl WorkspaceSidebar {
     }
 
     /// Convenience wrapper over [`visible_nodes`](Self::visible_nodes)
-    /// returning just the paths, in the same order. Test-only — production
+    /// returning just the paths, in the same order. Test-only; production
     /// navigation works in terms of [`SelectedNode`].
     #[cfg(test)]
     pub(crate) fn visible_paths(&self) -> Vec<std::path::PathBuf> {
@@ -777,14 +777,14 @@ impl WorkspaceSidebar {
     /// Activation is **click-to-focus**: nav fires only when a row is selected
     /// AND the sidebar holds keyboard ownership ([`kbd_active`](Self::kbd_active)),
     /// which is latched by a deliberate row click and released when another panel
-    /// is clicked (`App` clears it). Pointer position is irrelevant — a mouse
+    /// is clicked (`App` clears it). Pointer position is irrelevant: a mouse
     /// resting over the tree never routes keys here, so it cannot steal
     /// navigation from the focused editor. This is independent of egui's implicit
     /// widget focus (which the editor monopolises via its per-frame
     /// `auto_focus`). Returns `Some(action)` only when Enter on a file should
     /// open it. Inline rename / new-entry editing suspends nav.
     pub(crate) fn handle_tree_kbd_nav(&mut self, ctx: &egui::Context) -> Option<SidebarAction> {
-        // Skip if any inline edit is active — the TextEdit owns the keys.
+        // Skip if any inline edit is active; the TextEdit owns the keys.
         if self.rename_buffer.is_some() || self.rename_entry.is_some() || self.new_entry.is_some() {
             return None;
         }
@@ -905,7 +905,7 @@ impl WorkspaceSidebar {
             return;
         }
         // Move to the first child if it appears below us in the same root
-        // subtree — i.e. lazy-load already ran and the directory is non-empty.
+        // subtree, i.e. lazy-load already ran and the directory is non-empty.
         if let Some(child) = nodes.get(idx + 1) {
             if child.root_index == node.root_index && child.path.starts_with(&node.path) {
                 self.selected = Some(child.clone());
@@ -923,7 +923,6 @@ impl WorkspaceSidebar {
             return;
         }
         if let Some(parent) = node.path.parent() {
-            // Jump to the parent row within the same root subtree.
             if let Some(parent_node) = nodes
                 .iter()
                 .find(|n| n.root_index == node.root_index && n.path == parent)
@@ -980,7 +979,7 @@ fn find_entry_kind(entries: &[TreeEntry], target: &std::path::Path) -> Option<En
 /// Outcome of one frame of inline name-field editing.
 ///
 /// `Submitted` carries the trimmed name as the user typed it; **this layer
-/// performs no filename validation** — sanitization is the caller's or the
+/// performs no filename validation**. Sanitization is the caller's or the
 /// downstream `SidebarAction` handler's responsibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InlineEntryOutcome {
@@ -995,7 +994,7 @@ enum InlineEntryOutcome {
 /// one-shot stem selection when `*select_on_focus` is true (and clears it),
 /// and reports the next state transition to the caller.
 ///
-/// State transitions are intentionally not traced — this runs per frame; if
+/// State transitions are intentionally not traced; this runs per frame. If
 /// observability is ever needed, instrument the `SidebarAction` handler
 /// instead, never this helper.
 fn render_inline_entry_field(
@@ -1146,7 +1145,7 @@ struct TreeRowEvents {
 /// Paints one 26 px tree row: selection indicator or hover tint, chevron,
 /// entry icon, and name, indented per [`tree_indent`].
 ///
-/// The row is a single widget sensing [`egui::Sense::CLICK`] — the bare,
+/// The row is a single widget sensing [`egui::Sense::CLICK`]: the bare,
 /// **non-focusable** click flag. Tree rows must not take egui keyboard
 /// focus: a focused row makes egui's spatial widget navigation hijack the
 /// arrow keys and lets the row's own activation race the sidebar's nav
@@ -1332,7 +1331,7 @@ fn root_text_color(
 /// Renders a directory tree entry: chevron row, context menu, and
 /// lazy-loaded children.
 ///
-/// `ExpandAll` / `CollapseAll` deliberately do NOT propagate here — they only
+/// `ExpandAll` / `CollapseAll` deliberately do NOT propagate here; they only
 /// flip the workspace-root flags. Cascading expansion through every
 /// recursively rendered directory triggers lazy-loads for the entire reachable
 /// tree on a single frame, which froze the UI on large workspaces.
@@ -1504,7 +1503,7 @@ fn render_inline_new_entry_field(
 
 /// Renders a slice of tree entries recursively, with lazy-loading of children.
 ///
-/// Works at any nesting depth — directories lazy-load their children on first
+/// Works at any nesting depth: directories lazy-load their children on first
 /// expand and cache the result in `TreeEntry.children`.
 fn render_entry_list(
     ui: &mut egui::Ui,
@@ -1558,7 +1557,6 @@ fn render_entry_list(
         }
     }
 
-    // Inline new entry text field (at the end of the list)
     let mut clear_new = false;
     if let Some(ref mut state) = ctx.new_entry {
         if state.parent.as_path() == parent_path
@@ -1574,7 +1572,6 @@ fn render_entry_list(
         }
     }
 
-    // Apply deferred state changes
     if let Some(req) = new_entry_request {
         *ctx.new_entry = Some(req);
         *ctx.rename_entry = None;
@@ -1593,7 +1590,7 @@ fn render_entry_list(
 
 /// Selects the filename stem (chars before the last `.`) in the text edit
 /// state, or the full text if there is no extension. Stem-selection lets
-/// the user replace the name by typing while preserving the extension —
+/// the user replace the name by typing while preserving the extension;
 /// matches IDE convention (VS Code, IntelliJ).
 fn select_stem_in_text_edit(ctx: &egui::Context, widget_id: egui::Id, name: &str) {
     let stem_char_count = match name.rfind('.') {
@@ -1696,7 +1693,6 @@ mod tests {
             SidebarAction::None,
         ];
 
-        // All variants are distinct
         for (i, a) in actions.iter().enumerate() {
             for (j, b) in actions.iter().enumerate() {
                 if i != j {
@@ -2097,7 +2093,7 @@ mod tests {
             entries: vec![make_dir_entry(&a, "C", false, Vec::new())],
             expanded: true,
         });
-        // Root 1: C itself — same physical path as A/C.
+        // Root 1: C itself, same physical path as A/C.
         sidebar.tree.push(crate::workspace::tree::FolderRoot {
             path: c.clone(),
             entries: Vec::new(),
@@ -2110,7 +2106,7 @@ mod tests {
         assert_eq!(c_nodes[0].root_index, 0, "child of root A");
         assert_eq!(c_nodes[1].root_index, 1, "root C");
 
-        // Selecting the root-1 instance matches exactly one row — not the
+        // Selecting the root-1 instance matches exactly one row, not the
         // child under root A. This is what gives single-row highlight.
         let selected = SelectedNode {
             root_index: 1,
@@ -2132,7 +2128,7 @@ mod tests {
             expanded: true,
         });
         let paths = sidebar.visible_paths();
-        // root + sub only — sub.expanded is false so children are skipped.
+        // root + sub only: sub.expanded is false so children are skipped.
         assert_eq!(paths.len(), 2);
         assert!(paths.contains(&tmp.path().to_path_buf()));
         assert!(paths.contains(&tmp.path().join("sub")));
@@ -2603,7 +2599,7 @@ mod tests {
 
     #[test]
     fn handle_tree_kbd_nav_returns_none_when_inline_edit_active() {
-        // No egui::Context — short-circuit via the inline-edit gate so
+        // No egui::Context: short-circuit via the inline-edit gate so
         // we never touch ctx.input(). Exercises only the first guard.
         let mut sidebar = WorkspaceSidebar::new();
         sidebar.new_entry = Some(NewEntryState {
@@ -2623,7 +2619,7 @@ mod tests {
     //
     // The four `kbd_nav_*` helpers carry the per-key behaviour extracted
     // from `handle_tree_kbd_nav` (which keeps that dispatcher's cognitive
-    // complexity in check). They take plain data — no `egui::Context` — so
+    // complexity in check). They take plain data, no `egui::Context`, so
     // each branch is exercised directly here.
 
     /// Builds a sidebar over a real tempdir root so `visible_nodes` keeps
@@ -2880,8 +2876,8 @@ mod tests {
         assert!(!sidebar.kbd_active, "hover never latches ownership");
     }
 
-    /// Opening a file via Enter releases ownership, so the very next arrow —
-    /// regardless of pointer position — is left for the editor.
+    /// Opening a file via Enter releases ownership, so the very next arrow
+    /// (regardless of pointer position) is left for the editor.
     #[test]
     fn open_via_enter_releases_ownership_so_arrows_go_to_editor() {
         let (mut sidebar, _tmp, root) = sidebar_with_tree();
@@ -2907,7 +2903,7 @@ mod tests {
     }
 
     /// Once the user clicks a row again, ownership is re-latched and arrows
-    /// drive the tree — re-engagement is by click, not by hover.
+    /// drive the tree; re-engagement is by click, not by hover.
     #[test]
     fn row_click_reengages_after_editor_took_focus() {
         let (mut sidebar, _tmp, root) = sidebar_with_tree();
@@ -2956,7 +2952,7 @@ mod tests {
 
     /// Builds a kittest harness rendering only the sidebar at `width`.
     ///
-    /// The first pass only registers the semibold font alias — `set_fonts`
+    /// The first pass only registers the semibold font alias: `set_fonts`
     /// takes effect at the NEXT pass begin, and the harness runs a pass
     /// during construction, so registering after build panics on the
     /// unbound named family. Rendering starts from the second pass.

@@ -64,7 +64,7 @@ const FLUSH_INTERVAL_SECS: u64 = 30;
 /// paths) the input is returned unchanged.
 ///
 /// Display-only: never feed the result back into filesystem APIs or security
-/// gates — the canonical `PathBuf` remains the source of truth for those.
+/// gates; the canonical `PathBuf` remains the source of truth for those.
 fn display_path(path: &Path) -> String {
     let s = path.display().to_string();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
@@ -145,7 +145,7 @@ impl ThemeMode {
 
 /// An unsaved tab whose content exceeded `session_content_max_kb` and was
 /// therefore omitted from the persisted snapshot content (its metadata is
-/// still saved, so it restores as an empty tab — the documented cap behaviour).
+/// still saved, so it restores as an empty tab, the documented cap behaviour).
 struct OverLimitTab {
     session_id: String,
     kb: usize,
@@ -321,7 +321,7 @@ pub(crate) enum DialogState {
     ConfirmClose(usize),
     /// The user requested a reload-from-disk on a modified document.
     ConfirmReload,
-    /// A file exceeded the size limit — ask the user whether to open it anyway.
+    /// A file exceeded the size limit; ask the user whether to open it anyway.
     ConfirmLargeFile {
         path: std::path::PathBuf,
         message: String,
@@ -457,7 +457,6 @@ impl App {
             rust_pad_config::paths::migrate_legacy_paths();
         }
 
-        // Load config
         let config_path = if args.portable {
             rust_pad_config::paths::portable_config_file_path()
         } else {
@@ -516,7 +515,6 @@ impl App {
         tabs.documents[0].line_ending = tabs.default_line_ending.resolve();
         tabs.documents[0].zoom_level = app_config.current_zoom_level;
 
-        // Open session store
         let session_path = if args.portable {
             rust_pad_config::paths::portable_session_file_path()
         } else {
@@ -543,7 +541,6 @@ impl App {
                 Self::restore_session(&mut tabs, &session_store, app_config.session_content_max_kb);
         }
 
-        // Open files requested via CLI arguments
         Self::open_startup_files(&mut tabs, &args);
 
         let max_file_size_bytes = app_config.max_file_size_bytes();
@@ -653,7 +650,6 @@ impl App {
             app.apply_session_split(&split);
         }
 
-        // Restore workspace sidebar state from config.
         app.workspace_sidebar.set_width(ws_sidebar_width);
         app.workspace_sidebar.show_hidden = ws_show_hidden;
         if ws_sidebar_visible {
@@ -690,8 +686,9 @@ impl App {
             Vec::with_capacity(session_data.tabs.len());
 
         // Tally recovery outcomes for the post-restore notices below. A
-        // missing content *row* (key absent) means an unsaved buffer was lost
-        // — distinct from a present-but-empty row (a genuinely blank tab).
+        // missing content *row* (key absent) means an unsaved buffer was
+        // lost, as distinct from a present-but-empty row (a genuinely blank
+        // tab).
         let mut recovered_nonempty = 0usize;
         let mut missing_content = 0usize;
 
@@ -752,10 +749,10 @@ impl App {
                 .active_tab_index
                 .min(tabs.documents.len().saturating_sub(1));
 
-            // Apply pin/color metadata to the restored tabs. We set raw flags
-            // (rather than calling pin_tab) and then perform a stable sort to
-            // bring pinned tabs to the left, since the persisted ordering
-            // already reflects the user's intended layout.
+            // Apply pin/color metadata to the restored tabs. Raw flag writes,
+            // not pin_tab: pin_tab would reorder the tabs, and the persisted
+            // ordering already reflects the user's intended layout (pinned
+            // tabs were saved in position).
             let count = restored_metadata.len().min(tabs.documents.len());
             for (i, (pinned, color)) in restored_metadata.into_iter().take(count).enumerate() {
                 tabs.documents[i].pinned = pinned;
@@ -782,14 +779,14 @@ impl App {
             tracing::warn!("post-restore session snapshot failed: {e:#}");
         }
 
-        // Surface recovery outcomes (counts only — never tab titles/content).
+        // Surface recovery outcomes (counts only, never tab titles/content).
         if !was_clean && recovered_nonempty > 0 {
             crate::problem_log::info_problem(&format!(
                 "Recovered {recovered_nonempty} unsaved document(s) after an unexpected shutdown."
             ));
         }
         // Only after an *unclean* shutdown is a missing content row a genuine
-        // loss. On a clean restart an absent row is expected — it belongs to an
+        // loss. On a clean restart an absent row is expected: it belongs to an
         // over-cap tab that was intentionally not persisted (and already warned
         // about at autosave time), so reporting it here would be a false alarm.
         if !was_clean && missing_content > 0 {
@@ -813,7 +810,7 @@ impl App {
     /// the clean-exit, post-restore, and periodic-autosave paths so the
     /// snapshot-building (and the `session_content_max_kb` cap) live in exactly
     /// one place. Unsaved tabs lacking a `session_id` are assigned one here so
-    /// their identity — and thus the content key and the dirty fingerprint —
+    /// their identity (and thus the content key and the dirty fingerprint)
     /// stays stable across snapshots (hence `&mut tabs`). Tabs whose content
     /// exceeds the cap are omitted from `content` and reported in the returned
     /// over-limit list (still listed in metadata, so they restore empty).
@@ -838,7 +835,6 @@ impl App {
                 continue;
             }
 
-            // Unsaved tab: ensure a stable session id, then collect content.
             let sid = match &doc.session_id {
                 Some(s) => s.clone(),
                 None => {
@@ -874,7 +870,7 @@ impl App {
 
     /// Fingerprint of everything that goes into a session snapshot, used to
     /// skip redundant autosaves. Hashes the ordered tab identities plus each
-    /// unsaved buffer's `content_version` (a robust change signal that, unlike
+    /// unsaved buffer's `content_version` (a change signal that, unlike
     /// summing versions, is immune to membership and undo/redo aliasing),
     /// along with pin/colour, the active index, and the split layout.
     fn session_snapshot_sig(&self) -> u64 {
@@ -1019,7 +1015,6 @@ impl App {
             doc.insert_text(text);
         }
 
-        // Remove the initial empty tab if CLI args opened any tabs
         if has_cli_content && tabs.tab_count() > 1 {
             let first_is_empty = tabs.documents[0].buffer.is_empty()
                 && tabs.documents[0].file_path.is_none()
@@ -1080,10 +1075,10 @@ impl App {
 
                     if let Some(ctx) = self.io_activity.save_as_context.take() {
                         if ctx.is_copy {
-                            // "Save a Copy" — don't update document state
+                            // "Save a Copy": don't update document state
                             tracing::info!("Saved copy to '{}'", path.display());
                         } else {
-                            // Normal "Save As" — update document state
+                            // Normal "Save As": update document state
                             let tab_idx = self.find_save_as_tab(&ctx);
 
                             if let Some(idx) = tab_idx {
@@ -1137,7 +1132,7 @@ impl App {
                         self.io_activity.pending_reads =
                             self.io_activity.pending_reads.saturating_sub(1);
                         // A clipboard read with a matching path is dropped
-                        // here too — its failure mode is already surfaced
+                        // here too; its failure mode is already surfaced
                         // through the generic I/O-error problem entry.
                         self.pending_clipboard_reads.retain(|p2| p2 != p);
                     }
@@ -1345,7 +1340,7 @@ impl App {
     /// * LF normalisation (matches the paste path),
     /// * clipboard write through the sanitising helper.
     ///
-    /// Never logs the decoded text — only path and length. See the
+    /// Never logs the decoded text, only path and length. See the
     /// module-level "observability" note in `app/clipboard.rs`.
     fn complete_copy_contents(&mut self, path: &std::path::Path, bytes: &[u8]) {
         tracing::debug!(
@@ -1400,7 +1395,7 @@ impl App {
     /// Shows the confirmation dialog for "Copy file contents" on files
     /// larger than the warning threshold. Mirrors the shape of the
     /// `ConfirmLargeFile` dialog but binds to `pending_copy_contents`
-    /// instead of `DialogState` because the two flows are independent —
+    /// instead of `DialogState` because the two flows are independent:
     /// users can have a pending "open file too large" prompt and a
     /// "copy contents too large" prompt at the same time.
     ///
@@ -1585,7 +1580,7 @@ impl App {
     /// Reads a file from disk and opens it as lossy UTF-8 in a new tab.
     ///
     /// The resulting document is untitled (no file path) so the user must
-    /// explicitly "Save As" to write it back — this prevents accidentally
+    /// explicitly "Save As" to write it back; this prevents accidentally
     /// overwriting the original file.
     fn recover_file_as_utf8_lossy(&mut self, path: &std::path::Path) {
         let bytes = match std::fs::read(path) {
@@ -1615,7 +1610,7 @@ impl eframe::App for App {
         let pass_start = Instant::now();
         let ctx = ui.ctx().clone();
 
-        // Prevent egui's built-in Ctrl+scroll zoom — we handle zoom ourselves
+        // Prevent egui's built-in Ctrl+scroll zoom; we handle zoom ourselves
         ctx.set_zoom_factor(1.0);
 
         // macOS (New Bug 2): after the window regains focus (e.g. via
@@ -1623,7 +1618,7 @@ impl eframe::App for App {
         // until the pointer crosses a panel boundary, because winit doesn't
         // re-push the icon until the pointer moves. Forcing a reset on the
         // focus-gained event lets the normal per-frame hover logic re-assert
-        // the correct icon. macOS-only — the issue doesn't occur elsewhere,
+        // the correct icon. macOS-only: the issue doesn't occur elsewhere,
         // and scoping it keeps other platforms untouched.
         #[cfg(target_os = "macos")]
         {
@@ -1649,10 +1644,8 @@ impl eframe::App for App {
         self.handle_global_shortcuts(&ctx);
         self.handle_dropped_items(&ctx);
 
-        // Update the OS window title to reflect the active document
         self.update_window_title(&ctx);
 
-        // Menu bar
         egui::Panel::top("menu_bar")
             .exact_size(crate::app::resolved_theme::MENU_BAR_HEIGHT)
             .frame(
@@ -1664,7 +1657,6 @@ impl eframe::App for App {
                 self.show_menu_bar(ui, &ctx);
             });
 
-        // Status bar
         egui::Panel::bottom("status_bar")
             .exact_size(crate::app::resolved_theme::STATUS_BAR_HEIGHT)
             .frame(
@@ -1707,7 +1699,6 @@ impl eframe::App for App {
             .inner;
         self.handle_activity_action(activity_action);
 
-        // Workspace sidebar (left panel)
         let sidebar_action = if self.workspace_sidebar.is_visible() {
             // Populate workspace list from cache (refreshed only after mutations)
             self.workspace_sidebar.available_workspaces = self.get_cached_workspace_list().clone();
@@ -1731,7 +1722,6 @@ impl eframe::App for App {
             self.handle_sidebar_action(sidebar_action);
         }
 
-        // Editor area
         let workspace_editing = self.workspace_sidebar.rename_buffer.is_some()
             || self.workspace_sidebar.rename_just_confirmed
             || self.workspace_sidebar.new_entry.is_some()
@@ -1816,16 +1806,12 @@ impl eframe::App for App {
         // closure) so it observes whatever the editor widgets wrote.
         self.propagate_sync_scroll();
 
-        // Dialogs
         self.show_dialogs(&ctx);
 
         // Drag-and-drop hover overlay (painted on top of everything)
         self.paint_drop_overlay(&ctx);
 
-        // Process completed background I/O operations
         self.handle_io_responses();
-
-        // Process completed print / export-as-PDF jobs
         self.handle_print_responses();
 
         // Live file monitoring: check for external changes every second
@@ -1848,7 +1834,6 @@ impl eframe::App for App {
         // Auto-save file-backed documents
         self.auto_save.tick(&mut self.tabs);
 
-        // Keep the cached problem count in sync with the global store.
         self.problems_unread = crate::problem_log::unread_count();
 
         // System-mode OS-scheme poll. Its deadline MUST register in the
@@ -1874,7 +1859,7 @@ impl eframe::App for App {
         }
         ctx.request_repaint_after(next_repaint);
 
-        // TRACE pass diagnostic — last so `pass_ms` covers the whole pass.
+        // TRACE pass diagnostic: runs last so `pass_ms` covers the whole pass.
         self.emit_pass_trace(&ctx, pass_start);
     }
 
@@ -1892,7 +1877,6 @@ impl eframe::App for App {
         // used by the periodic autosave and post-restore snapshot.
         self.run_session_snapshot(true);
 
-        // Save current preferences to config file
         let config = AppConfig {
             current_theme: self.theme_ctrl.theme_mode.0.clone(),
             current_zoom_level: self.theme_ctrl.default_zoom_level,
@@ -2033,7 +2017,7 @@ impl App {
     /// re-resolves the theme when the scheme actually changed.
     ///
     /// Returns the time until the next poll is due so `fn ui` can register
-    /// it in the `next_repaint` min-computation — the frame loop is
+    /// it in the `next_repaint` min-computation: the frame loop is
     /// on-demand and would otherwise never tick while idle. Returns `None`
     /// outside System mode (no standing wakeup, no cost).
     fn tick_system_theme_poll(&mut self, ctx: &egui::Context) -> Option<Duration> {
@@ -2087,7 +2071,7 @@ mod tests {
     #[test]
     fn display_path_strips_verbatim_prefix() {
         // Defect D: canonicalized Windows paths carry the `\\?\` prefix; the
-        // dialog must show the clean form. Pure string transform — runs on all
+        // dialog must show the clean form. Pure string transform; runs on all
         // platforms.
         assert_eq!(
             display_path(Path::new(r"\\?\Z:\tmp\rust-pad-demo\big.txt")),
@@ -2348,7 +2332,7 @@ mod tests {
                 app.capture_window_geometry(ctx);
             },
         );
-        // A maximized frame reports the maximized rect — it must not replace
+        // A maximized frame reports the maximized rect; it must not replace
         // the floating stash, only flip the flag.
         run_with_viewport_info(
             &mut app,
@@ -2543,7 +2527,7 @@ mod tests {
             app.tabs.active_doc().indent_style,
             rust_pad_core::indent::IndentStyle::Spaces(4)
         );
-        // No selection — indents current line only
+        // No selection: indents current line only
         app.tabs.active_doc_mut().cursor.position = Position::new(0, 0);
         app.indent_selection(true);
         assert_eq!(app.tabs.active_doc().buffer.to_string(), "    a\nb\nc");
@@ -2738,7 +2722,7 @@ mod tests {
         app.tabs.active_doc_mut().insert_text("line1\nline2");
         app.tabs.active_doc_mut().cursor.position = Position::new(0, 0);
         app.add_cursor_above();
-        // Should not add cursor — already at first line
+        // Should not add cursor: already at first line
         assert_eq!(app.tabs.active_doc().secondary_cursors.len(), 0);
     }
 
@@ -2748,7 +2732,7 @@ mod tests {
         app.tabs.active_doc_mut().insert_text("line1\nline2");
         app.tabs.active_doc_mut().cursor.position = Position::new(1, 0);
         app.add_cursor_below();
-        // Should not add cursor — already at last line
+        // Should not add cursor: already at last line
         assert_eq!(app.tabs.active_doc().secondary_cursors.len(), 0);
     }
 
@@ -2896,7 +2880,7 @@ mod tests {
         // Open find/replace dialog
         app.find_replace.open();
 
-        // Directly call delete — in real flow this is gated by !dialog_open
+        // Directly call delete; in real flow this is gated by !dialog_open
         // Verify the gating logic: is_dialog_open should be true
         assert!(app.is_dialog_open());
         // The buffer should be unchanged since the shortcut wouldn't fire
@@ -3088,7 +3072,7 @@ mod tests {
         sc.position = Position::new(1, 2);
         app.tabs.active_doc_mut().secondary_cursors.push(sc);
 
-        // Clipboard has 3 lines but only 2 cursors — paste full text at each cursor
+        // Clipboard has 3 lines but only 2 cursors; paste full text at each cursor
         let clipboard_text = "X\nY\nZ";
         let normalized = rust_pad_core::encoding::normalize_line_endings(clipboard_text);
         let doc = app.tabs.active_doc_mut();
@@ -3307,7 +3291,7 @@ mod tests {
         app.tabs.active_doc_mut().insert_text("hello");
         set_find_text(&mut app, "hello");
         app.handle_search_action(FindReplaceAction::FindAll);
-        // No result at index 99 — must not panic or change the active tab.
+        // No result at index 99; must not panic or change the active tab.
         app.navigate_to_find_result(99);
         assert_eq!(app.tabs.active, 0);
     }
@@ -3547,7 +3531,7 @@ mod tests {
         app.auto_save.enabled = true;
         app.auto_save.interval_secs = 0; // trigger immediately
         app.auto_save.tick(&mut app.tabs);
-        // No file_path, so auto_save should skip — doc still modified
+        // No file_path, so auto_save should skip; doc still modified
         assert!(app.tabs.active_doc().modified);
     }
 
@@ -3562,7 +3546,7 @@ mod tests {
     #[test]
     fn test_cleanup_session_for_tab_no_session() {
         let app = test_app();
-        // No session_id and no session_store — should not panic
+        // No session_id and no session_store; should not panic
         app.cleanup_session_for_tab(0);
     }
 
@@ -3717,7 +3701,7 @@ mod tests {
         // Reset modified flag after insert
         app.tabs.active_doc_mut().modified = false;
         app.convert_case_scoped(CaseConversion::Upper, OperationScope::Global);
-        // Already uppercase — nothing changed
+        // Already uppercase; nothing changed
         assert_eq!(app.tabs.active_doc().buffer.to_string(), "HELLO");
         assert!(!app.tabs.active_doc().modified);
     }
@@ -4694,13 +4678,13 @@ mod tests {
             Some(Position::new(2, 0))
         );
 
-        // Alt+Shift+Up: shrink — remove line 2 cursor
+        // Alt+Shift+Up shrinks: the line 2 cursor is removed
         app.add_cursor_above();
         let doc = app.tabs.active_doc();
         assert_eq!(doc.secondary_cursors.len(), 1);
         assert_eq!(doc.secondary_cursors[0].position.line, 1);
 
-        // Alt+Shift+Up: shrink — remove line 1 cursor
+        // Alt+Shift+Up shrinks: the line 1 cursor is removed
         app.add_cursor_above();
         let doc = app.tabs.active_doc();
         assert_eq!(doc.secondary_cursors.len(), 0);
@@ -4734,7 +4718,7 @@ mod tests {
             app.tabs.active_doc_mut().session_id = Some("test-small".to_string());
             app.on_exit();
         }
-        // App dropped — reopen store to verify
+        // App dropped; reopen store to verify
         let store = SessionStore::open(&db_path).expect("reopen store");
         let loaded = store.load_content("test-small").unwrap();
         assert!(loaded.is_some());
@@ -5092,7 +5076,7 @@ mod tests {
     #[test]
     fn test_save_active_untitled_has_no_path() {
         // save_active() on an untitled doc would call save_as_dialog() which
-        // spawns an rfd dialog thread — not safe on headless CI. Instead verify
+        // spawns an rfd dialog thread; not safe on headless CI. Instead verify
         // the branching precondition: untitled docs have no file_path.
         let app = test_app();
         assert!(app.tabs.active_doc().file_path.is_none());
@@ -5102,7 +5086,7 @@ mod tests {
 
     #[test]
     fn test_save_as_context_captures_version() {
-        // save_as_dialog() spawns an rfd dialog thread — not safe on headless
+        // save_as_dialog() spawns an rfd dialog thread; not safe on headless
         // CI. Instead verify the SaveAsContext struct captures the right data.
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("content");
@@ -5692,7 +5676,7 @@ mod tests {
         app.dialog_state = DialogState::None;
         app.continue_close_all();
 
-        // All done — single blank tab, closing_all cleared
+        // All done: single blank tab, closing_all cleared
         assert_eq!(app.tabs.tab_count(), 1);
         assert!(!app.tabs.active_doc().modified);
         assert!(!app.closing_all);
@@ -5713,7 +5697,7 @@ mod tests {
         app.dialog_state = DialogState::None;
         app.closing_all = false;
 
-        // Chain should be stopped — no more prompts
+        // Chain should be stopped; no more prompts
         assert!(!app.closing_all);
         assert_eq!(app.tabs.tab_count(), 2);
     }
@@ -5851,7 +5835,7 @@ mod tests {
         // Pinned tab survives; the unpinned unchanged tabs are closed.
         // Closing the last unpinned tab via close_tab resets to a single
         // empty tab when only one document is left, but here we still have
-        // the pinned one — so the pinned tab should remain.
+        // the pinned one, so the pinned tab should remain.
         assert!(
             app.tabs.documents.iter().any(|d| d.title == "keep_pinned"),
             "pinned tab must survive close_unchanged_tabs"
@@ -5972,9 +5956,10 @@ mod tests {
 
     #[test]
     fn test_save_copy_context_has_is_copy_true() {
-        // save_copy_dialog() spawns an rfd dialog thread — not safe on
+        // save_copy_dialog() spawns an rfd dialog thread; not safe on
         // headless CI. Instead verify the SaveAsContext would have is_copy
-        // set by constructing it directly, matching the pattern at line ~3296.
+        // set by constructing it directly, the same shape
+        // save_as_dialog_impl builds.
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("content");
         let doc = app.tabs.active_doc();
@@ -5991,7 +5976,7 @@ mod tests {
 
     #[test]
     fn test_save_as_context_has_is_copy_false() {
-        // save_as_dialog() spawns an rfd dialog thread — not safe on
+        // save_as_dialog() spawns an rfd dialog thread; not safe on
         // headless CI. Verify the SaveAsContext directly.
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("content");
@@ -6025,7 +6010,7 @@ mod tests {
         assert!(app.handle_escape_shortcut(egui::Key::Escape));
         assert!(matches!(app.dialog_state, DialogState::None));
         assert!(!app.closing_all);
-        // Settings should still be open — only one dialog per press
+        // Settings should still be open; only one dialog per press
         assert!(app.settings_open);
     }
 
@@ -6237,7 +6222,7 @@ mod tests {
     // The global problem-log singleton is a process-wide OnceLock, so we
     // serialise these four tests on a dedicated mutex (no serial_test
     // dep) and use snapshot/records_since to filter out noise from any
-    // other tests in the same binary. `init_for_tests` is idempotent —
+    // other tests in the same binary. `init_for_tests` is idempotent:
     // first call wins, later calls reuse the same temp-backed store.
 
     use std::sync::Mutex;
@@ -6272,8 +6257,8 @@ mod tests {
 
         let mut app = test_app();
         let baseline = crate::problem_log::snapshot_record_count();
-        // UTF-8 string that decodes cleanly but contains an embedded NUL
-        // — exercises the post-decode NUL gate in `complete_copy_contents`.
+        // UTF-8 string that decodes cleanly but contains an embedded NUL;
+        // exercises the post-decode NUL gate in `complete_copy_contents`.
         app.complete_copy_contents(std::path::Path::new("/tmp/nul.bin"), b"head\0tail");
         let new_records = crate::problem_log::records_since(baseline);
         assert!(
@@ -6292,7 +6277,7 @@ mod tests {
 
         let mut app = test_app();
         let baseline = crate::problem_log::snapshot_record_count();
-        // U+202E RIGHT-TO-LEFT OVERRIDE — Trojan-Source class.
+        // U+202E RIGHT-TO-LEFT OVERRIDE, Trojan-Source class.
         let bytes = "safe\u{202E}evil".as_bytes();
         app.complete_copy_contents(std::path::Path::new("/tmp/bidi.txt"), bytes);
         let new_records = crate::problem_log::records_since(baseline);
@@ -6301,7 +6286,7 @@ mod tests {
             "bidi override must emit [CC06]; got: {:?}",
             new_records.iter().map(|r| &r.message).collect::<Vec<_>>(),
         );
-        // [CC05] would mean we refused to copy — must NOT be present.
+        // [CC05] would mean we refused to copy; it must NOT be present.
         assert!(
             !new_records.iter().any(|r| r.message.contains("[CC05]")),
             "bidi override is a notice, not a refusal; [CC05] must not appear",
@@ -6321,9 +6306,9 @@ mod tests {
         // for the detected encoding (and even if it decodes, none of the
         // common encodings produce safe text). The decode error or the
         // post-decode NUL gate must surface as [CC05].
-        // UTF-16 LE BOM followed by an odd byte count — decode_bytes returns
+        // UTF-16 LE BOM followed by an odd byte count: decode_bytes returns
         // a hard error (cannot pair the remaining byte), which the decode
-        // gate at line 884 translates to a [CC05] refusal.
+        // gate in `complete_copy_contents` translates to a [CC05] refusal.
         app.complete_copy_contents(std::path::Path::new("/tmp/binary.bin"), b"\xFF\xFE\xFD");
         let new_records = crate::problem_log::records_since(baseline);
         assert!(

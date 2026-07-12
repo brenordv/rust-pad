@@ -10,11 +10,11 @@ use super::{App, DialogState};
 impl App {
     /// Returns true if a modal (blocking) dialog is open.
     ///
-    /// Find/Replace is excluded — it is non-modal and allows editing
+    /// Find/Replace is excluded: it is non-modal and allows editing
     /// in the editor when it doesn't have focus.
     ///
-    /// External-change prompts only count as modal for the active tab —
-    /// a flagged inactive tab does not block shortcuts; the prompt
+    /// External-change prompts only count as modal for the active tab.
+    /// A flagged inactive tab does not block shortcuts; the prompt
     /// appears the next frame after the user switches to it.
     pub(crate) fn is_modal_dialog_open(&self) -> bool {
         self.go_to_line.visible
@@ -75,7 +75,7 @@ impl App {
         // Handle semantic clipboard events (from focused widget).
         // Suppressed when a modal dialog is open, when the Find/Replace
         // dialog has focus, or when any inline workspace text field is
-        // active (rename workspace, create file/folder, rename entry) —
+        // active (rename workspace, create file/folder, rename entry);
         // otherwise Ctrl+A/V/C/X/Z/Y in those fields would also affect
         // the editor.
         let inline_field_active = self.workspace_sidebar.rename_buffer.is_some()
@@ -87,7 +87,7 @@ impl App {
         // On macOS egui's TextEdit only paste-handles `Cmd+V`. When
         // an inline workspace field is focused and the user pressed Ctrl-only
         // (not Cmd), synthesize a Paste event so the focused TextEdit reads
-        // it natively. Sanitize the pasted text — filenames are single-segment
+        // it natively. Sanitize the pasted text: filenames are single-segment
         // text; strip CR/LF/NUL and reject the paste entirely if the result is
         // not a valid simple name.
         let ctrl_only = ctx.input(|i| i.modifiers.ctrl && !i.modifiers.mac_cmd);
@@ -307,7 +307,7 @@ impl App {
             return true;
         }
 
-        // 6. No dialog open — clear secondary cursors
+        // 6. No dialog open: clear secondary cursors
         self.tabs.active_doc_mut().clear_secondary_cursors();
         true
     }

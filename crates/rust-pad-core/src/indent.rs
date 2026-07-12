@@ -194,14 +194,14 @@ mod tests {
 
     #[test]
     fn test_detect_single_indent_level_4() {
-        // All lines at same indent level — delta from 0→4 and 4→0.
+        // All lines at same indent level; delta from 0→4 and 4→0.
         let text = "top\n    a\n    b\n    c\ntop\n";
         assert_eq!(detect_indent(text), IndentStyle::Spaces(4));
     }
 
     #[test]
     fn test_detect_defaults_when_ambiguous() {
-        // Only odd-number indentation — no standard width matches, falls back to 4
+        // Only odd-number indentation: no standard width matches, falls back to 4
         let text = "top\n   three\n      six\ntop\n";
         assert_eq!(detect_indent(text), IndentStyle::default());
     }

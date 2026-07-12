@@ -1,7 +1,7 @@
 //! Manages theme state: editor colors, syntax highlighting, zoom, and accent color.
 //!
-//! Encapsulates all theme-related fields that were previously spread across `App`,
-//! providing a focused API for theme switching, zoom control, and visual configuration.
+//! Encapsulates all theme-related fields that were previously spread across `App`
+//! behind a focused API for theme switching, zoom control, and visual configuration.
 
 use egui::Color32;
 

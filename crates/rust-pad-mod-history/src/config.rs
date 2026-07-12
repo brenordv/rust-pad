@@ -113,7 +113,6 @@ mod tests {
         std::env::set_var("RUST_PAD_DATA_DIR", "/custom/path");
         let dir = resolve_data_dir();
         assert_eq!(dir, PathBuf::from("/custom/path"));
-        // Restore
         match original {
             Some(val) => std::env::set_var("RUST_PAD_DATA_DIR", val),
             None => std::env::remove_var("RUST_PAD_DATA_DIR"),

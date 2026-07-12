@@ -261,7 +261,7 @@ pub fn builtin_light() -> ThemeDefinition {
     }
 }
 
-/// Sample wacky theme — deliberately clashing "retro terminal nightmare" colors.
+/// Sample wacky theme: deliberately clashing "retro terminal nightmare" colors.
 pub fn sample_wacky() -> ThemeDefinition {
     ThemeDefinition {
         name: "Wacky".to_string(),
@@ -305,7 +305,7 @@ pub fn sample_wacky() -> ThemeDefinition {
 /// Built-in "Dusk" theme: a low-glare light theme.
 ///
 /// Uses a warm, parchment-like background (never pure white) and muted,
-/// desaturated colors so it is easy on the eyes for long sessions — the
+/// desaturated colors so it is easy on the eyes for long sessions, the
 /// retina-friendly counterpart to the high-contrast `Light` theme.
 pub fn builtin_dusk() -> ThemeDefinition {
     ThemeDefinition {
