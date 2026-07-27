@@ -55,6 +55,13 @@ enum DeferredTabAction {
     SetTabColor(usize, Option<rust_pad_core::tab_color::TabColor>),
     /// Copy a representation of the tab's file path to the clipboard.
     CopyPath(CopyPathRequest),
+    /// Move the tab at the given index into a new vertical split.
+    SplitVertical(usize),
+    /// Move the tab at the given index into a new horizontal split.
+    SplitHorizontal(usize),
+    /// Open the Find dialog primed to search the given folder (the tab file's
+    /// containing directory).
+    SearchInFolder(std::path::PathBuf),
 }
 
 /// Horizontal padding on each side of the tab content.
@@ -722,6 +729,15 @@ impl App {
                     DeferredTabAction::CopyPath(req) => {
                         self.handle_copy_path(&req.path, &req.root, req.scope);
                     }
+                    DeferredTabAction::SplitVertical(idx) => {
+                        self.split_tab_into_pane(idx, crate::tabs::SplitOrientation::Vertical);
+                    }
+                    DeferredTabAction::SplitHorizontal(idx) => {
+                        self.split_tab_into_pane(idx, crate::tabs::SplitOrientation::Horizontal);
+                    }
+                    DeferredTabAction::SearchInFolder(folder) => {
+                        self.open_folder_search(folder);
+                    }
                 }
             }
         });
@@ -977,6 +993,17 @@ impl App {
                 ui.close();
             }
             ui.separator();
+            if self.tabs.tab_count() >= 2 {
+                if ui.button("Split Vertically").clicked() {
+                    *deferred_action = Some(DeferredTabAction::SplitVertical(idx));
+                    ui.close();
+                }
+                if ui.button("Split Horizontally").clicked() {
+                    *deferred_action = Some(DeferredTabAction::SplitHorizontal(idx));
+                    ui.close();
+                }
+                ui.separator();
+            }
             let mut copy_path_req = None;
             tab_copy_path_menu(
                 ui,
@@ -986,6 +1013,13 @@ impl App {
             );
             if let Some(req) = copy_path_req {
                 *deferred_action = Some(DeferredTabAction::CopyPath(req));
+            }
+            if let Some(parent) = file_path.as_deref().and_then(|p| p.parent()) {
+                if ui.button("Search in Containing Folder...").clicked() {
+                    *deferred_action =
+                        Some(DeferredTabAction::SearchInFolder(parent.to_path_buf()));
+                    ui.close();
+                }
             }
             ui.separator();
             if let Some(result) = render_pin_color_menu_items(ui, is_pinned) {

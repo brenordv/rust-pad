@@ -7,6 +7,15 @@
 /// Inner padding between a result row's rect and its text.
 const ROW_TEXT_PADDING: egui::Vec2 = egui::Vec2::new(4.0, 2.0);
 
+/// Where a Find Results row's match lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultSource {
+    /// An open tab, by index in `TabManager::documents`.
+    Tab(usize),
+    /// A file on disk (from a folder search), not necessarily open.
+    File(std::path::PathBuf),
+}
+
 /// A single match surfaced in the Find Results panel.
 ///
 /// Char offsets (`match_start` / `match_end`) are captured at collection time;
@@ -14,10 +23,10 @@ const ROW_TEXT_PADDING: egui::Vec2 = egui::Vec2::new(4.0, 2.0);
 /// them to the live buffer rather than trusting them blindly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindAllResult {
-    /// Index of the owning tab in `TabManager::documents`.
-    pub tab_index: usize,
-    /// Tab title, captured so the panel renders without touching the docs.
-    pub tab_title: String,
+    /// Where the match lives: an open tab or an on-disk file.
+    pub source: ResultSource,
+    /// Display label for the row's location (tab title or file path).
+    pub location_label: String,
     /// 0-indexed line where the match starts.
     pub line: usize,
     /// 0-indexed column where the match starts.
@@ -48,8 +57,11 @@ pub struct FindResultsPanel {
     pub visible: bool,
     /// The query the current results were collected for.
     query: String,
-    /// Whether the query was run over all tabs (vs. the current tab only).
-    all_tabs: bool,
+    /// Human-readable scope for the header, e.g. "all tabs", "current tab", or
+    /// `folder "src"`.
+    scope_label: String,
+    /// Optional notice under the header (truncation / skipped-file counts).
+    notice: Option<String>,
     /// Flattened matches across the searched scope.
     results: Vec<FindAllResult>,
     /// Index of the last match the user navigated to, for the footer.
@@ -59,9 +71,19 @@ pub struct FindResultsPanel {
 impl FindResultsPanel {
     /// Replaces the panel contents and makes it visible, even when `results`
     /// is empty (so the user sees an explicit "no results" message).
-    pub fn set(&mut self, query: String, all_tabs: bool, results: Vec<FindAllResult>) {
+    ///
+    /// `scope_label` describes what was searched (e.g. "all tabs" or
+    /// `folder "src"`); `notice` carries an optional truncation/skip note.
+    pub fn set(
+        &mut self,
+        query: String,
+        scope_label: String,
+        notice: Option<String>,
+        results: Vec<FindAllResult>,
+    ) {
         self.query = query;
-        self.all_tabs = all_tabs;
+        self.scope_label = scope_label;
+        self.notice = notice;
         self.results = results;
         self.selected = None;
         self.visible = true;
@@ -72,6 +94,8 @@ impl FindResultsPanel {
         self.visible = false;
         self.results.clear();
         self.query.clear();
+        self.scope_label.clear();
+        self.notice = None;
         self.selected = None;
     }
 
@@ -109,6 +133,13 @@ impl FindResultsPanel {
             .max_size(360.0)
             .show_inside(ui, |ui| {
                 self.show_header(ui, &mut action);
+                if let Some(notice) = &self.notice {
+                    ui.label(
+                        egui::RichText::new(notice)
+                            .small()
+                            .color(chrome_theme.text_muted),
+                    );
+                }
                 ui.separator();
                 // Reserve a strip at the bottom for the mini status footer.
                 let footer_height = 22.0;
@@ -165,16 +196,12 @@ impl FindResultsPanel {
     /// Header row: summary text on the left, a close button on the right.
     fn show_header(&self, ui: &mut egui::Ui, action: &mut FindResultsAction) {
         ui.horizontal(|ui| {
-            let scope = if self.all_tabs {
-                "all tabs"
-            } else {
-                "current tab"
-            };
             ui.label(format!(
-                "Find results for \"{}\" — {} match{} in {scope}",
+                "Find results for \"{}\" — {} match{} in {}",
                 self.query,
                 self.results.len(),
                 if self.results.len() == 1 { "" } else { "es" },
+                self.scope_label,
             ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -215,7 +242,7 @@ impl FindResultsPanel {
                     // 1-indexed line for display; trim the rendered line so a
                     // very long line can't blow out the panel width.
                     let preview: String = r.line_text.trim().chars().take(200).collect();
-                    let location = format!("{}:{}", r.tab_title, r.line + 1);
+                    let location = format!("{}:{}", r.location_label, r.line + 1);
                     // Location prefix in accent monospace, preview in body text.
                     let mut job = egui::text::LayoutJob::default();
                     job.append(
@@ -280,8 +307,8 @@ mod tests {
 
     fn sample(tab_index: usize, line: usize) -> FindAllResult {
         FindAllResult {
-            tab_index,
-            tab_title: format!("tab{tab_index}"),
+            source: ResultSource::Tab(tab_index),
+            location_label: format!("tab{tab_index}"),
             line,
             col: 0,
             match_start: 0,
@@ -294,17 +321,27 @@ mod tests {
     fn set_makes_visible_and_stores_results() {
         let mut panel = FindResultsPanel::default();
         assert!(!panel.visible);
-        panel.set("foo".to_string(), true, vec![sample(0, 1), sample(1, 4)]);
+        panel.set(
+            "foo".to_string(),
+            "all tabs".to_string(),
+            None,
+            vec![sample(0, 1), sample(1, 4)],
+        );
         assert!(panel.visible);
         assert_eq!(panel.len(), 2);
         assert!(!panel.is_empty());
-        assert_eq!(panel.result(1).unwrap().tab_index, 1);
+        assert_eq!(panel.result(1).unwrap().source, ResultSource::Tab(1));
     }
 
     #[test]
     fn set_visible_even_with_no_results() {
         let mut panel = FindResultsPanel::default();
-        panel.set("missing".to_string(), false, Vec::new());
+        panel.set(
+            "missing".to_string(),
+            "current tab".to_string(),
+            None,
+            Vec::new(),
+        );
         assert!(panel.visible, "empty results still show the panel");
         assert!(panel.is_empty());
     }
@@ -312,7 +349,12 @@ mod tests {
     #[test]
     fn clear_hides_and_drops_results() {
         let mut panel = FindResultsPanel::default();
-        panel.set("foo".to_string(), false, vec![sample(0, 0)]);
+        panel.set(
+            "foo".to_string(),
+            "current tab".to_string(),
+            None,
+            vec![sample(0, 0)],
+        );
         panel.clear();
         assert!(!panel.visible);
         assert!(panel.is_empty());
@@ -322,14 +364,24 @@ mod tests {
     #[test]
     fn footer_text_shows_count_before_navigation() {
         let mut panel = FindResultsPanel::default();
-        panel.set("foo".to_string(), false, vec![sample(0, 0), sample(0, 1)]);
+        panel.set(
+            "foo".to_string(),
+            "current tab".to_string(),
+            None,
+            vec![sample(0, 0), sample(0, 1)],
+        );
         assert_eq!(panel.footer_text(), "2 matches");
     }
 
     #[test]
     fn footer_text_singular_for_one_match() {
         let mut panel = FindResultsPanel::default();
-        panel.set("foo".to_string(), false, vec![sample(0, 0)]);
+        panel.set(
+            "foo".to_string(),
+            "current tab".to_string(),
+            None,
+            vec![sample(0, 0)],
+        );
         assert_eq!(panel.footer_text(), "1 match");
     }
 
@@ -338,7 +390,8 @@ mod tests {
         let mut panel = FindResultsPanel::default();
         panel.set(
             "foo".to_string(),
-            false,
+            "current tab".to_string(),
+            None,
             vec![sample(0, 0), sample(0, 1), sample(1, 2)],
         );
         panel.selected = Some(1);
@@ -391,7 +444,12 @@ mod tests {
     #[test]
     fn single_click_reports_row_without_navigating() {
         let mut panel = FindResultsPanel::default();
-        panel.set("foo".to_string(), false, vec![sample(0, 0), sample(0, 1)]);
+        panel.set(
+            "foo".to_string(),
+            "current tab".to_string(),
+            None,
+            vec![sample(0, 0), sample(0, 1)],
+        );
         let ctx = egui::Context::default();
         let mut action = FindResultsAction::None;
 
@@ -411,7 +469,12 @@ mod tests {
     #[test]
     fn double_click_navigates_to_row() {
         let mut panel = FindResultsPanel::default();
-        panel.set("foo".to_string(), false, vec![sample(0, 0), sample(0, 1)]);
+        panel.set(
+            "foo".to_string(),
+            "current tab".to_string(),
+            None,
+            vec![sample(0, 0), sample(0, 1)],
+        );
         let ctx = egui::Context::default();
         let mut action = FindResultsAction::None;
 
@@ -429,9 +492,19 @@ mod tests {
     #[test]
     fn set_resets_navigation_position() {
         let mut panel = FindResultsPanel::default();
-        panel.set("foo".to_string(), false, vec![sample(0, 0), sample(0, 1)]);
+        panel.set(
+            "foo".to_string(),
+            "current tab".to_string(),
+            None,
+            vec![sample(0, 0), sample(0, 1)],
+        );
         panel.selected = Some(1);
-        panel.set("bar".to_string(), false, vec![sample(0, 0)]);
+        panel.set(
+            "bar".to_string(),
+            "current tab".to_string(),
+            None,
+            vec![sample(0, 0)],
+        );
         assert_eq!(panel.footer_text(), "1 match");
     }
 }

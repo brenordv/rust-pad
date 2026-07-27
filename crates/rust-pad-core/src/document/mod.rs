@@ -143,6 +143,14 @@ pub struct Document {
     pub live_monitoring: bool,
     /// Last known file modification time, for change detection.
     pub last_known_mtime: Option<std::time::SystemTime>,
+    /// Monotonic instant of the app's own most recent write to this file.
+    ///
+    /// Set when a save is dispatched and again when it is acknowledged. The
+    /// live-file monitor consults it to avoid mistaking the app's own save for
+    /// an external change: on Windows the on-disk last-write time is not fully
+    /// settled until the writing handle closes, so a later poll can read a
+    /// higher mtime than the one recorded right after the write.
+    pub last_self_write: Option<std::time::Instant>,
     /// Whether an external file change has been detected but not yet acted on.
     /// When true, the UI shows a prompt asking the user to reload or keep.
     pub external_change_detected: bool,
@@ -232,6 +240,7 @@ impl Document {
             last_saved_at: None,
             live_monitoring: false,
             last_known_mtime: None,
+            last_self_write: None,
             external_change_detected: false,
             content_version: 0,
             cached_max_line_chars: None,

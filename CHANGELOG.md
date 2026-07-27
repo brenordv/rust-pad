@@ -1,5 +1,38 @@
 # Changelog
 
+## [3.1.0]
+
+### Added
+- **Search in Folder.** Search the contents of every text file under a folder without opening them.
+  Reach it from the Folder scope in Find & Replace, from a folder or workspace-root right-click menu in
+  the sidebar, or from a file tab's "Search in Containing Folder..." entry. In the Folder scope you can
+  pick or change the folder to search with the "Choose Folder..." button. Matches appear in the Find All
+  panel; double-clicking one opens the file and jumps to the match. The walk runs on a background thread,
+  stays inside the chosen folder (symlinks and junctions that resolve outside it are skipped), ignores
+  binary and oversized files and `.git`/`.hg`/`.svn` metadata, and is bounded by file, match, depth, and
+  byte limits. When a limit is reached or files are skipped, the results panel says so.
+- **Split from the tab menu.** Right-click a tab and pick "Split Vertically" or "Split Horizontally" to
+  move that file into a new pane (offered when more than one tab is open), alongside the existing
+  `Ctrl+Alt+V` / `Ctrl+Alt+H` shortcuts.
+- **Keyboard navigation in the confirm dialogs.** The "Unsaved Changes" and "Reload from Disk" prompts now
+  respond to the arrow keys to move the highlighted choice, Space or Enter to pick it, and Escape to
+  cancel. The highlight starts on the non-destructive choice (Cancel).
+
+### Fixed
+- **Ctrl+S no longer reports a phantom external change.** Saving a file (including one opened from the
+  command line into a fresh instance) no longer shows "the file was modified outside the program" for the
+  app's own write. The live-file monitor now skips files with a save in flight and treats a modification
+  time bump within two seconds of our own write as the OS settling that write rather than an outside edit.
+- **"Save & Close" on an untitled tab no longer discards the content.** It now opens the Save As dialog
+  and keeps the tab open, instead of closing the tab without saving.
+- **Dialog buttons no longer shift on hover.** The Find & Replace and other dialog buttons kept their
+  size and position when the pointer moves over them; previously a hovered button shrank by a pixel and
+  nudged its neighbours.
+- **Keyboard use of the Find & Replace dialog.** The button that currently has keyboard focus now shows a
+  clear focus ring, so it is no longer ambiguous which one Enter or Space will trigger (previously the
+  accent-filled "Find Next" always looked selected). Tab, Shift+Tab, and the arrow keys now stay within
+  the dialog instead of moving focus out to the editor behind it.
+
 ## [3.0.0]
 
 This release is a full visual overhaul of the application (new themes, new fonts, new chrome for tabs,

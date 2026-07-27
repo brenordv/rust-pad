@@ -106,6 +106,8 @@ pub enum SidebarAction {
         root: PathBuf,
         scope: CopyPathScope,
     },
+    /// Open the Find dialog primed to search the given folder's contents.
+    SearchInFolder(PathBuf),
     /// No action.
     None,
 }

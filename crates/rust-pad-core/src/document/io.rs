@@ -126,6 +126,7 @@ impl Document {
             last_saved_at: None,
             live_monitoring: false,
             last_known_mtime: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+            last_self_write: None,
             external_change_detected: false,
             content_version: 0,
             cached_max_line_chars: None,
@@ -183,6 +184,7 @@ impl Document {
         self.modified = false;
         self.last_saved_at = Some(chrono::Local::now());
         self.last_known_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        self.last_self_write = Some(std::time::Instant::now());
 
         for change in &mut self.line_changes {
             if *change == LineChangeState::Modified {
@@ -220,6 +222,7 @@ impl Document {
             .unwrap_or_else(|| "Untitled".to_string());
         self.last_saved_at = Some(chrono::Local::now());
         self.last_known_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        self.last_self_write = Some(std::time::Instant::now());
 
         if self.content_version == saved_version {
             self.modified = false;
