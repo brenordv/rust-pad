@@ -33,6 +33,10 @@
   accent-filled "Find Next" always looked selected). Tab, Shift+Tab, and the arrow keys now stay within
   the dialog instead of moving focus out to the editor behind it.
 
+### Dependencies
+- **Bumped**: anyhow, clap, regex, serde, serde_json, and uuid
+- **Added**: `quick-xml` to fix sec vulnerabilities [10](https://github.com/brenordv/rust-pad/security/code-scanning/10), [11](https://github.com/brenordv/rust-pad/security/code-scanning/11), and [12](https://github.com/brenordv/rust-pad/security/code-scanning/12). This is not used directly. It is used by plist, which is used by syntect.
+
 ## [3.0.0]
 
 This release is a full visual overhaul of the application (new themes, new fonts, new chrome for tabs,
