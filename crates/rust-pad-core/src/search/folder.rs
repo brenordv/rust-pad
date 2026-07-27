@@ -7,6 +7,7 @@
 //! junction inside the root that resolves outside it is never read.
 
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use crate::buffer::TextBuffer;
@@ -142,148 +143,218 @@ pub fn search_folder(
     options: &SearchOptions,
     limits: FolderSearchLimits,
 ) -> FolderSearchOutcome {
-    let mut outcome = FolderSearchOutcome::default();
     if options.query.is_empty() {
-        return outcome;
+        return FolderSearchOutcome::default();
     }
     let canonical_root = match std::fs::canonicalize(root) {
         Ok(r) => r,
-        Err(_) => return outcome,
+        Err(_) => return FolderSearchOutcome::default(),
     };
+    FolderWalk::new(canonical_root, options, limits).run()
+}
 
-    let mut engine = SearchEngine::new();
-    let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
-    let mut total_bytes: u64 = 0;
-    visited_dirs.insert(canonical_root.clone());
-    let mut stack: Vec<(PathBuf, usize)> = vec![(canonical_root.clone(), 0)];
+/// Depth-first walk state for a single [`search_folder`] call. The per-entry
+/// logic is split across methods so each stays flat (low cognitive
+/// complexity); [`ControlFlow::Break`] propagates a walk-ending condition (a
+/// cap was hit, or the query is an invalid regex) up to [`run`](Self::run).
+struct FolderWalk<'a> {
+    options: &'a SearchOptions,
+    limits: FolderSearchLimits,
+    /// Canonical root; every entry read must stay within it.
+    canonical_root: PathBuf,
+    engine: SearchEngine,
+    /// Canonical directories already queued, terminating symlink/junction loops.
+    visited_dirs: HashSet<PathBuf>,
+    total_bytes: u64,
+    /// Pending `(canonical dir, depth)` frontier.
+    stack: Vec<(PathBuf, usize)>,
+    outcome: FolderSearchOutcome,
+}
 
-    'walk: while let Some((dir, depth)) = stack.pop() {
-        let read_dir = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd,
-            Err(_) => {
-                outcome.unreadable += 1;
-                continue;
-            }
-        };
-        for entry in read_dir.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let entry_path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => {
-                    outcome.unreadable += 1;
-                    continue;
-                }
-            };
-            // `entry_path.is_dir()` follows symlinks, so a symlink-to-dir is
-            // treated as a directory (and containment-checked below).
-            let is_dir = file_type.is_dir() || (file_type.is_symlink() && entry_path.is_dir());
-
-            if is_dir {
-                if matches!(name.as_str(), ".git" | ".hg" | ".svn") {
-                    continue;
-                }
-                if !limits.include_hidden && is_hidden(&name) {
-                    continue;
-                }
-                if depth + 1 > limits.max_depth {
-                    continue;
-                }
-                let canon = match std::fs::canonicalize(&entry_path) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        outcome.unreadable += 1;
-                        continue;
-                    }
-                };
-                if !canon.starts_with(&canonical_root) {
-                    outcome.skipped_out_of_root += 1;
-                    continue;
-                }
-                // The visited set (canonical) terminates symlink/junction loops.
-                if visited_dirs.insert(canon.clone()) {
-                    stack.push((canon, depth + 1));
-                }
-                continue;
-            }
-
-            if !limits.include_hidden && is_hidden(&name) {
-                continue;
-            }
-            if outcome.files_visited >= limits.max_files
-                || outcome.hits.len() >= limits.max_matches
-                || total_bytes >= limits.max_total_bytes
-            {
-                outcome.truncated = true;
-                break 'walk;
-            }
-
-            let canon = match std::fs::canonicalize(&entry_path) {
-                Ok(c) => c,
-                Err(_) => {
-                    outcome.unreadable += 1;
-                    continue;
-                }
-            };
-            if !canon.starts_with(&canonical_root) {
-                outcome.skipped_out_of_root += 1;
-                continue;
-            }
-            if !canon.is_file() {
-                continue;
-            }
-            let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
-            if size > limits.max_file_size_bytes {
-                outcome.skipped_too_large += 1;
-                continue;
-            }
-            let bytes = match std::fs::read(&canon) {
-                Ok(b) => b,
-                Err(_) => {
-                    outcome.unreadable += 1;
-                    continue;
-                }
-            };
-            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-            outcome.files_visited += 1;
-
-            if looks_binary(&bytes) {
-                outcome.skipped_binary += 1;
-                continue;
-            }
-            let encoding = detect_encoding(&bytes);
-            let text = match decode_bytes(&bytes, encoding) {
-                Ok(t) => normalize_line_endings(&t),
-                Err(_) => {
-                    outcome.skipped_binary += 1;
-                    continue;
-                }
-            };
-            let buffer = TextBuffer::from(text.as_str());
-            if engine.find_all(&buffer, options).is_err() {
-                // Invalid regex: every file would fail identically. Stop.
-                break 'walk;
-            }
-            for m in &engine.matches {
-                if outcome.hits.len() >= limits.max_matches {
-                    outcome.truncated = true;
-                    break 'walk;
-                }
-                let pos = char_to_pos(&buffer, m.start);
-                let line_text = preview_line(&buffer, pos.line, pos.col, limits.max_line_chars);
-                outcome.hits.push(FolderSearchHit {
-                    path: canon.clone(),
-                    line: pos.line,
-                    col: pos.col,
-                    match_start: m.start,
-                    match_end: m.end,
-                    line_text,
-                });
-            }
+impl<'a> FolderWalk<'a> {
+    fn new(
+        canonical_root: PathBuf,
+        options: &'a SearchOptions,
+        limits: FolderSearchLimits,
+    ) -> Self {
+        let mut visited_dirs = HashSet::new();
+        visited_dirs.insert(canonical_root.clone());
+        let stack = vec![(canonical_root.clone(), 0)];
+        Self {
+            options,
+            limits,
+            canonical_root,
+            engine: SearchEngine::new(),
+            visited_dirs,
+            total_bytes: 0,
+            stack,
+            outcome: FolderSearchOutcome::default(),
         }
     }
 
-    outcome
+    /// Drains the frontier, stopping early when a directory signals `Break`.
+    fn run(mut self) -> FolderSearchOutcome {
+        while let Some((dir, depth)) = self.stack.pop() {
+            if self.visit_dir(&dir, depth).is_break() {
+                break;
+            }
+        }
+        self.outcome
+    }
+
+    /// Reads one directory and processes its entries. `Break` ends the walk.
+    fn visit_dir(&mut self, dir: &Path, depth: usize) -> ControlFlow<()> {
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => {
+                self.outcome.unreadable += 1;
+                return ControlFlow::Continue(());
+            }
+        };
+        for entry in read_dir.flatten() {
+            if self.process_entry(&entry, depth).is_break() {
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Classifies one entry as a directory to descend or a file to read.
+    fn process_entry(&mut self, entry: &std::fs::DirEntry, depth: usize) -> ControlFlow<()> {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let entry_path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => {
+                self.outcome.unreadable += 1;
+                return ControlFlow::Continue(());
+            }
+        };
+        // `entry_path.is_dir()` follows symlinks, so a symlink-to-dir is treated
+        // as a directory (and containment-checked below).
+        let is_dir = file_type.is_dir() || (file_type.is_symlink() && entry_path.is_dir());
+        if is_dir {
+            self.descend_dir(&name, &entry_path, depth);
+            return ControlFlow::Continue(());
+        }
+        self.read_file(&name, &entry_path)
+    }
+
+    /// Queues an in-root subdirectory, skipping VCS, hidden, too-deep, and
+    /// out-of-root entries. Never ends the walk.
+    fn descend_dir(&mut self, name: &str, entry_path: &Path, depth: usize) {
+        if matches!(name, ".git" | ".hg" | ".svn") {
+            return;
+        }
+        if !self.limits.include_hidden && is_hidden(name) {
+            return;
+        }
+        if depth + 1 > self.limits.max_depth {
+            return;
+        }
+        let canon = match std::fs::canonicalize(entry_path) {
+            Ok(c) => c,
+            Err(_) => {
+                self.outcome.unreadable += 1;
+                return;
+            }
+        };
+        if !canon.starts_with(&self.canonical_root) {
+            self.outcome.skipped_out_of_root += 1;
+            return;
+        }
+        // The visited set (canonical) terminates symlink/junction loops.
+        if self.visited_dirs.insert(canon.clone()) {
+            self.stack.push((canon, depth + 1));
+        }
+    }
+
+    /// Reads, decodes, and searches one file, appending its hits. `Break` ends
+    /// the walk (a cap was hit, or the query is an invalid regex).
+    fn read_file(&mut self, name: &str, entry_path: &Path) -> ControlFlow<()> {
+        if !self.limits.include_hidden && is_hidden(name) {
+            return ControlFlow::Continue(());
+        }
+        if self.outcome.files_visited >= self.limits.max_files
+            || self.outcome.hits.len() >= self.limits.max_matches
+            || self.total_bytes >= self.limits.max_total_bytes
+        {
+            self.outcome.truncated = true;
+            return ControlFlow::Break(());
+        }
+        let canon = match std::fs::canonicalize(entry_path) {
+            Ok(c) => c,
+            Err(_) => {
+                self.outcome.unreadable += 1;
+                return ControlFlow::Continue(());
+            }
+        };
+        if !canon.starts_with(&self.canonical_root) {
+            self.outcome.skipped_out_of_root += 1;
+            return ControlFlow::Continue(());
+        }
+        if !canon.is_file() {
+            return ControlFlow::Continue(());
+        }
+        let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
+        if size > self.limits.max_file_size_bytes {
+            self.outcome.skipped_too_large += 1;
+            return ControlFlow::Continue(());
+        }
+        let bytes = match std::fs::read(&canon) {
+            Ok(b) => b,
+            Err(_) => {
+                self.outcome.unreadable += 1;
+                return ControlFlow::Continue(());
+            }
+        };
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len() as u64);
+        self.outcome.files_visited += 1;
+
+        if looks_binary(&bytes) {
+            self.outcome.skipped_binary += 1;
+            return ControlFlow::Continue(());
+        }
+        let encoding = detect_encoding(&bytes);
+        let text = match decode_bytes(&bytes, encoding) {
+            Ok(t) => normalize_line_endings(&t),
+            Err(_) => {
+                self.outcome.skipped_binary += 1;
+                return ControlFlow::Continue(());
+            }
+        };
+        let buffer = TextBuffer::from(text.as_str());
+        if self.engine.find_all(&buffer, self.options).is_err() {
+            // Invalid regex: every file would fail identically. Stop.
+            return ControlFlow::Break(());
+        }
+        self.collect_hits(&buffer, &canon)
+    }
+
+    /// Appends every match in the current file to the outcome. `Break` when the
+    /// match cap is reached mid-file.
+    fn collect_hits(&mut self, buffer: &TextBuffer, canon: &Path) -> ControlFlow<()> {
+        // Move the matches out so the loop does not borrow `self.engine` while
+        // it mutates `self.outcome`; the engine repopulates on the next file.
+        let matches = std::mem::take(&mut self.engine.matches);
+        for m in &matches {
+            if self.outcome.hits.len() >= self.limits.max_matches {
+                self.outcome.truncated = true;
+                return ControlFlow::Break(());
+            }
+            let pos = char_to_pos(buffer, m.start);
+            let line_text = preview_line(buffer, pos.line, pos.col, self.limits.max_line_chars);
+            self.outcome.hits.push(FolderSearchHit {
+                path: canon.to_path_buf(),
+                line: pos.line,
+                col: pos.col,
+                match_start: m.start,
+                match_end: m.end,
+                line_text,
+            });
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 #[cfg(test)]
