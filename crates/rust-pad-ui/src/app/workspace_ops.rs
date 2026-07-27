@@ -806,7 +806,20 @@ impl App {
             SidebarAction::CopyPath { path, root, scope } => {
                 self.handle_copy_path(&path, &root, scope);
             }
+            SidebarAction::SearchInFolder(path) => {
+                self.open_folder_search(path);
+            }
             SidebarAction::None => {}
+        }
+    }
+
+    /// Opens the Find dialog primed to search `folder`'s contents, kicking off a
+    /// search immediately when a query is already present. Shared by the sidebar
+    /// and file-tab "Search in Folder" actions.
+    pub(crate) fn open_folder_search(&mut self, folder: std::path::PathBuf) {
+        self.find_replace.open_folder_search(folder);
+        if !self.find_replace.find_text.trim().is_empty() {
+            self.handle_search_action(crate::dialogs::FindReplaceAction::FindAll);
         }
     }
 

@@ -302,25 +302,79 @@ fn show_legacy_dialog<R>(
         .and_then(|inner| inner.inner)
 }
 
+/// Runs `add` with the button's hovered/active frame geometry pinned to the
+/// inactive state, then restores the visuals.
+///
+/// egui derives a bordered button's `inner_margin` from `button_padding +
+/// expansion - bg_stroke.width`, and the default per-state `bg_stroke.width`
+/// jumps from 0 (inactive) to 1 (hovered), so a custom-bordered button would
+/// shrink a pixel on hover and its neighbours would reflow (the "jiggle").
+/// Pinning `bg_stroke.width` and `expansion` keeps the allocated size, and thus
+/// every button's position, constant across states. The values are restored
+/// afterwards so the tweak never leaks to later widgets sharing the `Ui`.
+fn with_stable_hover_geometry<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let width = ui.visuals().widgets.inactive.bg_stroke.width;
+    let expansion = ui.visuals().widgets.inactive.expansion;
+    let saved = {
+        let w = &ui.visuals().widgets;
+        (
+            w.hovered.bg_stroke.width,
+            w.hovered.expansion,
+            w.active.bg_stroke.width,
+            w.active.expansion,
+        )
+    };
+    {
+        let w = &mut ui.visuals_mut().widgets;
+        w.hovered.bg_stroke.width = width;
+        w.hovered.expansion = expansion;
+        w.active.bg_stroke.width = width;
+        w.active.expansion = expansion;
+    }
+    let result = add(ui);
+    {
+        let w = &mut ui.visuals_mut().widgets;
+        w.hovered.bg_stroke.width = saved.0;
+        w.hovered.expansion = saved.1;
+        w.active.bg_stroke.width = saved.2;
+        w.active.expansion = saved.3;
+    }
+    result
+}
+
+/// Paints a keyboard-focus ring for a dialog button: a 2 px inside stroke in
+/// `color`, more prominent than the 1 px hover accent so a tabbed-to button is
+/// unmistakable. `color` is the accent for secondary buttons and `on_accent`
+/// for the accent-filled primary button, so the ring reads on the fill.
+fn button_focus_ring(painter: &Painter, rect: Rect, radius: CornerRadius, color: Color32) {
+    painter.rect_stroke(rect, radius, Stroke::new(2.0, color), StrokeKind::Inside);
+}
+
 /// A primary dialog button: accent fill, on-accent semibold text.
 pub fn primary_button(ui: &mut egui::Ui, chrome_theme: &ChromeTheme, text: &str) -> egui::Response {
-    let response = ui.add(
-        egui::Button::new(
-            egui::RichText::new(text)
-                .color(chrome_theme.on_accent)
-                .font(FontId::new(
-                    13.0,
-                    egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
-                )),
+    let response = with_stable_hover_geometry(ui, |ui| {
+        ui.add(
+            egui::Button::new(
+                egui::RichText::new(text)
+                    .color(chrome_theme.on_accent)
+                    .font(FontId::new(
+                        13.0,
+                        egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+                    )),
+            )
+            .fill(chrome_theme.accent),
         )
-        .fill(chrome_theme.accent),
-    );
+    });
     if response.hovered() {
         ui.painter().rect_filled(
             response.rect,
             ui.visuals().widgets.inactive.corner_radius,
             Color32::from_white_alpha(10),
         );
+    }
+    if response.has_focus() {
+        let radius = ui.visuals().widgets.inactive.corner_radius;
+        button_focus_ring(ui.painter(), response.rect, radius, chrome_theme.on_accent);
     }
     response
 }
@@ -332,11 +386,13 @@ pub fn secondary_button(
     chrome_theme: &ChromeTheme,
     text: &str,
 ) -> egui::Response {
-    let response = ui.add(
-        egui::Button::new(text)
-            .fill(chrome_theme.button_bg)
-            .stroke(Stroke::new(1.0, chrome_theme.border)),
-    );
+    let response = with_stable_hover_geometry(ui, |ui| {
+        ui.add(
+            egui::Button::new(text)
+                .fill(chrome_theme.button_bg)
+                .stroke(Stroke::new(1.0, chrome_theme.border)),
+        )
+    });
     if response.hovered() {
         ui.painter().rect_stroke(
             response.rect,
@@ -344,6 +400,10 @@ pub fn secondary_button(
             Stroke::new(1.0, chrome_theme.accent),
             StrokeKind::Inside,
         );
+    }
+    if response.has_focus() {
+        let radius = ui.visuals().widgets.inactive.corner_radius;
+        button_focus_ring(ui.painter(), response.rect, radius, chrome_theme.accent);
     }
     response
 }
@@ -571,6 +631,89 @@ mod tests {
             assert!(!primary.clicked());
             let secondary = secondary_button(ui, &chrome_theme, "Cancel");
             assert!(!secondary.clicked());
+        });
+    }
+
+    /// The hover jiggle came from egui shrinking a bordered button's
+    /// `inner_margin` by the hovered `bg_stroke.width`. The helper must pin the
+    /// hovered/active widths to inactive during the add and restore them after.
+    #[test]
+    fn stable_hover_geometry_pins_then_restores() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(screen_input(), |ui| {
+            ui.visuals_mut().widgets.inactive.bg_stroke.width = 0.0;
+            ui.visuals_mut().widgets.hovered.bg_stroke.width = 1.0;
+            ui.visuals_mut().widgets.active.bg_stroke.width = 1.0;
+            ui.visuals_mut().widgets.hovered.expansion = 1.0;
+
+            let inside = with_stable_hover_geometry(ui, |ui| {
+                (
+                    ui.visuals().widgets.hovered.bg_stroke.width,
+                    ui.visuals().widgets.active.bg_stroke.width,
+                    ui.visuals().widgets.hovered.expansion,
+                )
+            });
+            assert_eq!(inside, (0.0, 0.0, 0.0), "pinned to inactive inside the add");
+
+            assert_eq!(
+                ui.visuals().widgets.hovered.bg_stroke.width,
+                1.0,
+                "hovered width restored after the add"
+            );
+            assert_eq!(
+                ui.visuals().widgets.hovered.expansion,
+                1.0,
+                "hovered expansion restored after the add"
+            );
+        });
+    }
+
+    /// End-to-end: a secondary button keeps the same width whether or not the
+    /// pointer hovers it, so neighbours never reflow.
+    #[test]
+    fn secondary_button_width_is_stable_across_hover() {
+        let ctx = egui::Context::default();
+        register_semibold_alias(&ctx);
+        let chrome_theme = ChromeTheme::default();
+
+        // Warm-up frame to learn the button's placement.
+        let mut center = Pos2::ZERO;
+        let _ = ctx.run_ui(screen_input(), |ui| {
+            center = secondary_button(ui, &chrome_theme, "Sample").rect.center();
+        });
+
+        let measure = |pointer: Pos2| -> (f32, bool) {
+            let mut raw = screen_input();
+            raw.events.push(egui::Event::PointerMoved(pointer));
+            let mut out = (0.0, false);
+            let _ = ctx.run_ui(raw, |ui| {
+                let r = secondary_button(ui, &chrome_theme, "Sample");
+                out = (r.rect.width(), r.hovered());
+            });
+            out
+        };
+
+        let (width_rest, _) = measure(Pos2::new(790.0, 590.0));
+        let (width_hover, hovered) = measure(center);
+        assert!(
+            hovered,
+            "pointer over the button should register as hovered"
+        );
+        assert!(
+            (width_hover - width_rest).abs() < 0.5,
+            "button width changed on hover: rest {width_rest} vs hover {width_hover}"
+        );
+    }
+
+    /// A focused button paints its focus ring without panicking, on every
+    /// metric style (the ring reads its radius from the widget visuals).
+    #[test]
+    fn button_focus_ring_paints_without_panicking() {
+        run_with_painter(|painter| {
+            let chrome = ChromeTheme::default();
+            let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(90.0, 26.0));
+            button_focus_ring(painter, rect, CornerRadius::same(4), chrome.accent);
+            button_focus_ring(painter, rect, CornerRadius::same(0), chrome.on_accent);
         });
     }
 

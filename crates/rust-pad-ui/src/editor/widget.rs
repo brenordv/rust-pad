@@ -116,6 +116,12 @@ pub struct EditorWidget<'a> {
     /// Maximum allowed zoom level (global setting). Used to clamp per-document
     /// zoom when the user zooms via Ctrl+scroll.
     pub max_zoom_level: f32,
+    /// Test-only capture of the vertical scrollbar track computed during the
+    /// last `show`. `None` means the editor decided it needs no vertical
+    /// scrollbar. Split-view tests read this to assert each pane renders its
+    /// scrollbar within bounds.
+    #[cfg(test)]
+    pub(crate) test_vscroll_track: Option<Rect>,
 }
 
 impl<'a> EditorWidget<'a> {
@@ -136,6 +142,8 @@ impl<'a> EditorWidget<'a> {
             bookmarks: None,
             auto_focus: true,
             max_zoom_level: 15.0,
+            #[cfg(test)]
+            test_vscroll_track: None,
         }
     }
 
@@ -178,6 +186,10 @@ impl<'a> EditorWidget<'a> {
 
         let pointer_pos = ui.input(|i| i.pointer.interact_pos());
         let (vscroll_track, hscroll_track) = Self::compute_scrollbar_tracks(rect, &layout);
+        #[cfg(test)]
+        {
+            self.test_vscroll_track = vscroll_track;
+        }
         self.detect_scrollbar_drag(&response, vscroll_track, hscroll_track);
 
         let pointer_on_scrollbar =

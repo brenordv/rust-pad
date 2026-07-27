@@ -40,8 +40,9 @@ simple, stable, and fast as possible.
 
 ### Editing
 - **Multi-tab interface** with session restore (reopen files from last session) and horizontal tab scrolling when tabs overflow
-- **Find/Replace** with regex support and search across all open tabs. Non-modal (keeps editing enabled, dims when it loses focus), auto-focuses the find field on open, pre-fills it with the current single-line selection, scrolls the viewport to the active match, and offers a session search-history dropdown
-- **Find All results panel**: the **Find All** button lists every match; in the current tab or across all open tabs, following the Scope selector, in a panel above the status bar. Each result shows `tab:line  text`; double-click a result to jump to that match in its tab
+- **Find/Replace** with regex support and search across the current tab, all open tabs, or a folder on disk. Non-modal (keeps editing enabled, dims when it loses focus), auto-focuses the find field on open, pre-fills it with the current single-line selection, scrolls the viewport to the active match, and offers a session search-history dropdown. Keyboard focus stays inside the dialog (Tab, Shift+Tab, and the arrow keys cycle its own controls rather than escaping to the editor), and the button with focus shows a focus ring so it is clear what Enter or Space will trigger
+- **Find All results panel**: the **Find All** button lists every match in a panel above the status bar. The Scope selector chooses the current tab, all open tabs, or a folder; in the Folder scope a **Choose Folder...** button picks the folder to search. Each result shows `location:line  text`; double-click a result to jump to it, opening the file first for folder matches. When a folder search hits a limit, the panel reports how many results were truncated and how many files were skipped
+- **Search in Folder**: search the contents of every text file under a folder without opening them. Right-click a folder (or the workspace root) in the sidebar, or a file tab, and choose "Search in Folder..."; or select the Folder scope in Find/Replace. The search runs off the UI thread, skips binary and oversized files and VCS metadata (`.git`, `.hg`, `.svn`), stays within the chosen folder (symlinks and junctions pointing outside it are not followed), and is bounded so a huge tree cannot hang the app
 - **Multi-cursor editing**: `Ctrl+Click` to add cursors, `Alt+Shift+Arrow` to add the cursors above/below (with shrink support), `Alt+Shift+Period` to select next occurrence
 - **Undo/Redo** with persistent history (survives application restart)
 - **Auto-indent**: pressing Enter inherits the leading whitespace from the current line
@@ -57,6 +58,8 @@ simple, stable, and fast as possible.
 - **Drag-and-drop reordering**: click and drag any tab horizontally to reorder it. A vertical accent indicator shows the drop target. `Escape` cancels an in-progress drag. Drags are clamped to the pinned/unpinned section
 - **Bulk close operations**: "Close Unchanged Tabs", "Close Others", and "Close All" available from the File menu and tab context menu. All bulk operations skip pinned tabs and prompt for unsaved changes
 - **Move to other pane**: right-click any tab to move it to the other pane while split view is active
+- **Split from a tab**: right-click a tab and choose "Split Vertically" or "Split Horizontally" to move that file into a new pane (shown when more than one tab is open)
+- **Search a tab's folder**: right-click a tab and choose "Search in Containing Folder..." to run a folder search over that file's directory
 
 ### Line Operations
 - Sort lines ascending/descending
@@ -117,7 +120,7 @@ simple, stable, and fast as possible.
 - **Window geometry persistence**: size, position, and maximized state are restored on launch, with off-screen correction
 - **Settings dialog** with six tabs: General, Editor, File Dialogs, Auto-Save, History, Workspace
 - **Status bar** displaying: cursor position, encoding, line ending, indent style, character count, file size, zoom level, last saved time, and PDF generation indicator
-- **Split view**: divide the editor into two panes with a draggable divider, vertically (`Ctrl+Alt+V`) or horizontally (`Ctrl+Alt+H`). Each pane has its own tab strip and active tab. Double-click the divider to reset to 50/50. A 1px accent border highlights the focused pane. Layout (orientation, divider ratio, per-pane tab assignment, focused pane) is persisted across restarts. Use **View → Remove Split** to collapse back to a single pane
+- **Split view**: divide the editor into two panes with a draggable divider, vertically (`Ctrl+Alt+V`) or horizontally (`Ctrl+Alt+H`), or from a tab's right-click menu. Each pane has its own tab strip and active tab. Double-click the divider to reset to 50/50. A 1px accent border highlights the focused pane. Layout (orientation, divider ratio, per-pane tab assignment, focused pane) is persisted across restarts. Use **View → Remove Split** to collapse back to a single pane
 - **Synchronized scrolling** (`Ctrl+Alt+S`): mirror user-initiated scroll deltas between panes for side-by-side diffing. Programmatic jumps (Go to Line, Find/Replace, bookmarks) do not propagate. Configurable horizontal sync. Gated on split view being active
 - **Word wrap** toggle. With wrap on, arrow Up/Down moves one *visual* (wrapped) line at a time with a sticky column, rather than skipping whole logical lines
 - **Special character visualization** (whitespace, line endings)
@@ -415,7 +418,6 @@ The following features are planned for future releases, inspired by Notepad++ fu
 
 ### File
 - [ ] Open containing folder for the active tab / open in terminal (folders in the workspace tree already offer "Open in File Explorer")
-- [ ] Find in Files (search across files in a directory)
 
 ### Macro Support
 - [ ] Record/playback macros (capture sequences of edits)

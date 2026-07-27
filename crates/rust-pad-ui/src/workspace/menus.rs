@@ -206,6 +206,10 @@ pub(crate) fn show_directory_context_menu(
         *ctx.action = SidebarAction::ReloadFromDisk(dir_path.to_path_buf());
         ui.close();
     }
+    if ui.button("Search in Folder...").clicked() {
+        *ctx.action = SidebarAction::SearchInFolder(dir_path.to_path_buf());
+        ui.close();
+    }
     ui.separator();
     show_new_entry_menu(ui, dir_path, new_entry_request);
     ui.separator();
@@ -248,6 +252,10 @@ pub(crate) fn show_root_context_menu(
         }
         if ui.button("Reload from disk").clicked() {
             *context_action = SidebarAction::ReloadFromDisk(root_path.to_path_buf());
+            ui.close();
+        }
+        if ui.button("Search in Folder...").clicked() {
+            *context_action = SidebarAction::SearchInFolder(root_path.to_path_buf());
             ui.close();
         }
         ui.separator();

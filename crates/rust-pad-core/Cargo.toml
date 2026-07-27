@@ -13,3 +13,6 @@ chardetng.workspace = true
 serde.workspace = true
 rust-pad-mod-history.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

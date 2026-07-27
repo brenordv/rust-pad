@@ -79,6 +79,16 @@ impl App {
         }
     }
 
+    /// Moves the tab at `idx` into a new split with the given orientation.
+    ///
+    /// The tab is activated first so [`enable_split`](Self::enable_split) places
+    /// it in the right (or bottom) pane, matching "move this file into a split".
+    /// Invoked from the tab context menu.
+    pub(crate) fn split_tab_into_pane(&mut self, idx: usize, orientation: SplitOrientation) {
+        self.tabs.switch_to(idx);
+        self.enable_split(orientation);
+    }
+
     /// Disables split view, returning to a single editor pane.
     pub(crate) fn remove_split(&mut self) {
         self.split = None;
@@ -224,6 +234,10 @@ impl App {
         let Some(state) = self.split.as_ref() else {
             return;
         };
+        #[cfg(test)]
+        {
+            self.test_pane_probe.clear();
+        }
         let orientation = state.orientation;
         let mut ratio = state.divider_ratio;
 
@@ -321,7 +335,10 @@ impl App {
 
                 self.show_pane_tab_bar(ui, pane);
 
-                let response = {
+                let response;
+                #[cfg(test)]
+                let vscroll_track;
+                {
                     let doc = self.tabs.pane_active_doc_mut(pane);
                     let mut editor = EditorWidget::new(
                         doc,
@@ -336,8 +353,17 @@ impl App {
                     editor.auto_focus = focused;
                     editor.max_zoom_level = self.theme_ctrl.max_zoom_level;
                     editor.bookmarks = Some(&self.bookmarks);
-                    editor.show(ui)
-                };
+                    response = editor.show(ui);
+                    #[cfg(test)]
+                    {
+                        vscroll_track = editor.test_vscroll_track;
+                    }
+                }
+                #[cfg(test)]
+                {
+                    self.test_pane_probe
+                        .push((pane, pane_rect, response.rect, vscroll_track));
+                }
                 self.editor_kbd_focus |= response.has_focus();
                 response.context_menu(|ui| {
                     self.show_editor_context_menu(ui);
@@ -562,6 +588,110 @@ mod tests {
             SplitOrientation::Horizontal
         );
         assert!((restored.split.as_ref().unwrap().divider_ratio - 0.42).abs() < 1e-6);
+    }
+
+    #[test]
+    fn split_tab_into_pane_moves_chosen_tab_into_second_pane() {
+        let mut app = super::super::tests::test_app();
+        app.tabs.new_tab(); // doc 1
+        app.tabs.new_tab(); // doc 2
+        assert_eq!(app.tabs.tab_count(), 3);
+        app.tabs.switch_to(0); // active is a different tab than the one we split
+
+        app.split_tab_into_pane(2, SplitOrientation::Vertical);
+
+        assert!(app.is_split());
+        assert_eq!(
+            app.split.as_ref().unwrap().orientation,
+            SplitOrientation::Vertical
+        );
+        let panes = app.tabs.panes.as_ref().unwrap();
+        assert_eq!(
+            panes.right_order,
+            vec![2],
+            "the chosen tab should move into the right pane"
+        );
+        assert_eq!(panes.focused, PaneId::Right);
+    }
+
+    #[test]
+    fn split_tab_into_pane_honors_horizontal_orientation() {
+        let mut app = super::super::tests::test_app();
+        app.tabs.new_tab();
+        app.split_tab_into_pane(1, SplitOrientation::Horizontal);
+        assert!(app.is_split());
+        assert_eq!(
+            app.split.as_ref().unwrap().orientation,
+            SplitOrientation::Horizontal
+        );
+    }
+
+    #[test]
+    fn left_pane_editor_stays_within_pane_bounds() {
+        let mut app = super::super::tests::test_app();
+
+        // Tall document in tab 0 so the LEFT pane needs a vertical scrollbar.
+        let tall = "line of text\n".repeat(600);
+        app.tabs.documents[0].buffer = rust_pad_core::buffer::TextBuffer::from(tall.as_str());
+
+        // A second (short) tab becomes active; splitting moves the ACTIVE doc
+        // into the RIGHT pane, leaving the tall doc in the LEFT pane.
+        app.tabs.new_tab();
+        app.tabs.switch_to(1);
+        assert_eq!(app.tabs.tab_count(), 2);
+        app.toggle_split_vertical();
+        assert!(app.is_split());
+
+        let ctx = egui::Context::default();
+        // Bind the semibold alias the chrome/tab painters expect.
+        {
+            let mut fonts = egui::FontDefinitions::default();
+            let proportional = fonts
+                .families
+                .get(&egui::FontFamily::Proportional)
+                .cloned()
+                .unwrap_or_default();
+            fonts.families.insert(
+                egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+                proportional,
+            );
+            ctx.set_fonts(fonts);
+        }
+        for _ in 0..2 {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                app.render_split_panes(ui, false, false);
+            });
+        }
+
+        let (_, pane_rect, editor_rect, vscroll_track) = app
+            .test_pane_probe
+            .iter()
+            .find(|(p, _, _, _)| *p == PaneId::Left)
+            .copied()
+            .expect("left pane should have been rendered");
+
+        // The editor must stay inside its pane...
+        assert!(
+            editor_rect.max.x <= pane_rect.max.x + 0.5,
+            "left editor overruns its pane: editor.max.x={} pane.max.x={} (delta {})",
+            editor_rect.max.x,
+            pane_rect.max.x,
+            editor_rect.max.x - pane_rect.max.x
+        );
+        // ...and a tall document must actually get a vertical scrollbar, drawn
+        // within the pane (not clipped away past the divider).
+        let track = vscroll_track.expect("tall left document must render a vertical scrollbar");
+        assert!(
+            track.min.x >= pane_rect.min.x - 0.5 && track.max.x <= pane_rect.max.x + 0.5,
+            "left scrollbar track {track:?} falls outside its pane {pane_rect:?}"
+        );
     }
 
     #[test]

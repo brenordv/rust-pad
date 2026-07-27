@@ -13,8 +13,11 @@ pub struct FindReplaceDialog {
     pub replace_text: String,
     pub options: SearchOptions,
     pub engine: SearchEngine,
-    /// Whether to search the current tab or all open tabs.
+    /// Whether to search the current tab, all open tabs, or a folder.
     pub scope: SearchScope,
+    /// Folder to search when `scope` is [`SearchScope::Folder`]. Set by the
+    /// sidebar/tab "Search in folder" actions.
+    pub folder_path: Option<std::path::PathBuf>,
     /// Status message shown in the dialog.
     pub status: String,
     /// Snapshot of options from the previous frame, used to detect checkbox changes.
@@ -42,6 +45,7 @@ impl FindReplaceDialog {
             options: SearchOptions::default(),
             engine: SearchEngine::new(),
             scope: SearchScope::default(),
+            folder_path: None,
             status: String::new(),
             prev_options_key: String::new(),
             focus_requested: false,
@@ -74,6 +78,16 @@ impl FindReplaceDialog {
         self.visible = false;
     }
 
+    /// Opens the dialog primed to search `folder` (Folder scope). The find text
+    /// is preserved so a repeat search reuses the last query.
+    pub fn open_folder_search(&mut self, folder: std::path::PathBuf) {
+        self.visible = true;
+        self.focus_requested = true;
+        self.scope = SearchScope::Folder;
+        self.folder_path = Some(folder);
+        self.status.clear();
+    }
+
     /// Records the current find text into the search history.
     ///
     /// Deduplicates by moving an existing entry to the front. Caps at 20 entries.
@@ -90,12 +104,13 @@ impl FindReplaceDialog {
     /// Builds a key string from the current search parameters for change detection.
     fn options_key(&self) -> String {
         format!(
-            "{}:{}:{}:{}:{:?}",
+            "{}:{}:{}:{}:{:?}:{:?}",
             self.find_text,
             self.options.case_sensitive,
             self.options.whole_word,
             self.options.use_regex,
             self.scope,
+            self.folder_path,
         )
     }
 
@@ -130,6 +145,13 @@ impl FindReplaceDialog {
         let mut replace_text = std::mem::take(&mut self.replace_text);
         let mut focus_requested = self.focus_requested;
         let mut has_focus = false;
+        // Sentinels bracket the body so Tab/Shift+Tab focus cannot escape the
+        // dialog: tabbing past an end lands on a sentinel, which the redirect
+        // below bounces back to the opposite end. The header close button
+        // renders before the top sentinel, so it sits outside this ring and is
+        // reached by mouse or Escape rather than Tab.
+        let sentinel_top = egui::Id::new("find_replace_focus_sentinel_top");
+        let sentinel_bottom = egui::Id::new("find_replace_focus_sentinel_bottom");
         chrome::show_dialog(
             ctx,
             "Find and Replace",
@@ -144,6 +166,8 @@ impl FindReplaceDialog {
             },
             |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
+                focus_sentinel(ui, sentinel_top);
+                let mut find_id: Option<egui::Id> = None;
                 Self::show_find_input(
                     ui,
                     &mut find_text,
@@ -153,6 +177,7 @@ impl FindReplaceDialog {
                     &mut has_focus,
                     chrome_theme,
                     metrics,
+                    &mut find_id,
                 );
                 Self::show_replace_input(
                     ui,
@@ -162,9 +187,16 @@ impl FindReplaceDialog {
                     metrics,
                 );
                 ui.add_space(4.0);
-                Self::show_search_options(ui, &mut self.options, &mut self.scope);
+                Self::show_search_options(
+                    ui,
+                    &mut self.options,
+                    &mut self.scope,
+                    self.folder_path.as_deref(),
+                    &mut action,
+                    chrome_theme,
+                );
                 ui.add_space(4.0);
-                Self::show_action_buttons(ui, &mut action, chrome_theme);
+                let last_button_id = Self::show_action_buttons(ui, &mut action, chrome_theme);
                 if !self.status.is_empty() {
                     // Match-count footer.
                     ui.add_space(2.0);
@@ -174,6 +206,24 @@ impl FindReplaceDialog {
                             .small()
                             .color(chrome_theme.text_muted),
                     );
+                }
+                focus_sentinel(ui, sentinel_bottom);
+
+                // Trap focus inside the dialog. A sentinel only holds focus for
+                // the instant the user tabs past an end; redirect to the
+                // opposite control and repaint so the invisible sentinel is
+                // never the visibly-focused widget.
+                let focused = ui.memory(|m| m.focused());
+                if focused == Some(sentinel_bottom) {
+                    if let Some(id) = find_id {
+                        ui.memory_mut(|m| m.request_focus(id));
+                        ui.ctx().request_repaint();
+                    }
+                } else if focused == Some(sentinel_top) {
+                    if let Some(id) = last_button_id {
+                        ui.memory_mut(|m| m.request_focus(id));
+                        ui.ctx().request_repaint();
+                    }
                 }
             },
         );
@@ -192,6 +242,9 @@ impl FindReplaceDialog {
     }
 
     /// Renders the find text input field with optional search history dropdown.
+    ///
+    /// Writes the find field's widget id into `find_id` so `show` can redirect
+    /// trapped focus back to it.
     #[allow(clippy::too_many_arguments)]
     fn show_find_input(
         ui: &mut Ui,
@@ -202,11 +255,13 @@ impl FindReplaceDialog {
         has_focus: &mut bool,
         chrome_theme: &ChromeTheme,
         metrics: &Metrics,
+        find_id: &mut Option<egui::Id>,
     ) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label("Find:      ");
             let find_response = ui.text_edit_singleline(find_text);
+            *find_id = Some(find_response.id);
             *has_focus |= find_response.has_focus();
             if find_response.has_focus() {
                 chrome::focus_ring(ui.painter(), find_response.rect, chrome_theme, metrics);
@@ -257,59 +312,106 @@ impl FindReplaceDialog {
     }
 
     /// Renders search option checkboxes and scope radio buttons.
-    fn show_search_options(ui: &mut Ui, options: &mut SearchOptions, scope: &mut SearchScope) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            ui.checkbox(&mut options.case_sensitive, "Case sensitive");
-            ui.checkbox(&mut options.whole_word, "Whole word");
-            ui.checkbox(&mut options.use_regex, "Regex");
-        });
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            ui.label("Scope:");
-            if ui
-                .radio(*scope == SearchScope::CurrentTab, "Current tab")
-                .clicked()
-            {
-                *scope = SearchScope::CurrentTab;
-            }
-            if ui
-                .radio(*scope == SearchScope::AllTabs, "All tabs")
-                .clicked()
-            {
-                *scope = SearchScope::AllTabs;
-            }
-        });
-    }
-
-    /// Renders the Find Next / Find Prev / Replace / Replace All buttons.
-    /// Find Next is the primary action; the rest render as secondary.
-    fn show_action_buttons(
+    fn show_search_options(
         ui: &mut Ui,
+        options: &mut SearchOptions,
+        scope: &mut SearchScope,
+        folder_path: Option<&std::path::Path>,
         action: &mut Option<FindReplaceAction>,
         chrome_theme: &ChromeTheme,
     ) {
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            let case = ui.checkbox(&mut options.case_sensitive, "Case sensitive");
+            contain_arrows(ui, &case);
+            let word = ui.checkbox(&mut options.whole_word, "Whole word");
+            contain_arrows(ui, &word);
+            let regex = ui.checkbox(&mut options.use_regex, "Regex");
+            contain_arrows(ui, &regex);
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.label("Scope:");
+            let current = ui.radio(*scope == SearchScope::CurrentTab, "Current tab");
+            if current.clicked() {
+                *scope = SearchScope::CurrentTab;
+            }
+            contain_arrows(ui, &current);
+            let all = ui.radio(*scope == SearchScope::AllTabs, "All tabs");
+            if all.clicked() {
+                *scope = SearchScope::AllTabs;
+            }
+            contain_arrows(ui, &all);
+            let folder = ui.radio(*scope == SearchScope::Folder, "Folder");
+            if folder.clicked() {
+                *scope = SearchScope::Folder;
+            }
+            contain_arrows(ui, &folder);
+        });
+        if *scope == SearchScope::Folder {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let choose = chrome::secondary_button(ui, chrome_theme, "Choose Folder...");
+                if choose.clicked() {
+                    *action = Some(FindReplaceAction::ChooseFolder);
+                }
+                contain_arrows(ui, &choose);
+                let text = match folder_path {
+                    Some(p) => format!("Folder: {}", p.display()),
+                    None => "no folder chosen yet".to_string(),
+                };
+                ui.label(egui::RichText::new(text).small());
+            });
+        }
+    }
+
+    /// Renders the Find Next / Find Prev / Replace / Replace All buttons.
+    /// Find Next is the primary action; the rest render as secondary.
+    ///
+    /// Returns the id of the last button so `show` can redirect trapped focus
+    /// (Shift+Tab past the top) onto it.
+    fn show_action_buttons(
+        ui: &mut Ui,
+        action: &mut Option<FindReplaceAction>,
+        chrome_theme: &ChromeTheme,
+    ) -> Option<egui::Id> {
+        let mut last_id = None;
+        ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if chrome::primary_button(ui, chrome_theme, "Find Next").clicked() {
+            let find_next = chrome::primary_button(ui, chrome_theme, "Find Next");
+            if find_next.clicked() {
                 *action = Some(FindReplaceAction::FindNext);
             }
-            if chrome::secondary_button(ui, chrome_theme, "Find Prev").clicked() {
+            contain_arrows(ui, &find_next);
+
+            let find_prev = chrome::secondary_button(ui, chrome_theme, "Find Prev");
+            if find_prev.clicked() {
                 *action = Some(FindReplaceAction::FindPrev);
             }
-            if chrome::secondary_button(ui, chrome_theme, "Find All")
-                .on_hover_text("List every match (current tab or all tabs) in a results panel")
-                .clicked()
-            {
+            contain_arrows(ui, &find_prev);
+
+            let find_all = chrome::secondary_button(ui, chrome_theme, "Find All")
+                .on_hover_text("List every match (current tab or all tabs) in a results panel");
+            if find_all.clicked() {
                 *action = Some(FindReplaceAction::FindAll);
             }
-            if chrome::secondary_button(ui, chrome_theme, "Replace").clicked() {
+            contain_arrows(ui, &find_all);
+
+            let replace = chrome::secondary_button(ui, chrome_theme, "Replace");
+            if replace.clicked() {
                 *action = Some(FindReplaceAction::Replace);
             }
-            if chrome::secondary_button(ui, chrome_theme, "Replace All").clicked() {
+            contain_arrows(ui, &replace);
+
+            let replace_all = chrome::secondary_button(ui, chrome_theme, "Replace All");
+            if replace_all.clicked() {
                 *action = Some(FindReplaceAction::ReplaceAll);
             }
+            contain_arrows(ui, &replace_all);
+
+            last_id = Some(replace_all.id);
         });
+        last_id
     }
 
     /// Detects parameter changes and triggers a re-search if needed.
@@ -335,6 +437,38 @@ fn dialog_dimmed(editor_focused: bool, focus_requested: bool) -> bool {
     editor_focused && !focus_requested
 }
 
+/// An invisible, focusable, zero-interaction widget used to trap Tab focus
+/// inside the dialog. One is placed first and one last in the body; when the
+/// user tabs past an end the sentinel gains focus for an instant, and `show`
+/// redirects focus to the opposite control. Rendered via `interact`, so it
+/// claims no layout space and paints nothing.
+fn focus_sentinel(ui: &mut Ui, id: egui::Id) {
+    let rect = egui::Rect::from_min_size(ui.min_rect().min, egui::vec2(1.0, 1.0));
+    let _ = ui.interact(rect, id, egui::Sense::focusable_noninteractive());
+}
+
+/// Locks arrow keys to `response`'s widget while it holds focus, so egui does
+/// not treat them as focus navigation and move focus out of the dialog. This is
+/// only for the dialog's non-text controls (buttons, checkboxes, radios); text
+/// fields are left alone because they own arrows for their cursor. Tab stays
+/// free (the sentinel trap owns it) and Escape stays free (the global close
+/// handler owns it).
+fn contain_arrows(ui: &Ui, response: &egui::Response) {
+    if response.has_focus() {
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    tab: false,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: false,
+                },
+            );
+        });
+    }
+}
+
 /// Actions that the Find/Replace dialog can request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FindReplaceAction {
@@ -345,9 +479,12 @@ pub enum FindReplaceAction {
     ReplaceAll,
     /// Collect every match in the current scope into the results panel.
     FindAll,
+    /// Open a folder picker so the user can choose the folder to search
+    /// (Folder scope). Handled by the app, which owns the file dialog.
+    ChooseFolder,
 }
 
-/// Whether to search in the current tab or all open tabs.
+/// Which set of content the find operation targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchScope {
     /// Search only in the active tab.
@@ -355,6 +492,8 @@ pub enum SearchScope {
     CurrentTab,
     /// Search across all open tabs.
     AllTabs,
+    /// Search files under a chosen folder (Find All only; runs off-thread).
+    Folder,
 }
 
 /// Result of parsing a "Go to" input string.
@@ -792,5 +931,209 @@ mod tests {
     fn test_find_replace_has_focus_default_false() {
         let dialog = FindReplaceDialog::new();
         assert!(!dialog.has_focus);
+    }
+
+    // ── SearchScope::Folder priming ──────────────────────────────────
+
+    #[test]
+    fn open_folder_search_sets_scope_and_folder() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.open_folder_search(std::path::PathBuf::from("some_dir"));
+        assert!(dialog.visible);
+        assert!(dialog.focus_requested);
+        assert_eq!(dialog.scope, SearchScope::Folder);
+        assert_eq!(
+            dialog.folder_path.as_deref(),
+            Some(std::path::Path::new("some_dir"))
+        );
+    }
+
+    #[test]
+    fn options_key_reflects_folder_change() {
+        let mut dialog = FindReplaceDialog::new();
+        dialog.open_folder_search(std::path::PathBuf::from("dir_a"));
+        let key_a = dialog.options_key();
+        dialog.folder_path = Some(std::path::PathBuf::from("dir_b"));
+        assert_ne!(
+            key_a,
+            dialog.options_key(),
+            "switching folders re-keys the search"
+        );
+    }
+
+    // ── FindReplaceDialog: keyboard focus trap ───────────────────────
+
+    /// Maps the named semibold UI family onto the default proportional list so
+    /// the dialog header/primary button lay out in a bare test context.
+    fn register_semibold_alias(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        fonts.families.insert(
+            egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+            proportional,
+        );
+        ctx.set_fonts(fonts);
+    }
+
+    const BG_EDITOR: &str = "bg_editor_for_focus_test";
+
+    /// Runs one frame: a focusable background "editor" (as the real app renders
+    /// before its dialogs) plus the visible dialog, feeding `events`.
+    fn drive_dialog(ctx: &egui::Context, dialog: &mut FindReplaceDialog, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let chrome = ChromeTheme::default();
+        let metrics = Metrics::default();
+        let _ = ctx.run_ui(raw, |ui| {
+            // The editor is focusable (Sense::click_and_drag) in the app and is
+            // registered before the dialog, so it is a genuine spatial-nav / Tab
+            // escape target.
+            let _ = ui.interact(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 120.0)),
+                egui::Id::new(BG_EDITOR),
+                egui::Sense::click_and_drag(),
+            );
+            dialog.show(ui.ctx(), &chrome, &metrics, false);
+        });
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Opens the dialog and lets the initial focus request settle onto the find
+    /// field (two frames: request lands next frame).
+    fn open_and_settle(ctx: &egui::Context, dialog: &mut FindReplaceDialog) {
+        dialog.open();
+        drive_dialog(ctx, dialog, Vec::new());
+        drive_dialog(ctx, dialog, Vec::new());
+    }
+
+    fn focused(ctx: &egui::Context) -> Option<egui::Id> {
+        ctx.memory(|m| m.focused())
+    }
+
+    /// Tab and Shift+Tab cycle within the dialog and never land on the
+    /// background editor, and focus never rests on an invisible sentinel.
+    #[test]
+    fn tab_focus_never_escapes_the_dialog() {
+        let ctx = egui::Context::default();
+        register_semibold_alias(&ctx);
+        let mut dialog = FindReplaceDialog::new();
+        open_and_settle(&ctx, &mut dialog);
+
+        let bg = egui::Id::new(BG_EDITOR);
+        let sent_top = egui::Id::new("find_replace_focus_sentinel_top");
+        let sent_bot = egui::Id::new("find_replace_focus_sentinel_bottom");
+
+        for (shift, label) in [(false, "Tab"), (true, "Shift+Tab")] {
+            let mods = if shift {
+                egui::Modifiers::SHIFT
+            } else {
+                egui::Modifiers::NONE
+            };
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..14 {
+                drive_dialog(&ctx, &mut dialog, vec![key_event(egui::Key::Tab, mods)]);
+                drive_dialog(&ctx, &mut dialog, Vec::new()); // settle the redirect
+                let f = focused(&ctx);
+                assert_ne!(f, Some(bg), "{label} escaped to the background editor");
+                assert_ne!(f, Some(sent_top), "{label} left focus on the top sentinel");
+                assert_ne!(
+                    f,
+                    Some(sent_bot),
+                    "{label} left focus on the bottom sentinel"
+                );
+                if let Some(id) = f {
+                    seen.insert(id);
+                }
+            }
+            assert!(
+                seen.len() > 1,
+                "{label} did not move focus through multiple dialog widgets"
+            );
+        }
+    }
+
+    /// Arrow keys never move focus out of the dialog (spatial nav is contained).
+    #[test]
+    fn arrow_keys_never_escape_the_dialog() {
+        let ctx = egui::Context::default();
+        register_semibold_alias(&ctx);
+        let mut dialog = FindReplaceDialog::new();
+        open_and_settle(&ctx, &mut dialog);
+
+        let bg = egui::Id::new(BG_EDITOR);
+
+        // Tab into the controls and hold focus a frame so the arrow lock engages.
+        for _ in 0..9 {
+            drive_dialog(
+                &ctx,
+                &mut dialog,
+                vec![key_event(egui::Key::Tab, egui::Modifiers::NONE)],
+            );
+            drive_dialog(&ctx, &mut dialog, Vec::new());
+        }
+        for key in [
+            egui::Key::ArrowDown,
+            egui::Key::ArrowUp,
+            egui::Key::ArrowRight,
+            egui::Key::ArrowLeft,
+        ] {
+            drive_dialog(
+                &ctx,
+                &mut dialog,
+                vec![key_event(key, egui::Modifiers::NONE)],
+            );
+            drive_dialog(&ctx, &mut dialog, Vec::new());
+            assert_ne!(
+                focused(&ctx),
+                Some(bg),
+                "arrow {key:?} escaped the dialog to the background editor"
+            );
+        }
+    }
+
+    /// The Folder scope renders its Choose Folder button and folder label, and
+    /// tabbing through that extra control still never escapes the dialog.
+    #[test]
+    fn folder_scope_renders_and_stays_trapped() {
+        let ctx = egui::Context::default();
+        register_semibold_alias(&ctx);
+        let mut dialog = FindReplaceDialog::new();
+        dialog.open_folder_search(std::path::PathBuf::from("some_dir"));
+        drive_dialog(&ctx, &mut dialog, Vec::new());
+        drive_dialog(&ctx, &mut dialog, Vec::new());
+
+        let bg = egui::Id::new(BG_EDITOR);
+        for _ in 0..14 {
+            drive_dialog(
+                &ctx,
+                &mut dialog,
+                vec![key_event(egui::Key::Tab, egui::Modifiers::NONE)],
+            );
+            drive_dialog(&ctx, &mut dialog, Vec::new());
+            assert_ne!(
+                focused(&ctx),
+                Some(bg),
+                "Tab escaped the folder-scope dialog"
+            );
+        }
     }
 }

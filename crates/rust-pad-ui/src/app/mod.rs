@@ -6,6 +6,7 @@ mod auto_save;
 mod breadcrumb;
 pub(crate) mod chrome;
 mod clipboard;
+mod confirm_dialog;
 mod context_menu;
 mod drag_drop;
 mod editing;
@@ -57,6 +58,13 @@ use crate::tabs::TabManager;
 
 /// How often to flush undo history to disk (in seconds).
 const FLUSH_INTERVAL_SECS: u64 = 30;
+
+/// Choices in the unsaved-changes confirm dialog, in display order. Keyboard
+/// focus defaults to the last one (Cancel), the non-destructive choice.
+const CONFIRM_CLOSE_CHOICES: [&str; 3] = ["Save & Close", "Discard", "Cancel"];
+/// Choices in the reload confirm dialog, in display order. Focus defaults to
+/// the last one (Cancel); Reload discards unsaved edits.
+const CONFIRM_RELOAD_CHOICES: [&str; 2] = ["Reload", "Cancel"];
 
 /// Formats a path for **display**, stripping the Windows extended-length
 /// (`\\?\`) prefix that `std::fs::canonicalize` returns. `\\?\UNC\server\share`
@@ -171,9 +179,28 @@ pub struct App {
     config_save_blocked: bool,
     clipboard: Option<arboard::Clipboard>,
     dialog_state: DialogState,
+    /// Highlighted choice index for the active confirm dialog (close/reload).
+    /// Reset to the safe default whenever a confirm dialog is raised.
+    confirm_focus: usize,
+    /// Test-only capture of split-pane geometry for each pane rendered in the
+    /// last split frame: `(pane, pane_rect, editor_rect, vscroll_track)`. The
+    /// vscroll track is `None` when that pane's editor needs no vertical
+    /// scrollbar. Used to assert each pane's scrollbar renders within its pane.
+    #[cfg(test)]
+    pub(crate) test_pane_probe: Vec<(
+        crate::tabs::PaneId,
+        egui::Rect,
+        egui::Rect,
+        Option<egui::Rect>,
+    )>,
     pub find_replace: FindReplaceDialog,
     /// "Find All" results panel (Notepad++ style), populated on demand.
     pub find_results: find_results::FindResultsPanel,
+    /// Monotonic generation for folder searches; a worker result whose
+    /// generation is stale (a newer search was dispatched) is discarded.
+    folder_search_generation: u64,
+    /// Deferred navigation for a folder-search hit whose file is opening.
+    pending_find_nav: Option<search::PendingFindNav>,
     pub go_to_line: GoToLineDialog,
     bookmarks: BookmarkManager,
     last_flush: Instant,
@@ -587,6 +614,11 @@ impl App {
             config_save_blocked: config_report.save_blocked,
             clipboard: arboard::Clipboard::new().ok(),
             dialog_state: DialogState::None,
+            confirm_focus: 0,
+            folder_search_generation: 0,
+            pending_find_nav: None,
+            #[cfg(test)]
+            test_pane_probe: Vec::new(),
             find_replace: FindReplaceDialog::new(),
             find_results: find_results::FindResultsPanel::default(),
             go_to_line: GoToLineDialog::new(),
@@ -1067,7 +1099,10 @@ impl App {
                 IoResponse::FileRead { path, bytes } => {
                     self.io_activity.pending_reads =
                         self.io_activity.pending_reads.saturating_sub(1);
-                    self.try_open_file_from_bytes(path, bytes);
+                    self.try_open_file_from_bytes(path.clone(), bytes);
+                    // A folder-search hit may have opened this file to jump to
+                    // its match; do so now that the tab exists.
+                    self.apply_pending_find_nav(&path);
                 }
                 IoResponse::DialogFileSavedAs { path } => {
                     self.io_activity.dialog_open = false;
@@ -1131,6 +1166,10 @@ impl App {
                         self.io_activity.pending_saves.retain(|s| s.path != *p);
                         self.io_activity.pending_reads =
                             self.io_activity.pending_reads.saturating_sub(1);
+                        // A folder-search navigation waiting on this read cannot
+                        // complete; drop it so a later unrelated open of the same
+                        // path does not inherit a stale jump.
+                        self.clear_pending_find_nav(p);
                         // A clipboard read with a matching path is dropped
                         // here too; its failure mode is already surfaced
                         // through the generic I/O-error problem entry.
@@ -1138,6 +1177,7 @@ impl App {
                     }
                 }
                 IoResponse::FileTooLarge { path, message } => {
+                    self.clear_pending_find_nav(&path);
                     if let Some(pos) = self.pending_clipboard_reads.iter().position(|p| *p == path)
                     {
                         // Route to clipboard-specific channel instead of the
@@ -1163,6 +1203,17 @@ impl App {
                         self.io_activity.pending_reads.saturating_sub(1);
                     self.pending_clipboard_reads.retain(|p| *p != path);
                     self.complete_copy_contents(&path, &bytes);
+                }
+                IoResponse::FolderSearchResults {
+                    generation,
+                    root,
+                    outcome,
+                } => {
+                    // Drop a superseded search whose newer sibling was dispatched
+                    // while this one was still running.
+                    if generation == self.folder_search_generation {
+                        self.populate_folder_search_results(&root, outcome);
+                    }
                 }
             }
         }
@@ -1249,6 +1300,8 @@ impl App {
             "Document".to_string()
         };
 
+        let chrome = self.theme_ctrl.chrome.clone();
+        let mut chosen = None;
         egui::Window::new("Unsaved Changes")
             .collapsible(false)
             .resizable(false)
@@ -1258,38 +1311,63 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 ui.label(format!("'{title}' has unsaved changes. Close anyway?"));
                 ui.add_space(4.0);
-
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if ui.button("  Save & Close  ").clicked() {
-                        if idx < self.tabs.tab_count() {
-                            let doc = &mut self.tabs.documents[idx];
-                            if doc.file_path.is_some() {
-                                let _ = doc.save();
-                            }
-                            self.cleanup_session_for_tab(idx);
-                            self.tabs.close_tab(idx);
-                        }
-                        self.dialog_state = DialogState::None;
-                        self.continue_close_all();
-                    }
-                    if ui.button("  Discard  ").clicked() {
-                        self.cleanup_session_for_tab(idx);
-                        self.tabs.close_tab(idx);
-                        self.dialog_state = DialogState::None;
-                        self.continue_close_all();
-                    }
-                    if ui.button("  Cancel  ").clicked() {
-                        self.dialog_state = DialogState::None;
-                        self.closing_all = false;
-                    }
-                });
+                chosen = confirm_dialog::render_choice_row(
+                    ui,
+                    &CONFIRM_CLOSE_CHOICES,
+                    &mut self.confirm_focus,
+                    &chrome,
+                );
             });
+
+        match chosen {
+            Some(0) => self.confirm_close_save(idx),
+            Some(1) => self.confirm_close_discard(idx),
+            Some(2) => {
+                self.dialog_state = DialogState::None;
+                self.closing_all = false;
+            }
+            _ => {}
+        }
 
         if !open {
             self.dialog_state = DialogState::None;
             self.closing_all = false;
         }
+    }
+
+    /// Handles the "Save & Close" choice of the confirm-close dialog.
+    ///
+    /// A file-backed tab is saved and closed. An untitled tab is instead sent
+    /// to the save-as flow and kept open, so its content is never silently
+    /// discarded.
+    fn confirm_close_save(&mut self, idx: usize) {
+        if idx >= self.tabs.tab_count() {
+            self.dialog_state = DialogState::None;
+            self.continue_close_all();
+            return;
+        }
+        if self.tabs.documents[idx].file_path.is_some() {
+            let _ = self.tabs.documents[idx].save();
+            self.cleanup_session_for_tab(idx);
+            self.tabs.close_tab(idx);
+            self.dialog_state = DialogState::None;
+            self.continue_close_all();
+        } else {
+            self.tabs.switch_to(idx);
+            self.dialog_state = DialogState::None;
+            self.closing_all = false;
+            self.save_as_dialog();
+        }
+    }
+
+    /// Handles the "Discard" choice of the confirm-close dialog.
+    fn confirm_close_discard(&mut self, idx: usize) {
+        if idx < self.tabs.tab_count() {
+            self.cleanup_session_for_tab(idx);
+            self.tabs.close_tab(idx);
+        }
+        self.dialog_state = DialogState::None;
+        self.continue_close_all();
     }
 
     /// Shows the confirm-reload dialog when the user wants to reload a modified document.
@@ -1301,6 +1379,8 @@ impl App {
         let mut open = true;
         let title = self.tabs.active_doc().title.clone();
 
+        let chrome = self.theme_ctrl.chrome.clone();
+        let mut chosen = None;
         egui::Window::new("Reload from Disk")
             .collapsible(false)
             .resizable(false)
@@ -1312,18 +1392,24 @@ impl App {
                     "'{title}' has unsaved changes. Discard changes and reload from disk?"
                 ));
                 ui.add_space(4.0);
-
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if ui.button("  Reload  ").clicked() {
-                        self.do_reload_from_disk();
-                        self.dialog_state = DialogState::None;
-                    }
-                    if ui.button("  Cancel  ").clicked() {
-                        self.dialog_state = DialogState::None;
-                    }
-                });
+                chosen = confirm_dialog::render_choice_row(
+                    ui,
+                    &CONFIRM_RELOAD_CHOICES,
+                    &mut self.confirm_focus,
+                    &chrome,
+                );
             });
+
+        match chosen {
+            Some(0) => {
+                self.do_reload_from_disk();
+                self.dialog_state = DialogState::None;
+            }
+            Some(1) => {
+                self.dialog_state = DialogState::None;
+            }
+            _ => {}
+        }
 
         if !open {
             self.dialog_state = DialogState::None;
@@ -1814,9 +1900,14 @@ impl eframe::App for App {
         self.handle_io_responses();
         self.handle_print_responses();
 
-        // Live file monitoring: check for external changes every second
-        self.live_monitor
-            .tick(&mut self.tabs, self.max_file_size_bytes);
+        // Live file monitoring: check for external changes every second.
+        // Pass in-flight saves so the app's own writes are not misread as
+        // external changes.
+        self.live_monitor.tick(
+            &mut self.tabs,
+            &self.io_activity.pending_saves,
+            self.max_file_size_bytes,
+        );
 
         // Workspace filesystem watcher: apply pending events to the tree
         self.tick_workspace_watcher();
@@ -2139,6 +2230,11 @@ mod tests {
             config_save_blocked: false,
             clipboard: None,
             dialog_state: DialogState::None,
+            confirm_focus: 0,
+            folder_search_generation: 0,
+            pending_find_nav: None,
+            #[cfg(test)]
+            test_pane_probe: Vec::new(),
             find_replace: FindReplaceDialog::new(),
             find_results: find_results::FindResultsPanel::default(),
             go_to_line: GoToLineDialog::new(),
@@ -3224,7 +3320,8 @@ mod tests {
         assert!(app.find_results.visible);
         assert_eq!(app.find_results.len(), 2);
         let first = app.find_results.result(0).unwrap();
-        assert_eq!((first.tab_index, first.line, first.col), (0, 0, 0));
+        assert_eq!(first.source, find_results::ResultSource::Tab(0));
+        assert_eq!((first.line, first.col), (0, 0));
         let second = app.find_results.result(1).unwrap();
         assert_eq!((second.line, second.col), (1, 5));
         assert_eq!(second.line_text, "beta alpha");
@@ -3243,7 +3340,10 @@ mod tests {
         app.handle_search_action(FindReplaceAction::FindAll);
 
         assert_eq!(app.find_results.len(), 3);
-        assert_eq!(app.find_results.result(2).unwrap().tab_index, 1);
+        assert_eq!(
+            app.find_results.result(2).unwrap().source,
+            find_results::ResultSource::Tab(1)
+        );
     }
 
     #[test]
@@ -3268,7 +3368,9 @@ mod tests {
         app.handle_search_action(FindReplaceAction::FindAll);
 
         let idx = (0..app.find_results.len())
-            .find(|&i| app.find_results.result(i).unwrap().tab_index == 1)
+            .find(|&i| {
+                app.find_results.result(i).unwrap().source == find_results::ResultSource::Tab(1)
+            })
             .expect("a match in tab 1");
         app.tabs.active = 0; // navigate away first to prove the jump
         app.navigate_to_find_result(idx);
@@ -3540,7 +3642,41 @@ mod tests {
         let mut app = test_app();
         assert!(!app.tabs.active_doc().live_monitoring);
         // Should be a no-op, no crash
-        app.live_monitor.tick(&mut app.tabs, None);
+        app.live_monitor.tick(&mut app.tabs, &[], None);
+    }
+
+    #[test]
+    fn stale_folder_search_result_is_discarded() {
+        let mut app = test_app();
+        app.folder_search_generation = 5;
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FolderSearchResults {
+                generation: 4, // superseded
+                root: std::path::PathBuf::from("x"),
+                outcome: rust_pad_core::search::FolderSearchOutcome::default(),
+            });
+        app.handle_io_responses();
+        assert!(
+            !app.find_results.visible,
+            "a superseded folder search must not populate the panel"
+        );
+    }
+
+    #[test]
+    fn current_folder_search_result_populates_panel() {
+        let mut app = test_app();
+        app.folder_search_generation = 7;
+        app.io_worker
+            .inject_response(crate::io_worker::IoResponse::FolderSearchResults {
+                generation: 7,
+                root: std::path::PathBuf::from("x"),
+                outcome: rust_pad_core::search::FolderSearchOutcome::default(),
+            });
+        app.handle_io_responses();
+        assert!(
+            app.find_results.visible,
+            "the current folder search shows its results (even when empty)"
+        );
     }
 
     #[test]

@@ -72,6 +72,11 @@ impl App {
             };
             let version = doc.content_version;
 
+            // Record our own write up front so the live-file monitor does not
+            // mistake this in-flight save for an external change before the
+            // async `FileSaved` ack refreshes the mtime baseline.
+            self.tabs.active_doc_mut().last_self_write = Some(std::time::Instant::now());
+
             self.io_activity.pending_saves.push(PendingSave {
                 path: path.clone(),
                 content_version: version,
@@ -109,6 +114,7 @@ impl App {
     pub(crate) fn request_close_tab(&mut self, idx: usize) {
         if idx < self.tabs.tab_count() && self.tabs.documents[idx].modified {
             self.dialog_state = DialogState::ConfirmClose(idx);
+            self.confirm_focus = super::CONFIRM_CLOSE_CHOICES.len() - 1;
         } else if idx < self.tabs.tab_count() {
             // Persist scroll + cursor before the tab leaves memory, so
             // re-opening the file later restores the user's last position.
@@ -131,6 +137,7 @@ impl App {
         }
         if doc.modified {
             self.dialog_state = DialogState::ConfirmReload;
+            self.confirm_focus = super::CONFIRM_RELOAD_CHOICES.len() - 1;
         } else {
             self.do_reload_from_disk();
         }
@@ -255,6 +262,7 @@ impl App {
             self.closing_all = true;
             self.tabs.switch_to(idx);
             self.dialog_state = DialogState::ConfirmClose(idx);
+            self.confirm_focus = super::CONFIRM_CLOSE_CHOICES.len() - 1;
         }
     }
 
@@ -274,6 +282,7 @@ impl App {
         {
             self.tabs.switch_to(idx);
             self.dialog_state = DialogState::ConfirmClose(idx);
+            self.confirm_focus = super::CONFIRM_CLOSE_CHOICES.len() - 1;
         } else {
             // No more modified tabs: close-all is complete
             self.closing_all = false;

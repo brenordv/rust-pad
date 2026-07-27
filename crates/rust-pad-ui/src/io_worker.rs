@@ -9,6 +9,10 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use rust_pad_core::search::{
+    search_folder, FolderSearchLimits, FolderSearchOutcome, SearchOptions,
+};
+
 /// A request to perform file I/O on a background thread.
 #[derive(Debug)]
 pub enum IoRequest {
@@ -40,6 +44,17 @@ pub enum IoRequest {
         path: PathBuf,
         /// Maximum file size in bytes. `None` = no limit.
         max_file_size_bytes: Option<u64>,
+    },
+    /// Recursively search a folder's text files for content off the UI thread.
+    SearchFolder {
+        /// Generation token; the UI drops the response if a newer search ran.
+        generation: u64,
+        /// Folder to search (canonicalized by the UI before dispatch).
+        root: PathBuf,
+        /// Query and match options.
+        options: SearchOptions,
+        /// Bounds on the walk.
+        limits: FolderSearchLimits,
     },
 }
 
@@ -73,6 +88,13 @@ pub enum IoResponse {
     /// decoded + binary-checked + pushed to the clipboard on the UI side;
     /// the worker stays a pure byte mover.
     ClipboardFileRead { path: PathBuf, bytes: Vec<u8> },
+    /// Companion to [`IoRequest::SearchFolder`]: the collected matches plus
+    /// skip/truncation counts, tagged with the request's generation.
+    FolderSearchResults {
+        generation: u64,
+        root: PathBuf,
+        outcome: FolderSearchOutcome,
+    },
 }
 
 /// Context for a pending save-as operation, stored on the UI side.
@@ -286,6 +308,19 @@ fn process(request: IoRequest) -> IoResponse {
                     message: format!("Failed to read '{}': {e}", path.display()),
                     path: Some(path),
                 },
+            }
+        }
+        IoRequest::SearchFolder {
+            generation,
+            root,
+            options,
+            limits,
+        } => {
+            let outcome = search_folder(&root, &options, limits);
+            IoResponse::FolderSearchResults {
+                generation,
+                root,
+                outcome,
             }
         }
     }
