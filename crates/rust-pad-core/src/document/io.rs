@@ -379,6 +379,29 @@ mod tests {
     }
 
     #[test]
+    fn test_new_document_saves_without_bom() {
+        // Regression: a freshly created document must save as UTF-8 with no BOM.
+        // Some Windows tooling (e.g. PowerShell's `>`/`Out-File`) writes a BOM
+        // by default; rust-pad must not add one of its own to new files.
+        let doc_encoding = Document::new().encoding;
+        assert_eq!(
+            doc_encoding,
+            TextEncoding::Utf8,
+            "new documents should default to BOM-less UTF-8"
+        );
+
+        let mut doc = Document::new();
+        doc.insert_text("#!/bin/bash\necho hi\n");
+        let bytes = doc.encode_for_save().unwrap();
+
+        assert!(
+            !bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+            "new document was saved with a UTF-8 BOM: {:x?}",
+            &bytes[..bytes.len().min(3)]
+        );
+    }
+
+    #[test]
     fn test_encode_for_save_applies_crlf() {
         let mut doc = Document::new();
         doc.insert_text("a\nb");
