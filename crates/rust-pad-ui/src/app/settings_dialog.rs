@@ -111,6 +111,9 @@ impl App {
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
                             ui.set_min_width(CONTENT_MIN_WIDTH);
+                            // Recess the text inputs on the white dialog surface so
+                            // they read as fields on the light chrome themes.
+                            chrome::use_input_fill(ui, &chrome_theme);
                             egui::ScrollArea::vertical().show(ui, |ui| match self.settings_tab {
                                 SettingsTab::General => self.settings_general(ui, ctx),
                                 SettingsTab::Editor => self.settings_editor(ui),

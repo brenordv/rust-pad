@@ -28,6 +28,15 @@ pub struct FindReplaceDialog {
     search_history: Vec<String>,
     /// True when any of the dialog's interactive widgets had focus this frame.
     pub has_focus: bool,
+    /// `visible` on the previous `show` call, for edge-triggered open/close logs.
+    was_visible: bool,
+    /// When true, the dialog window is raised to the front and given OS focus on
+    /// the next `show` (set when opening, or re-opening an already-open dialog).
+    raise_requested: bool,
+    /// Last measured content height, reused as the window's initial size so a
+    /// reopened window appears already sized to fit instead of opening large and
+    /// then shrinking. Seeded with a close estimate for the first open.
+    last_content_height: f32,
 }
 
 impl Default for FindReplaceDialog {
@@ -51,6 +60,9 @@ impl FindReplaceDialog {
             focus_requested: false,
             search_history: Vec::new(),
             has_focus: false,
+            was_visible: false,
+            raise_requested: false,
+            last_content_height: 250.0,
         }
     }
 
@@ -66,6 +78,7 @@ impl FindReplaceDialog {
     pub fn open_with_text(&mut self, text: Option<String>) {
         self.visible = true;
         self.focus_requested = true;
+        self.raise_requested = true;
         if let Some(t) = text {
             if !t.is_empty() {
                 self.find_text = t;
@@ -83,6 +96,7 @@ impl FindReplaceDialog {
     pub fn open_folder_search(&mut self, folder: std::path::PathBuf) {
         self.visible = true;
         self.focus_requested = true;
+        self.raise_requested = true;
         self.scope = SearchScope::Folder;
         self.folder_path = Some(folder);
         self.status.clear();
@@ -114,125 +128,370 @@ impl FindReplaceDialog {
         )
     }
 
-    /// Shows the Find/Replace dialog. Returns an action to perform, if any.
+    /// Renders the dialog body (find/replace inputs, search options, scope,
+    /// action buttons, status footer) bracketed by the focus sentinels. Static
+    /// so the same layout drives both the visible render and the hidden
+    /// measurement pass ([`measure_content_height`](Self::measure_content_height)).
+    #[allow(clippy::too_many_arguments)]
+    fn render_body_contents(
+        ui: &mut Ui,
+        find_text: &mut String,
+        replace_text: &mut String,
+        action: &mut Option<FindReplaceAction>,
+        focus_requested: &mut bool,
+        has_focus: &mut bool,
+        options: &mut SearchOptions,
+        scope: &mut SearchScope,
+        folder_path: Option<&std::path::Path>,
+        status: &str,
+        search_history: &[String],
+        chrome_theme: &ChromeTheme,
+        metrics: &Metrics,
+        sentinel_top: egui::Id,
+        sentinel_bottom: egui::Id,
+        find_id: &mut Option<egui::Id>,
+        last_button_id: &mut Option<egui::Id>,
+    ) {
+        ui.spacing_mut().item_spacing.y = 8.0;
+        chrome::use_input_fill(ui, chrome_theme);
+        focus_sentinel(ui, sentinel_top);
+        Self::show_find_input(
+            ui,
+            find_text,
+            action,
+            focus_requested,
+            search_history,
+            has_focus,
+            chrome_theme,
+            metrics,
+            find_id,
+        );
+        Self::show_replace_input(ui, replace_text, has_focus, chrome_theme, metrics);
+        ui.add_space(4.0);
+        Self::show_search_options(ui, options, scope, folder_path, action, chrome_theme);
+        ui.add_space(4.0);
+        *last_button_id = Self::show_action_buttons(ui, action, chrome_theme);
+        if !status.is_empty() {
+            // Match-count footer.
+            ui.add_space(2.0);
+            ui.separator();
+            ui.label(
+                egui::RichText::new(status)
+                    .small()
+                    .color(chrome_theme.text_muted),
+            );
+        }
+        focus_sentinel(ui, sentinel_bottom);
+    }
+
+    /// Measures the natural content height (header band + body) with a hidden
+    /// sizing pass, so the window can be created already sized to fit instead of
+    /// opening large and then shrinking. Runs off-screen and non-interactive; the
+    /// sizing pass paints nothing and steals no focus (`focus_requested` is forced
+    /// false). The status footer is always measured (a placeholder is used when
+    /// the status is momentarily empty) so the height is stable once a search
+    /// populates it.
+    fn measure_content_height(
+        &self,
+        ctx: &Context,
+        chrome_theme: &ChromeTheme,
+        metrics: &Metrics,
+    ) -> f32 {
+        const WIDTH: f32 = 440.0;
+        let status = if self.status.is_empty() {
+            "0 matches"
+        } else {
+            self.status.as_str()
+        };
+        let mut height = self.last_content_height;
+        egui::Area::new(egui::Id::new("find_replace_measure"))
+            .order(egui::Order::Background)
+            .fixed_pos(egui::pos2(-100_000.0, -100_000.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_max_width(WIDTH);
+                height = ui
+                    .scope_builder(egui::UiBuilder::new().sizing_pass(), |ui| {
+                        ui.set_max_width(WIDTH);
+                        let mut find_text = self.find_text.clone();
+                        let mut replace_text = self.replace_text.clone();
+                        let mut action = None;
+                        let mut focus_requested = false;
+                        let mut has_focus = false;
+                        let mut options = self.options.clone();
+                        let mut scope = self.scope;
+                        let mut find_id = None;
+                        let mut last_button_id = None;
+                        let _ = chrome::dialog_header_and_body(
+                            ui,
+                            "Find and Replace",
+                            true,
+                            chrome_theme,
+                            1.0,
+                            0,
+                            |ui| {
+                                Self::render_body_contents(
+                                    ui,
+                                    &mut find_text,
+                                    &mut replace_text,
+                                    &mut action,
+                                    &mut focus_requested,
+                                    &mut has_focus,
+                                    &mut options,
+                                    &mut scope,
+                                    self.folder_path.as_deref(),
+                                    status,
+                                    &self.search_history,
+                                    chrome_theme,
+                                    metrics,
+                                    egui::Id::new("find_replace_measure_sentinel_top"),
+                                    egui::Id::new("find_replace_measure_sentinel_bottom"),
+                                    &mut find_id,
+                                    &mut last_button_id,
+                                );
+                            },
+                        );
+                        ui.min_rect().height()
+                    })
+                    .inner;
+            });
+        height
+    }
+
+    /// Shows the Find/Replace dialog as a separate OS window and returns an
+    /// action to perform, if any.
     ///
-    /// `editor_focused` is the caller's live "an editor widget holds egui
-    /// keyboard focus" signal; the dialog dims while it is true so the user
-    /// gets a visual cue that the editor is the active surface.
+    /// On native builds the dialog is its own draggable window (an egui child
+    /// viewport that can be moved outside the main window); on web or in
+    /// headless tests `show_viewport_immediate` falls back to an in-app egui
+    /// window. The `_editor_focused` parameter is kept for call-site
+    /// compatibility but is unused: a separate OS window does not dim based on
+    /// the editor's focus.
     pub fn show(
         &mut self,
         ctx: &Context,
         chrome_theme: &ChromeTheme,
         metrics: &Metrics,
-        editor_focused: bool,
+        _editor_focused: bool,
     ) -> Option<FindReplaceAction> {
-        // Reset focus tracking unconditionally so that closing the dialog
-        // clears `has_focus` even though the rest of `show()` is skipped.
-        // Without this, closing the dialog with a text field focused would
-        // leave editor shortcuts suppressed forever (`suppress_editor_input`
-        // reads this flag).
+        // Edge-triggered open/close logging. The window class (native vs the
+        // embedded fallback) is logged from inside the closure on the opening
+        // frame; the close edge is logged here before the early return.
+        let opening = self.visible && !self.was_visible;
+        if self.was_visible && !self.visible {
+            tracing::debug!("find & replace window closed");
+        }
+        self.was_visible = self.visible;
+
+        // Reset focus tracking unconditionally so that closing the dialog clears
+        // `has_focus`; `suppress_editor_input` reads this flag.
         self.has_focus = false;
 
         if !self.visible {
             return None;
         }
 
-        let mut action = None;
-        let mut open = true;
+        // On the opening frame, measure the content in a hidden pass so the
+        // window is created already sized to fit, instead of opening at a guess
+        // and resizing. The per-frame resize below still catches in-session
+        // changes (a match-count footer appearing, switching to Folder scope).
+        if opening {
+            self.last_content_height = self.measure_content_height(ctx, chrome_theme, metrics);
+        }
 
-        let dimmed = dialog_dimmed(editor_focused, self.focus_requested);
+        let mut action = None;
+        let mut close = false;
+        // Raise + focus the window this frame (opening, or Ctrl+F while open).
+        let raise = std::mem::take(&mut self.raise_requested);
         let mut find_text = std::mem::take(&mut self.find_text);
         let mut replace_text = std::mem::take(&mut self.replace_text);
         let mut focus_requested = self.focus_requested;
         let mut has_focus = false;
-        // Sentinels bracket the body so Tab/Shift+Tab focus cannot escape the
-        // dialog: tabbing past an end lands on a sentinel, which the redirect
-        // below bounces back to the opposite end. The header close button
-        // renders before the top sentinel, so it sits outside this ring and is
-        // reached by mouse or Escape rather than Tab.
+        // Sentinels bracket the body so Tab/Shift+Tab focus cannot escape to the
+        // editor in the embedded/test path; in a real separate window there is
+        // nothing to escape to, so they are simply inert.
         let sentinel_top = egui::Id::new("find_replace_focus_sentinel_top");
         let sentinel_bottom = egui::Id::new("find_replace_focus_sentinel_bottom");
-        chrome::show_dialog(
-            ctx,
-            "Find and Replace",
-            &mut open,
-            chrome_theme,
-            metrics,
-            DialogOptions {
-                resizable: true,
-                default_width: 420.0,
-                dimmed,
-                ..Default::default()
-            },
-            |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
-                focus_sentinel(ui, sentinel_top);
-                let mut find_id: Option<egui::Id> = None;
-                Self::show_find_input(
-                    ui,
-                    &mut find_text,
-                    &mut action,
-                    &mut focus_requested,
-                    &self.search_history,
-                    &mut has_focus,
-                    chrome_theme,
-                    metrics,
-                    &mut find_id,
-                );
-                Self::show_replace_input(
-                    ui,
-                    &mut replace_text,
-                    &mut has_focus,
-                    chrome_theme,
-                    metrics,
-                );
-                ui.add_space(4.0);
-                Self::show_search_options(
-                    ui,
-                    &mut self.options,
-                    &mut self.scope,
-                    self.folder_path.as_deref(),
-                    &mut action,
-                    chrome_theme,
-                );
-                ui.add_space(4.0);
-                let last_button_id = Self::show_action_buttons(ui, &mut action, chrome_theme);
-                if !self.status.is_empty() {
-                    // Match-count footer.
-                    ui.add_space(2.0);
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(&self.status)
-                            .small()
-                            .color(chrome_theme.text_muted),
-                    );
-                }
-                focus_sentinel(ui, sentinel_bottom);
 
-                // Trap focus inside the dialog. A sentinel only holds focus for
-                // the instant the user tabs past an end; redirect to the
-                // opposite control and repaint so the invisible sentinel is
-                // never the visibly-focused widget.
-                let focused = ui.memory(|m| m.focused());
-                if focused == Some(sentinel_bottom) {
+        // Measured this frame; persisted into `last_content_height` afterwards so
+        // the next open starts at the right size.
+        let mut content_height = 0.0_f32;
+
+        let viewport_id = egui::ViewportId::from_hash_of("rust_pad_find_replace");
+        // Center over the main window, but only on the opening frame so the
+        // window stays wherever the user drags it afterwards.
+        let initial_pos = opening
+            .then(|| ctx.input(|i| i.viewport().outer_rect))
+            .flatten()
+            .map(|main| main.center() - egui::vec2(440.0, self.last_content_height) / 2.0);
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("Find and Replace")
+            .with_inner_size([440.0, self.last_content_height])
+            .with_decorations(false)
+            .with_resizable(false);
+        if let Some(pos) = initial_pos {
+            builder = builder.with_position(pos);
+        }
+
+        ctx.show_viewport_immediate(viewport_id, builder, |ui, class| {
+            if opening {
+                let native = matches!(class, egui::ViewportClass::Immediate);
+                tracing::debug!(native, "find & replace window opened");
+            }
+            if ui.ctx().input(|i| i.viewport().close_requested()) {
+                close = true;
+            }
+
+            // Fill the whole borderless window with the themed chrome: a square
+            // card (dialog_bg + 1px border) carrying the shared dialog header
+            // band and the body. Square corners because the window is opaque;
+            // rounding would need a transparent viewport, and the per-viewport
+            // clear colour cannot be made transparent independently here.
+            let window_frame = egui::Frame::new()
+                .fill(chrome_theme.dialog_bg)
+                .stroke(egui::Stroke::new(1.0, chrome_theme.border))
+                .inner_margin(egui::Margin::ZERO);
+            let mut find_id: Option<egui::Id> = None;
+            let mut last_button_id: Option<egui::Id> = None;
+            let header_rect = egui::CentralPanel::default()
+                .frame(window_frame)
+                .show_inside(ui, |ui| {
+                    let dc = chrome::dialog_header_and_body(
+                        ui,
+                        "Find and Replace",
+                        true,
+                        chrome_theme,
+                        1.0,
+                        0,
+                        |ui| {
+                            Self::render_body_contents(
+                                ui,
+                                &mut find_text,
+                                &mut replace_text,
+                                &mut action,
+                                &mut focus_requested,
+                                &mut has_focus,
+                                &mut self.options,
+                                &mut self.scope,
+                                self.folder_path.as_deref(),
+                                &self.status,
+                                &self.search_history,
+                                chrome_theme,
+                                metrics,
+                                sentinel_top,
+                                sentinel_bottom,
+                                &mut find_id,
+                                &mut last_button_id,
+                            );
+                        },
+                    );
+                    if dc.close_clicked {
+                        close = true;
+                    }
+                    content_height = ui.min_rect().height();
+                    dc.header_rect
+                })
+                .inner;
+
+            // Native window management, real separate window only. In the
+            // embedded/test fallback the dialog renders in the ROOT viewport, so
+            // these commands would move/resize/focus the main window; skip them.
+            if matches!(class, egui::ViewportClass::Immediate) {
+                // Drag the header band (minus the close-button area) to move it.
+                let mut drag_rect = header_rect;
+                drag_rect.max.x = (drag_rect.max.x - 44.0).max(drag_rect.min.x);
+                let drag = ui.interact(
+                    drag_rect,
+                    egui::Id::new("find_replace_titlebar"),
+                    egui::Sense::click_and_drag(),
+                );
+                if drag.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // Shrink the window to fit its content so there is no empty strip
+                // below the controls. Only resize on a real difference, to avoid
+                // a resize loop.
+                let target_h = content_height.ceil();
+                let current_h = ui.ctx().input(|i| i.content_rect().height());
+                if target_h > 0.0 && (target_h - current_h).abs() > 1.0 {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                            440.0, target_h,
+                        )));
+                }
+
+                // Raise + focus the window when (re)opened (Ctrl+F while open).
+                if raise {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+            }
+
+            // F3 / Shift+F3 navigation while the dialog window is focused. Only
+            // in a real separate window (Immediate): in the single-viewport
+            // embedded/test path the global shortcut handler owns F3, so acting
+            // here too would advance the match twice.
+            if matches!(class, egui::ViewportClass::Immediate) {
+                let hotkey = ui.input(|i| {
+                    i.events.iter().find_map(|e| match e {
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } => find_hotkey_action(*key, modifiers.shift),
+                        _ => None,
+                    })
+                });
+                if let Some(a) = hotkey {
+                    action = Some(a);
                     if let Some(id) = find_id {
                         ui.memory_mut(|m| m.request_focus(id));
-                        ui.ctx().request_repaint();
-                    }
-                } else if focused == Some(sentinel_top) {
-                    if let Some(id) = last_button_id {
-                        ui.memory_mut(|m| m.request_focus(id));
-                        ui.ctx().request_repaint();
                     }
                 }
-            },
-        );
+            }
+
+            // Trap focus inside the dialog. A sentinel only holds focus for the
+            // instant the user tabs past an end; redirect to the opposite
+            // control and repaint so the invisible sentinel is never the
+            // visibly-focused widget.
+            let focused = ui.memory(|m| m.focused());
+            if focused == Some(sentinel_bottom) {
+                if let Some(id) = find_id {
+                    ui.memory_mut(|m| m.request_focus(id));
+                    ui.ctx().request_repaint();
+                }
+            } else if focused == Some(sentinel_top) {
+                if let Some(id) = last_button_id {
+                    ui.memory_mut(|m| m.request_focus(id));
+                    ui.ctx().request_repaint();
+                }
+            }
+
+            // Gate `has_focus` on the dialog window's OS focus in the native
+            // path so editor shortcuts in the main window are not suppressed
+            // while the user works there (per-viewport focus does not clear on
+            // its own when the other window is clicked).
+            if matches!(class, egui::ViewportClass::Immediate) {
+                let win_focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(false);
+                has_focus &= win_focused;
+            }
+
+            if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+        });
+
         self.find_text = find_text;
         self.replace_text = replace_text;
         self.focus_requested = focus_requested;
         self.has_focus = has_focus;
+        // Remember the fitted height so the next open starts already sized.
+        if content_height > 1.0 {
+            self.last_content_height = content_height.ceil();
+        }
 
-        if !open {
+        if close {
             self.visible = false;
         }
 
@@ -263,6 +522,7 @@ impl FindReplaceDialog {
             let find_response = ui.text_edit_singleline(find_text);
             *find_id = Some(find_response.id);
             *has_focus |= find_response.has_focus();
+            chrome::input_border(ui.painter(), find_response.rect, chrome_theme, metrics);
             if find_response.has_focus() {
                 chrome::focus_ring(ui.painter(), find_response.rect, chrome_theme, metrics);
             }
@@ -275,6 +535,9 @@ impl FindReplaceDialog {
             }
             if find_response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 *action = Some(FindReplaceAction::FindNext);
+                // Keep focus in the find field so repeated Enter cycles matches
+                // instead of the field losing focus after the first jump.
+                find_response.request_focus();
             }
             if !history.is_empty() {
                 egui::ComboBox::from_id_salt("search_history")
@@ -305,6 +568,7 @@ impl FindReplaceDialog {
             ui.label("Replace:");
             let replace_response = ui.text_edit_singleline(replace_text);
             *has_focus |= replace_response.has_focus();
+            chrome::input_border(ui.painter(), replace_response.rect, chrome_theme, metrics);
             if replace_response.has_focus() {
                 chrome::focus_ring(ui.painter(), replace_response.rect, chrome_theme, metrics);
             }
@@ -426,15 +690,15 @@ impl FindReplaceDialog {
     }
 }
 
-/// Whether the Find & Replace dialog should render dimmed this frame.
-///
-/// Dimmed while an editor widget holds keyboard focus (the editor is the
-/// active surface), EXCEPT on the frame the dialog is opening: the find
-/// field's `request_focus` only lands next frame, so without the
-/// `focus_requested` exception a freshly opened dialog would flash dimmed
-/// until the next repaint.
-fn dialog_dimmed(editor_focused: bool, focus_requested: bool) -> bool {
-    editor_focused && !focus_requested
+/// Maps a find-navigation hotkey to its action: F3 -> next, Shift+F3 ->
+/// previous. Shared by the dialog window (native) and the global shortcut
+/// handler (main window / embedded), so the mapping lives in one place.
+pub fn find_hotkey_action(key: Key, shift: bool) -> Option<FindReplaceAction> {
+    match (key, shift) {
+        (Key::F3, false) => Some(FindReplaceAction::FindNext),
+        (Key::F3, true) => Some(FindReplaceAction::FindPrev),
+        _ => None,
+    }
 }
 
 /// An invisible, focusable, zero-interaction widget used to trap Tab focus
@@ -613,10 +877,12 @@ impl GoToLineDialog {
             },
             |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
+                chrome::use_input_fill(ui, chrome_theme);
                 ui.label(format!("Line[:Column] (1-{total_lines}):"));
                 ui.add_space(4.0);
 
                 let response = ui.text_edit_singleline(&mut self.line_text);
+                chrome::input_border(ui.painter(), response.rect, chrome_theme, metrics);
                 if response.has_focus() {
                     chrome::focus_ring(ui.painter(), response.rect, chrome_theme, metrics);
                 }
@@ -692,15 +958,49 @@ mod tests {
         );
     }
 
-    /// The dim signal follows editor focus, except on the opening frame
-    /// (pending `focus_requested`), which must render opaque: the find
-    /// field only receives focus on the following frame.
+    // ── find_hotkey_action ────────────────────────────────────────────
+
     #[test]
-    fn dialog_dimmed_follows_editor_focus_except_while_opening() {
-        assert!(dialog_dimmed(true, false));
-        assert!(!dialog_dimmed(true, true));
-        assert!(!dialog_dimmed(false, false));
-        assert!(!dialog_dimmed(false, true));
+    fn find_hotkey_action_maps_f3_and_shift_f3() {
+        assert_eq!(
+            find_hotkey_action(Key::F3, false),
+            Some(FindReplaceAction::FindNext)
+        );
+        assert_eq!(
+            find_hotkey_action(Key::F3, true),
+            Some(FindReplaceAction::FindPrev)
+        );
+        assert_eq!(find_hotkey_action(Key::Enter, false), None);
+        assert_eq!(find_hotkey_action(Key::G, false), None);
+    }
+
+    /// The hidden measurement pass returns a plausible content height (taller
+    /// than the header band, within a sane bound) without panicking, so the
+    /// window can be opened already sized to fit.
+    #[test]
+    fn measure_content_height_is_plausible() {
+        let ctx = egui::Context::default();
+        register_semibold_alias(&ctx);
+        let dialog = FindReplaceDialog::new();
+        let chrome = ChromeTheme::default();
+        let metrics = Metrics::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut measured = 0.0_f32;
+        let _ = ctx.run_ui(raw, |ui| {
+            measured = dialog.measure_content_height(ui.ctx(), &chrome, &metrics);
+        });
+        // Taller than the 36px header band, and not implausibly large.
+        assert!(measured > 100.0, "measured height {measured} too small");
+        assert!(
+            measured < 600.0,
+            "measured height {measured} implausibly large"
+        );
     }
 
     // ── parse_goto_input ──────────────────────────────────────────────

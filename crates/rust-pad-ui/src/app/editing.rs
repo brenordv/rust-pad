@@ -108,6 +108,41 @@ impl App {
         }
     }
 
+    /// Cycles the case of the current selection: `UPPER` -> `lower` ->
+    /// `Title Case` -> `UPPER`. Bound to Ctrl+Shift+U.
+    ///
+    /// Requires a selection (primary or secondary); with no selection it is a
+    /// no-op. Repeated presses advance the cycle as long as the selection is
+    /// unchanged; changing the selection restarts the cycle at `UPPER`. The
+    /// stored selection signature is compared for equality only, never used to
+    /// slice the buffer, so a conversion that changes the char count (e.g.
+    /// `ß` -> `SS`) simply restarts the cycle rather than mis-indexing.
+    pub(crate) fn cycle_selection_case(&mut self) {
+        if current_op_scope(self.tabs.active_doc()) != OperationScope::Selection {
+            return;
+        }
+        let tab = self.tabs.active;
+        let ranges = selection_ranges(self.tabs.active_doc());
+        if ranges.is_empty() {
+            return;
+        }
+
+        let conversion = match &self.case_cycle {
+            Some(state) if state.tab == tab && state.ranges == ranges => state.next,
+            _ => CaseConversion::Upper,
+        };
+
+        self.convert_selection_case(conversion);
+
+        let next = line_ops::next_case_in_cycle(conversion);
+        // Recompute the signature after the edit. Case conversion normally
+        // preserves the char count (ranges unchanged), but recomputing keeps the
+        // signature correct if a Unicode conversion shifted lengths.
+        let ranges = selection_ranges(self.tabs.active_doc());
+        tracing::debug!(?conversion, ?next, range_count = ranges.len(), "cycle case");
+        self.case_cycle = Some(CaseCycleState { tab, ranges, next });
+    }
+
     /// Duplicates the current line, placing the copy below.
     pub(crate) fn duplicate_current_line(&mut self) {
         let doc = self.tabs.active_doc_mut();
@@ -537,6 +572,37 @@ impl App {
     }
 }
 
+/// State for the Ctrl+Shift+U "cycle case" command.
+///
+/// `ranges` is the selection signature (every non-empty selection char range,
+/// sorted) the cycle currently applies to; it is compared for equality only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CaseCycleState {
+    tab: usize,
+    ranges: Vec<(usize, usize)>,
+    next: CaseConversion,
+}
+
+/// Collects every non-empty selection char range (primary + secondary cursors),
+/// sorted, for use as the case-cycle signature.
+fn selection_ranges(doc: &Document) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    if let Ok(Some((s, e))) = doc.cursor.selection_char_range(&doc.buffer) {
+        if s != e {
+            ranges.push((s, e));
+        }
+    }
+    for sc in &doc.secondary_cursors {
+        if let Ok(Some((s, e))) = sc.selection_char_range(&doc.buffer) {
+            if s != e {
+                ranges.push((s, e));
+            }
+        }
+    }
+    ranges.sort_unstable();
+    ranges
+}
+
 /// Returns the (start_line, end_line_exclusive) range covering all cursor
 /// selections and positions.
 ///
@@ -695,5 +761,83 @@ mod tests {
             doc.secondary_cursors[0].position,
             char_to_pos(&doc.buffer, 7),
         );
+    }
+
+    // ── cycle_selection_case (Ctrl+Shift+U) ──────────────────────────
+
+    /// Selects `[start, end)` (char offsets) on the active document.
+    fn select_range(app: &mut super::App, start: usize, end: usize) {
+        let doc = app.tabs.active_doc_mut();
+        doc.cursor.selection_anchor = Some(char_to_pos(&doc.buffer, start));
+        doc.cursor.position = char_to_pos(&doc.buffer, end);
+    }
+
+    #[test]
+    fn cycle_selection_case_cycles_upper_lower_title() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().buffer = "BaCon RuLes!".into();
+        select_range(&mut app, 0, 12);
+
+        app.cycle_selection_case();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "BACON RULES!");
+        // The selection is preserved so the next press keeps cycling the same span.
+        {
+            let doc = app.tabs.active_doc();
+            assert_eq!(
+                doc.cursor.selection_char_range(&doc.buffer).unwrap(),
+                Some((0, 12))
+            );
+        }
+
+        app.cycle_selection_case();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "bacon rules!");
+        app.cycle_selection_case();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "Bacon Rules!");
+        app.cycle_selection_case();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "BACON RULES!");
+    }
+
+    #[test]
+    fn cycle_selection_case_noop_without_selection() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().buffer = "hello".into();
+
+        app.cycle_selection_case();
+
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "hello");
+        assert!(
+            app.case_cycle.is_none(),
+            "no selection must not start a cycle"
+        );
+    }
+
+    #[test]
+    fn cycle_selection_case_restarts_when_selection_changes() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().buffer = "abc def".into();
+
+        select_range(&mut app, 0, 3);
+        app.cycle_selection_case(); // Upper
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "ABC def");
+
+        // A different selection restarts the cycle at Upper instead of advancing.
+        select_range(&mut app, 4, 7);
+        app.cycle_selection_case();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "ABC DEF");
+    }
+
+    #[test]
+    fn cycle_selection_case_handles_char_count_change_without_panic() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().buffer = "straße".into(); // 6 chars
+
+        select_range(&mut app, 0, 6);
+        // ß -> SS grows the selection to 7 chars; must not panic or mis-slice.
+        app.cycle_selection_case();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "STRASSE");
+
+        // A follow-up press keeps working on the grown selection.
+        app.cycle_selection_case();
+        assert_eq!(app.tabs.active_doc().buffer.to_string(), "strasse");
     }
 }

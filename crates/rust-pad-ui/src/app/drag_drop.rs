@@ -19,10 +19,13 @@ impl App {
     /// Files are opened in new tabs; directories are added to the
     /// active workspace (auto-creating one if needed).
     /// Should be called once per frame, early in the `ui()` method.
-    /// Drops are ignored while a modal dialog is open.
+    /// Drops are ignored while a modal dialog is open, but allowed while the
+    /// non-modal Find & Replace window is open (dropping a file to open it is a
+    /// reasonable action there).
     pub(crate) fn handle_dropped_items(&mut self, ctx: &egui::Context) {
-        // Ignore drops while a dialog is showing to avoid confusing state
-        if self.is_dialog_open() {
+        // Only a modal dialog suppresses drops; the non-modal Find & Replace
+        // does not.
+        if self.is_modal_dialog_open() {
             return;
         }
 
@@ -144,5 +147,62 @@ mod tests {
 
         app.add_dropped_folder(folder.path());
         assert!(app.workspace_sidebar.visible);
+    }
+
+    /// A drop while the non-modal Find & Replace window is open is still
+    /// processed (regression for the guard that used to block all dialogs).
+    #[test]
+    fn drops_processed_while_find_replace_open() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Drop While Find");
+        let folder = tempfile::tempdir().unwrap();
+
+        app.find_replace.visible = true;
+        assert!(
+            !app.is_modal_dialog_open(),
+            "Find & Replace is non-modal and must not count as modal"
+        );
+
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            dropped_files: vec![egui::DroppedFile {
+                path: Some(folder.path().to_path_buf()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.handle_dropped_items(ui.ctx()));
+
+        assert_eq!(
+            app.workspace_sidebar.tree.len(),
+            1,
+            "a folder dropped while Find & Replace is open should still be added"
+        );
+    }
+
+    /// A drop while a modal dialog is open is ignored.
+    #[test]
+    fn drops_ignored_while_modal_open() {
+        let (mut app, _dir) = app_with_workspace();
+        app.create_workspace("Drop While Modal");
+        let folder = tempfile::tempdir().unwrap();
+
+        app.go_to_line.visible = true;
+        assert!(app.is_modal_dialog_open());
+
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            dropped_files: vec![egui::DroppedFile {
+                path: Some(folder.path().to_path_buf()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.handle_dropped_items(ui.ctx()));
+
+        assert!(
+            app.workspace_sidebar.tree.is_empty(),
+            "a folder dropped while a modal dialog is open must be ignored"
+        );
     }
 }

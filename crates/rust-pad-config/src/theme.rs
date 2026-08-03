@@ -464,7 +464,9 @@ pub fn aurora_light() -> ThemeDefinition {
             crlf_chip_text: HexColor::rgb(0x98, 0xA4, 0xAF),
             dialog_bg: HexColor::rgb(0xFF, 0xFF, 0xFF),
             dialog_head: HexColor::rgb(0xF1, 0xF5, 0xF8),
-            input_bg: HexColor::rgb(0xFF, 0xFF, 0xFF),
+            // Recessed well: distinct from the white dialog_bg so inputs read as
+            // fields. Matches faint_bg_color for a palette-consistent step down.
+            input_bg: HexColor::rgb(0xE7, 0xEC, 0xF1),
             button_bg: HexColor::rgb(0xEA, 0xEF, 0xF4),
         }),
         chrome_style: ChromeStyle::Soft,
@@ -584,7 +586,9 @@ pub fn graphite_light() -> ThemeDefinition {
             crlf_chip_text: HexColor::rgb(0x9A, 0xA1, 0xAB),
             dialog_bg: HexColor::rgb(0xFF, 0xFF, 0xFF),
             dialog_head: HexColor::rgb(0xF2, 0xF4, 0xF6),
-            input_bg: HexColor::rgb(0xFF, 0xFF, 0xFF),
+            // Recessed well: distinct from the white dialog_bg so inputs read as
+            // fields. Matches faint_bg_color for a palette-consistent step down.
+            input_bg: HexColor::rgb(0xEC, 0xEE, 0xF1),
             button_bg: HexColor::rgb(0xEA, 0xED, 0xF1),
         }),
         chrome_style: ChromeStyle::Sharp,
@@ -639,6 +643,48 @@ mod tests {
         round_trips(aurora_light());
         round_trips(graphite_dark());
         round_trips(graphite_light());
+    }
+
+    /// Light chrome themes must recess their input wells: `input_bg` distinct
+    /// from the white `dialog_bg` (otherwise a text field renders invisibly on
+    /// the dialog surface), tracking `faint_bg_color` so the recess stays on the
+    /// theme's gray ramp. Dark chrome themes keep `input_bg == extreme_bg_color`
+    /// so wiring the token into the text-edit fill is a no-op there, and a theme
+    /// without a chrome block derives the same no-op.
+    #[test]
+    fn light_chrome_themes_recess_input_wells_dark_is_noop() {
+        for theme in [aurora_light(), graphite_light()] {
+            let chrome = theme
+                .chrome
+                .as_ref()
+                .expect("light chrome theme has a block");
+            assert_ne!(
+                chrome.input_bg, chrome.dialog_bg,
+                "{}: input_bg must differ from dialog_bg to read as a field",
+                theme.name
+            );
+            assert_eq!(
+                chrome.input_bg, theme.ui.faint_bg_color,
+                "{}: input_bg should track faint_bg_color",
+                theme.name
+            );
+        }
+        for theme in [aurora_dark(), graphite_dark()] {
+            let chrome = theme
+                .chrome
+                .as_ref()
+                .expect("dark chrome theme has a block");
+            assert_eq!(
+                chrome.input_bg, theme.ui.extreme_bg_color,
+                "{}: input_bg must equal extreme_bg_color so recessing inputs is a no-op",
+                theme.name
+            );
+        }
+        // A theme with no chrome block derives input_bg from extreme_bg_color,
+        // so the recess helper is a no-op on legacy/derived themes too.
+        let legacy = builtin_light();
+        let derived = ChromeColors::derive(&legacy.editor, &legacy.ui, legacy.dark_mode);
+        assert_eq!(derived.input_bg, legacy.ui.extreme_bg_color);
     }
 
     #[test]

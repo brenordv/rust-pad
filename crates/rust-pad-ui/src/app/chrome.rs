@@ -155,6 +155,101 @@ fn open_centered<'a>(window: egui::Window<'a>, ctx: &egui::Context) -> egui::Win
         .default_pos(ctx.content_rect().center())
 }
 
+/// Result of rendering a dialog's themed header band and body into a `Ui`.
+pub(crate) struct DialogChrome<R> {
+    /// True when the header's close button was clicked this frame.
+    pub close_clicked: bool,
+    /// Screen rect of the header band (used to drag a borderless window).
+    pub header_rect: Rect,
+    /// The body closure's return value.
+    pub result: R,
+}
+
+/// Renders the themed dialog chrome (a `dialog_head` header band with a painted
+/// title and optional close button, then a `dialog_bg` body) top-aligned into
+/// `ui`. Shared by the in-app dialog window ([`show_dialog`]) and the borderless
+/// Find & Replace viewport, so the header treatment lives in one place.
+///
+/// `head_top_radius` rounds the header's top corners to match the enclosing
+/// window's radius (pass 0 for a square borderless window). `alpha` dims the
+/// header fill (1.0 for no dimming).
+pub(crate) fn dialog_header_and_body<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    closable: bool,
+    chrome_theme: &ChromeTheme,
+    alpha: f32,
+    head_top_radius: u8,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> DialogChrome<R> {
+    let mut close_clicked = false;
+    let head_radius = CornerRadius {
+        nw: head_top_radius,
+        ne: head_top_radius,
+        sw: 0,
+        se: 0,
+    };
+    let header = egui::Frame::new()
+        .fill(chrome_theme.dialog_head.gamma_multiply(alpha))
+        .corner_radius(head_radius)
+        .inner_margin(egui::Margin::symmetric(DIALOG_BODY_MARGIN, 0))
+        .show(ui, |ui| {
+            header_band(ui, DIALOG_HEAD_HEIGHT, |ui| {
+                // Painted, not a Label: the window already carries an accessible
+                // node with the title, and a Label would duplicate it in the
+                // accessibility tree.
+                let title_color = ui.visuals().text_color();
+                let title_galley = ui.painter().layout_no_wrap(
+                    title.to_string(),
+                    FontId::new(
+                        14.0,
+                        egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+                    ),
+                    title_color,
+                );
+                let (title_rect, _) =
+                    ui.allocate_exact_size(title_galley.size(), egui::Sense::hover());
+                ui.painter()
+                    .galley(title_rect.min, title_galley, title_color);
+                if closable {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let close = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(crate::icons::CLOSE)
+                                    .color(chrome_theme.text_muted),
+                            )
+                            .frame(false),
+                        );
+                        close.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                "Close dialog",
+                            )
+                        });
+                        if close.on_hover_text("Close").clicked() {
+                            close_clicked = true;
+                        }
+                    });
+                }
+            });
+        });
+    let header_rect = header.response.rect;
+
+    let body = egui::Frame::new()
+        .inner_margin(egui::Margin::same(DIALOG_BODY_MARGIN))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            add_contents(ui)
+        });
+
+    DialogChrome {
+        close_clicked,
+        header_rect,
+        result: body.inner,
+    }
+}
+
 /// Shows a dialog window in the theme's direction style and returns the
 /// closure's result while the dialog is open.
 ///
@@ -201,65 +296,17 @@ pub fn show_dialog<R>(
     let mut close_clicked = false;
     let mut result = None;
     window.show(ctx, |ui| {
-        let head_radius = CornerRadius {
-            nw: metrics.window_radius,
-            ne: metrics.window_radius,
-            sw: 0,
-            se: 0,
-        };
-        egui::Frame::new()
-            .fill(chrome_theme.dialog_head.gamma_multiply(alpha))
-            .corner_radius(head_radius)
-            .inner_margin(egui::Margin::symmetric(DIALOG_BODY_MARGIN, 0))
-            .show(ui, |ui| {
-                header_band(ui, DIALOG_HEAD_HEIGHT, |ui| {
-                    // Painted, not a Label: the egui window already
-                    // carries an accessible node with the title, and a
-                    // Label here would duplicate it in the accessibility
-                    // tree.
-                    let title_color = ui.visuals().text_color();
-                    let title_galley = ui.painter().layout_no_wrap(
-                        title.to_string(),
-                        FontId::new(
-                            14.0,
-                            egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
-                        ),
-                        title_color,
-                    );
-                    let (title_rect, _) =
-                        ui.allocate_exact_size(title_galley.size(), egui::Sense::hover());
-                    ui.painter()
-                        .galley(title_rect.min, title_galley, title_color);
-                    if options.closable {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let close = ui.add(
-                                egui::Button::new(
-                                    egui::RichText::new(crate::icons::CLOSE)
-                                        .color(chrome_theme.text_muted),
-                                )
-                                .frame(false),
-                            );
-                            close.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Button,
-                                    true,
-                                    "Close dialog",
-                                )
-                            });
-                            if close.on_hover_text("Close").clicked() {
-                                close_clicked = true;
-                            }
-                        });
-                    }
-                });
-            });
-
-        egui::Frame::new()
-            .inner_margin(egui::Margin::same(DIALOG_BODY_MARGIN))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                result = Some(add_contents(ui));
-            });
+        let chrome = dialog_header_and_body(
+            ui,
+            title,
+            options.closable,
+            chrome_theme,
+            alpha,
+            metrics.window_radius,
+            add_contents,
+        );
+        close_clicked = chrome.close_clicked;
+        result = Some(chrome.result);
     });
     if close_clicked {
         *open = false;
@@ -408,6 +455,41 @@ pub fn secondary_button(
     response
 }
 
+/// Paints a 1 px border around a text input so it stays visible even when the
+/// input, and its window, is unfocused. On the light chrome themes the input
+/// fill is white and matches the `dialog_bg`, so without this the field has no
+/// visible boundary once the focus ring is gone. Uses `text_faint` (a mid-tone
+/// that reads on both light and dark themes) rather than the near-invisible
+/// window `border` colour. No-op on legacy themes, which keep egui's stock
+/// text-edit frame.
+pub fn input_border(painter: &Painter, rect: Rect, chrome_theme: &ChromeTheme, metrics: &Metrics) {
+    if metrics.style == MetricsStyle::Legacy {
+        return;
+    }
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(metrics.widget_radius),
+        Stroke::new(1.0, chrome_theme.text_faint),
+        StrokeKind::Inside,
+    );
+}
+
+/// Recesses a dialog's text inputs to the theme's `input_bg` well so a field on
+/// a `dialog_bg` surface reads as an input instead of blending in. Call it on
+/// the dialog's `Ui` before rendering the text edits; egui resolves a text
+/// edit's fill through `visuals.text_edit_bg_color`, so this recolors only the
+/// inputs and nothing else on the surface.
+///
+/// On the light chrome themes `dialog_bg` is white and `input_bg` is a faint
+/// gray, which is the case this fixes. On dark and legacy/derived themes
+/// `input_bg` already equals egui's default text-input fill (`extreme_bg_color`),
+/// so this is a pixel-identical no-op there and needs no metric gate. Scope it
+/// to the dialog's own `Ui`: `visuals_mut` is copy-on-write on this `Ui`'s local
+/// style, so the override never leaks to the editor or other surfaces.
+pub fn use_input_fill(ui: &mut egui::Ui, chrome_theme: &ChromeTheme) {
+    ui.visuals_mut().text_edit_bg_color = Some(chrome_theme.input_bg);
+}
+
 /// Paints the focused-input ring: a 1.5 px accent stroke hugging the input
 /// with a 3 px `accent_soft` halo outside it. Call after rendering a text
 /// input that currently has focus. No-op on legacy themes, which keep the
@@ -504,6 +586,51 @@ mod tests {
                 accent_indicator(painter, rect, &chrome, &Metrics::for_style(style));
             }
         });
+    }
+
+    /// `use_input_fill` overrides only the text-edit fill token, to the theme's
+    /// recessed `input_bg`, scoped to the ui it is called on.
+    #[test]
+    fn use_input_fill_sets_text_edit_bg_to_input_bg() {
+        let chrome = ChromeTheme::from_definition(&rust_pad_config::theme::aurora_light()).0;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            use_input_fill(ui, &chrome);
+            assert_eq!(ui.visuals().text_edit_bg_color, Some(chrome.input_bg));
+        });
+    }
+
+    /// End to end: after `use_input_fill`, a `text_edit_singleline` paints its
+    /// background well with the recessed `input_bg` (distinct from the light
+    /// theme's white `dialog_bg`), so the field is visible. Rendered directly in
+    /// a root ui, not through the dialog's viewport, so no open-fade skews the
+    /// fill color.
+    #[test]
+    fn use_input_fill_recesses_the_rendered_text_edit_fill() {
+        use egui::epaint::Shape;
+        let chrome = ChromeTheme::from_definition(&rust_pad_config::theme::aurora_light()).0;
+        assert_ne!(
+            chrome.input_bg, chrome.dialog_bg,
+            "precondition: recessed well"
+        );
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 200.0))),
+            ..Default::default()
+        };
+        let mut text = String::from("hello");
+        let output = ctx.run_ui(raw, |ui| {
+            use_input_fill(ui, &chrome);
+            let _ = ui.text_edit_singleline(&mut text);
+        });
+        let has_input_well = output
+            .shapes
+            .iter()
+            .any(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == chrome.input_bg));
+        assert!(
+            has_input_well,
+            "the text edit should be filled with the recessed input_bg"
+        );
     }
 
     /// Maps the named semibold UI family onto the default proportional list

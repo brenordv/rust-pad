@@ -194,6 +194,10 @@ pub struct App {
         Option<egui::Rect>,
     )>,
     pub find_replace: FindReplaceDialog,
+    /// State for the Ctrl+Shift+U "cycle case" command: the case to apply next
+    /// and the selection signature it applies to. `None` until the first press,
+    /// and reset whenever the selection changes.
+    case_cycle: Option<editing::CaseCycleState>,
     /// "Find All" results panel (Notepad++ style), populated on demand.
     pub find_results: find_results::FindResultsPanel,
     /// Monotonic generation for folder searches; a worker result whose
@@ -620,6 +624,7 @@ impl App {
             #[cfg(test)]
             test_pane_probe: Vec::new(),
             find_replace: FindReplaceDialog::new(),
+            case_cycle: None,
             find_results: find_results::FindResultsPanel::default(),
             go_to_line: GoToLineDialog::new(),
             bookmarks: BookmarkManager::new(),
@@ -2236,6 +2241,7 @@ mod tests {
             #[cfg(test)]
             test_pane_probe: Vec::new(),
             find_replace: FindReplaceDialog::new(),
+            case_cycle: None,
             find_results: find_results::FindResultsPanel::default(),
             go_to_line: GoToLineDialog::new(),
             bookmarks: BookmarkManager::new(),
@@ -3454,6 +3460,23 @@ mod tests {
 
         // Should have switched to tab 0 where "hello" exists
         assert_eq!(app.tabs.active, 0);
+        assert!(app.find_replace.status.contains("matches"));
+    }
+
+    #[test]
+    fn find_nav_shortcut_gated_on_dialog_visible() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("foo foo foo");
+        set_find_text(&mut app, "foo");
+
+        // Dialog closed: F3 is not consumed and does not search.
+        assert!(!app.handle_find_nav_shortcut(egui::Key::F3, false));
+
+        // Dialog open: F3 runs Find Next, Shift+F3 runs Find Prev.
+        app.find_replace.visible = true;
+        assert!(app.handle_find_nav_shortcut(egui::Key::F3, false));
+        assert!(app.find_replace.status.contains("matches"));
+        assert!(app.handle_find_nav_shortcut(egui::Key::F3, true));
         assert!(app.find_replace.status.contains("matches"));
     }
 

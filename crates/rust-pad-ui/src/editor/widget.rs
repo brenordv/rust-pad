@@ -1514,8 +1514,7 @@ impl<'a> EditorWidget<'a> {
             .unwrap_or_default();
 
         if let Some(wm) = wrap_map {
-            let vl = wm.position_to_visual_line(cursor_line, cursor_col);
-            let vc = wm.position_to_visual_col(cursor_col);
+            let (vl, vc) = wm.caret_visual_position(cursor_line, cursor_col);
             let lchars: Vec<char> = line_content.chars().collect();
             let ws = (vl - wm.logical_to_visual(cursor_line)) * wm.chars_per_visual_line;
             let we = (ws + wm.chars_per_visual_line).min(lchars.len());

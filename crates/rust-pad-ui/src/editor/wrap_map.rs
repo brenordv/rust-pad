@@ -80,9 +80,26 @@ impl WrapMap {
         base + wrap_offset.min(self.visual_lines_for(line).saturating_sub(1))
     }
 
-    /// Returns the column offset within the visual line for a given logical column.
-    pub fn position_to_visual_col(&self, col: usize) -> usize {
-        col % self.chars_per_visual_line
+    /// Visual `(line, column)` for a caret at logical `(line, col)`.
+    ///
+    /// Row is [`logical_to_visual`](Self::logical_to_visual) plus the wrap row,
+    /// and the column is the offset within that row. The one special case is a
+    /// caret at the very end of a logical line whose length is an exact multiple
+    /// of the wrap width: it pins to the right edge of the last visual row
+    /// (column == wrap width) instead of wrapping back to column 0 of that row.
+    pub fn caret_visual_position(&self, line: usize, col: usize) -> (usize, usize) {
+        let rows = self.visual_lines_for(line); // always >= 1
+        let base = self.logical_to_visual(line);
+        let row = col / self.chars_per_visual_line;
+        if row >= rows {
+            // Only reachable when `col == rows * chars_per_visual_line`, i.e. the
+            // caret is one past the last full row. Render it at the right edge of
+            // the last row rather than column 0 of a row that does not exist.
+            let last = rows - 1;
+            (base + last, col - last * self.chars_per_visual_line)
+        } else {
+            (base + row, col % self.chars_per_visual_line)
+        }
     }
 
     /// Returns how many visual lines a logical line occupies.
@@ -260,16 +277,62 @@ mod tests {
         assert_eq!(wm.position_to_visual_line(0, 19), 1);
     }
 
-    // ── position_to_visual_col ─────────────────────────────────────
+    // ── caret_visual_position ──────────────────────────────────────
 
     #[test]
-    fn position_to_visual_col_basic() {
+    fn caret_visual_position_non_boundary() {
+        // Two visual rows (20 chars, width 10). Interior carets match the plain
+        // row/col split.
         let doc = doc_from("12345678901234567890");
         let wm = WrapMap::build(&doc, 10);
-        assert_eq!(wm.position_to_visual_col(0), 0);
-        assert_eq!(wm.position_to_visual_col(5), 5);
-        assert_eq!(wm.position_to_visual_col(10), 0); // wraps
-        assert_eq!(wm.position_to_visual_col(15), 5);
+        assert_eq!(wm.caret_visual_position(0, 0), (0, 0));
+        assert_eq!(wm.caret_visual_position(0, 5), (0, 5));
+        assert_eq!(wm.caret_visual_position(0, 15), (1, 5));
+    }
+
+    #[test]
+    fn caret_visual_position_end_of_full_single_row_pins_right() {
+        // Exactly 10 chars in a width-10 line: one full visual row. A caret at
+        // the end must render at the right edge (col 10), not back at column 0.
+        let doc = doc_from("1234567890");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.visual_lines_for(0), 1);
+        assert_eq!(wm.caret_visual_position(0, 10), (0, 10));
+    }
+
+    #[test]
+    fn caret_visual_position_end_of_two_full_rows_pins_right() {
+        // 20 chars, width 10: two full rows. A caret at the very end (col 20)
+        // pins to the right edge of the second row (row 1, col 10).
+        let doc = doc_from("12345678901234567890");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.visual_lines_for(0), 2);
+        assert_eq!(wm.caret_visual_position(0, 20), (1, 10));
+    }
+
+    #[test]
+    fn caret_visual_position_mid_line_boundary_unchanged() {
+        // A caret at col 10 with more content on the next row stays at column 0
+        // of that next row (unchanged behavior; only the trailing edge moved).
+        let doc = doc_from("12345678901234567890");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.caret_visual_position(0, 10), (1, 0));
+    }
+
+    #[test]
+    fn caret_visual_position_carries_base_offset() {
+        // Line 0 wraps to 2 rows, so line 1's caret starts at visual line 2.
+        let doc = doc_from("12345678901234567890\nxy");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.caret_visual_position(1, 0), (2, 0));
+        assert_eq!(wm.caret_visual_position(1, 2), (2, 2));
+    }
+
+    #[test]
+    fn caret_visual_position_empty_line() {
+        let doc = doc_from("");
+        let wm = WrapMap::build(&doc, 10);
+        assert_eq!(wm.caret_visual_position(0, 0), (0, 0));
     }
 
     // ── visual_lines_for out of bounds ─────────────────────────────

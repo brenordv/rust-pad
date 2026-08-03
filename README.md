@@ -40,7 +40,7 @@ simple, stable, and fast as possible.
 
 ### Editing
 - **Multi-tab interface** with session restore (reopen files from last session) and horizontal tab scrolling when tabs overflow
-- **Find/Replace** with regex support and search across the current tab, all open tabs, or a folder on disk. Non-modal (keeps editing enabled, dims when it loses focus), auto-focuses the find field on open, pre-fills it with the current single-line selection, scrolls the viewport to the active match, and offers a session search-history dropdown. Keyboard focus stays inside the dialog (Tab, Shift+Tab, and the arrow keys cycle its own controls rather than escaping to the editor), and the button with focus shows a focus ring so it is clear what Enter or Space will trigger
+- **Find/Replace** with regex support and search across the current tab, all open tabs, or a folder on disk. It opens as a separate, draggable window that you can move anywhere, including outside the main window (on platforms without multi-window support it falls back to an in-app dialog). Non-modal, so editing stays enabled; it auto-focuses the find field on open, pre-fills it with the current single-line selection, scrolls the viewport to the active match, and offers a session search-history dropdown. Enter or `F3` jumps to the next match and `Shift+F3` to the previous, so you can cycle through occurrences from the keyboard
 - **Find All results panel**: the **Find All** button lists every match in a panel above the status bar. The Scope selector chooses the current tab, all open tabs, or a folder; in the Folder scope a **Choose Folder...** button picks the folder to search. Each result shows `location:line  text`; double-click a result to jump to it, opening the file first for folder matches. When a folder search hits a limit, the panel reports how many results were truncated and how many files were skipped
 - **Search in Folder**: search the contents of every text file under a folder without opening them. Right-click a folder (or the workspace root) in the sidebar, or a file tab, and choose "Search in Folder..."; or select the Folder scope in Find/Replace. The search runs off the UI thread, skips binary and oversized files and VCS metadata (`.git`, `.hg`, `.svn`), stays within the chosen folder (symlinks and junctions pointing outside it are not followed), and is bounded so a huge tree cannot hang the app
 - **Multi-cursor editing**: `Ctrl+Click` to add cursors, `Alt+Shift+Arrow` to add the cursors above/below (with shrink support), `Alt+Shift+Period` to select next occurrence
@@ -78,6 +78,7 @@ simple, stable, and fast as possible.
 - UPPERCASE
 - lowercase
 - Title Case
+- Cycle the selection's case with `Ctrl+Shift+U` (UPPERCASE / lowercase / Title Case)
 
 ### Workspace Sidebar
 - **Named workspaces** (`Ctrl+B` to toggle the sidebar): group project folders into named workspaces that persist across restarts in a dedicated database (`rust-pad-workspaces.redb`). Create, rename, switch, and delete workspaces
@@ -164,6 +165,7 @@ simple, stable, and fast as possible.
 | Ctrl+V    | Paste                  |
 | Ctrl+A    | Select all             |
 | Ctrl+D    | Duplicate current line |
+| Ctrl+Shift+U | Cycle case of selection (UPPER / lower / Title) |
 | Tab       | Increase indent        |
 | Shift+Tab | Decrease indent        |
 
@@ -173,6 +175,8 @@ simple, stable, and fast as possible.
 |----------|-------------------|
 | Ctrl+F   | Open Find/Replace |
 | Ctrl+H   | Open Find/Replace |
+| F3       | Find next (while Find & Replace is open)     |
+| Shift+F3 | Find previous (while Find & Replace is open) |
 | Ctrl+G   | Go to Line        |
 | Ctrl+F2  | Toggle bookmark   |
 | F2       | Next bookmark     |

@@ -1,5 +1,30 @@
 # Changelog
 
+## [3.1.1]
+
+### Added
+- **Cycle case with `Ctrl+Shift+U`.** With text selected, pressing it walks the selection through UPPERCASE,
+  then lowercase, then Title Case, then back to UPPERCASE. It acts only on a selection; with nothing
+  selected it does nothing. Moving the cursor or changing the selection restarts the cycle at UPPERCASE.
+- **`F3` and `Shift+F3` in Find & Replace.** While the dialog is open, `F3` (or Enter in the Find field)
+  moves to the next match and `Shift+F3` moves to the previous one, so you can cycle through occurrences
+  without leaving the keyboard.
+
+### Changed
+- **Find & Replace is now its own window.** It opens as a separate OS window instead of a panel pinned
+  inside the app, so you can drag it anywhere on screen, including off the main window and onto another
+  monitor. On platforms without multi-window support it falls back to the in-app dialog.
+
+### Fixed
+- **The text cursor no longer jumps to the start of a wrapped line.** When word wrap was on and a line
+  filled the width exactly, the caret drew at the left edge of the line instead of the right; it now stays
+  at the end where you are typing.
+- **Dropping a file onto the window works while Find & Replace is open.** The non-modal dialog no longer
+  swallows drag-and-drop; only the blocking dialogs do.
+- **Enter in the Find field keeps cycling matches.** Previously it jumped to the first match and then lost
+  focus, so a second Enter did nothing. Focus now stays in the Find field so repeated Enter presses walk
+  through the occurrences.
+
 ## [3.1.0]
 
 ### Added
