@@ -353,6 +353,16 @@ pub fn convert_case(text: &str, conversion: CaseConversion) -> String {
     }
 }
 
+/// Returns the next case in the cycle used by the "cycle case" command:
+/// `Upper` -> `Lower` -> `TitleCase` -> `Upper`.
+pub fn next_case_in_cycle(current: CaseConversion) -> CaseConversion {
+    match current {
+        CaseConversion::Upper => CaseConversion::Lower,
+        CaseConversion::Lower => CaseConversion::TitleCase,
+        CaseConversion::TitleCase => CaseConversion::Upper,
+    }
+}
+
 /// Indents lines in the given range using the specified indent style.
 pub fn indent_lines(
     buffer: &mut TextBuffer,
@@ -690,6 +700,22 @@ mod tests {
         let mut buf = TextBuffer::from("a\nb\nc");
         assert!(move_line_down(&mut buf, 0).unwrap());
         assert_eq!(buf.to_string(), "b\na\nc");
+    }
+
+    #[test]
+    fn test_next_case_in_cycle() {
+        assert_eq!(
+            next_case_in_cycle(CaseConversion::Upper),
+            CaseConversion::Lower
+        );
+        assert_eq!(
+            next_case_in_cycle(CaseConversion::Lower),
+            CaseConversion::TitleCase
+        );
+        assert_eq!(
+            next_case_in_cycle(CaseConversion::TitleCase),
+            CaseConversion::Upper
+        );
     }
 
     #[test]

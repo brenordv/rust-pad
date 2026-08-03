@@ -122,6 +122,9 @@ impl App {
             if self.handle_search_shortcut(*key, ctrl) {
                 continue;
             }
+            if self.handle_find_nav_shortcut(*key, shift) {
+                continue;
+            }
             if self.handle_zoom_shortcut(*key, ctrl) {
                 continue;
             }
@@ -139,6 +142,9 @@ impl App {
                 continue;
             }
             if self.handle_edit_shortcut(*key, ctrl) {
+                continue;
+            }
+            if self.handle_case_cycle_shortcut(*key, ctrl, shift) {
                 continue;
             }
             if self.handle_bookmark_shortcut(*key, ctrl, shift) {
@@ -198,6 +204,24 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// Find-navigation shortcuts (F3 = next match, Shift+F3 = previous) while
+    /// the Find & Replace window is open. This handles the case where the main
+    /// window (editor) is focused; when the separate dialog window is focused,
+    /// its own closure handles F3. Returns `true` if the key was consumed.
+    pub(crate) fn handle_find_nav_shortcut(&mut self, key: egui::Key, shift: bool) -> bool {
+        if !self.find_replace.visible {
+            return false;
+        }
+        match crate::dialogs::find_hotkey_action(key, shift) {
+            Some(action) => {
+                tracing::debug!(?action, handler = "global", "find nav");
+                self.handle_search_action(action);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Zoom shortcuts (Ctrl+Plus, Ctrl+Minus, Ctrl+0).
@@ -334,6 +358,17 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// Case-cycle shortcut (Ctrl+Shift+U): cycles the selection's case
+    /// UPPER -> lower -> Title Case. Returns `true` if the key was consumed.
+    fn handle_case_cycle_shortcut(&mut self, key: egui::Key, ctrl: bool, shift: bool) -> bool {
+        if ctrl && shift && key == egui::Key::U {
+            self.cycle_selection_case();
+            true
+        } else {
+            false
+        }
     }
 
     /// Bookmark shortcuts (F2, Ctrl+F2, Shift+F2).
