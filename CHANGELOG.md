@@ -1,5 +1,8 @@
 # Changelog
 
+## [3.2.2]
+- Forgot to bump the version in the previous release. So this is literally just a version bump. Sorry about that.
+
 ## [3.2.1]
 
 ### Fixed

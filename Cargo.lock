@@ -3318,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad"
-version = "3.2.0"
+version = "3.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -3334,7 +3334,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-config"
-version = "3.2.0"
+version = "3.2.2"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-core"
-version = "3.2.0"
+version = "3.2.2"
 dependencies = [
  "anyhow",
  "chardetng",
@@ -3364,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-mod-history"
-version = "3.2.0"
+version = "3.2.2"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3377,7 +3377,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pad-ui"
-version = "3.2.0"
+version = "3.2.2"
 dependencies = [
  "anyhow",
  "arboard",
