@@ -2,7 +2,8 @@
 // Bridges the history crate's types with rust-pad-core's Position type.
 pub use rust_pad_mod_history::config::{doc_id_for_path, generate_unsaved_id};
 pub use rust_pad_mod_history::{
-    CursorSnapshot, EditGroup, EditOperation, HistoryConfig, PersistenceLayer, UndoManager,
+    CursorSnapshot, EditGroup, EditOperation, HistoryConfig, MultiCursorTransition,
+    PersistenceLayer, SelectionSnapshot, UndoManager,
 };
 
 use crate::cursor::Position;

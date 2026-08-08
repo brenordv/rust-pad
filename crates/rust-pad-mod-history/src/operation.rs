@@ -13,6 +13,31 @@ pub struct CursorSnapshot {
     pub col: usize,
 }
 
+/// A cursor's position together with its optional selection anchor.
+///
+/// Richer than [`CursorSnapshot`], which is position-only; used to restore a
+/// full multi-cursor selection (positions and their selections) on undo/redo.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SelectionSnapshot {
+    /// Cursor position.
+    pub position: CursorSnapshot,
+    /// Selection anchor, if the cursor has a selection.
+    pub anchor: Option<CursorSnapshot>,
+}
+
+/// The whole multi-cursor selection immediately before and after an edit.
+///
+/// Each vector holds the primary cursor first, then the secondary cursors in
+/// document order, so undo can restore the pre-edit column selection and redo
+/// the post-edit one.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MultiCursorTransition {
+    /// Cursor set before the edit (restored on undo).
+    pub before: Vec<SelectionSnapshot>,
+    /// Cursor set after the edit (restored on redo).
+    pub after: Vec<SelectionSnapshot>,
+}
+
 /// A single atomic edit operation that can be undone/redone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditOperation {
@@ -26,6 +51,12 @@ pub struct EditOperation {
     pub cursor_before: CursorSnapshot,
     /// Cursor state after the edit.
     pub cursor_after: CursorSnapshot,
+    /// Full multi-cursor selection around the edit, for a multi-cursor edit.
+    ///
+    /// In-memory only (never serialized): a history reloaded from disk simply
+    /// falls back to a single cursor on undo. `None` for single-cursor edits.
+    #[serde(skip)]
+    pub multi_cursor: Option<MultiCursorTransition>,
 }
 
 /// A group of operations that form a single undo step.
@@ -51,6 +82,7 @@ mod tests {
             deleted: "world".to_string(),
             cursor_before: CursorSnapshot { line: 1, col: 5 },
             cursor_after: CursorSnapshot { line: 1, col: 10 },
+            multi_cursor: None,
         }
     }
 
@@ -94,6 +126,7 @@ mod tests {
             deleted: String::new(),
             cursor_before: CursorSnapshot::default(),
             cursor_after: CursorSnapshot::default(),
+            multi_cursor: None,
         };
         let bytes = bincode::serialize(&op).expect("serialize");
         let decoded: EditOperation = bincode::deserialize(&bytes).expect("deserialize");
@@ -110,6 +143,7 @@ mod tests {
             deleted: String::new(),
             cursor_before: CursorSnapshot::default(),
             cursor_after: CursorSnapshot::default(),
+            multi_cursor: None,
         };
         let bytes = bincode::serialize(&op).expect("serialize");
         let decoded: EditOperation = bincode::deserialize(&bytes).expect("deserialize");

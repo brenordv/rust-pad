@@ -5,7 +5,7 @@
 
 use crate::cursor::char_to_pos;
 
-use super::Document;
+use super::{Document, UndoSnapshot};
 
 /// A selection range captured against the current buffer.
 ///
@@ -74,9 +74,14 @@ impl Document {
         cursor.desired_col = None;
     }
 
-    /// Finalizes a multi-cursor edit: merges overlapping cursors, syncs changes.
-    fn finalize_multi_edit(&mut self, scroll_to_cursor: bool) {
+    /// Finalizes a multi-cursor edit: merges overlapping cursors, records the
+    /// edit as one undo step, and syncs derived state.
+    ///
+    /// `snapshot` must have been captured before the buffer was mutated so the
+    /// recorded delta reverses the whole multi-cursor edit in a single undo.
+    fn finalize_multi_edit(&mut self, snapshot: UndoSnapshot, scroll_to_cursor: bool) {
         self.merge_overlapping_cursors();
+        self.record_snapshot_delta(snapshot);
         self.sync_line_changes();
         self.modified = true;
         if scroll_to_cursor {
@@ -91,6 +96,8 @@ impl Document {
             self.insert_text(text);
             return;
         }
+
+        let snapshot = self.snapshot_for_undo();
 
         // Capture ranges against the pre-mutation buffer. Any later math is
         // derived purely from these char indices, never from stale `Position`s.
@@ -117,7 +124,7 @@ impl Document {
             offset += insert_len as isize - (end as isize - start as isize);
         }
 
-        self.finalize_multi_edit(true);
+        self.finalize_multi_edit(snapshot, true);
     }
 
     /// Inserts a different string at each cursor position (primary + secondary).
@@ -137,6 +144,8 @@ impl Document {
             self.insert_text(texts[0]);
             return;
         }
+
+        let snapshot = self.snapshot_for_undo();
 
         // Pair each cursor's selection range with its assigned text. The text
         // assignment follows `texts` order: index 0 → primary, then secondaries.
@@ -169,7 +178,7 @@ impl Document {
             offset += insert_len as isize - (end as isize - start as isize);
         }
 
-        self.finalize_multi_edit(true);
+        self.finalize_multi_edit(snapshot, true);
     }
 
     /// Performs backspace at all cursor positions.
@@ -189,6 +198,8 @@ impl Document {
             self.delete_selection_multi();
             return;
         }
+
+        let snapshot = self.snapshot_for_undo();
 
         let mut indices = self.collect_cursor_indices();
         indices.sort_by(|a, b| b.0.cmp(&a.0));
@@ -215,7 +226,7 @@ impl Document {
             }
         }
 
-        self.finalize_multi_edit(false);
+        self.finalize_multi_edit(snapshot, false);
     }
 
     /// Deletes selections at all cursors (public alias).
@@ -225,6 +236,8 @@ impl Document {
 
     /// Deletes selections at all cursors.
     fn delete_selection_multi(&mut self) {
+        let snapshot = self.snapshot_for_undo();
+
         // Collect selection ranges, sort descending by start
         let mut ranges: Vec<(usize, usize, usize, bool)> = Vec::new();
         if let Ok(Some((s, e))) = self.cursor.selection_char_range(&self.buffer) {
@@ -261,7 +274,7 @@ impl Document {
             sc.clear_selection();
         }
 
-        self.finalize_multi_edit(false);
+        self.finalize_multi_edit(snapshot, false);
     }
 
     /// Performs delete-forward at all cursor positions.
@@ -281,6 +294,8 @@ impl Document {
             self.delete_selection_multi();
             return;
         }
+
+        let snapshot = self.snapshot_for_undo();
 
         let total = self.buffer.len_chars();
         let mut indices = self.collect_cursor_indices();
@@ -305,7 +320,7 @@ impl Document {
             }
         }
 
-        self.finalize_multi_edit(false);
+        self.finalize_multi_edit(snapshot, false);
     }
 
     /// Inserts a newline at all cursor positions, inheriting each cursor's
@@ -757,5 +772,169 @@ mod tests {
         doc.delete_forward_multi();
         assert!(doc.modified);
         assert!(doc.content_version > v0);
+    }
+
+    // ── multi-cursor edits are undoable / redoable ────────────────
+
+    /// Asserts a just-applied multi-cursor edit forms one undo step: `undo`
+    /// restores `before`, and `redo` reapplies the current buffer.
+    fn assert_multi_edit_undoable(doc: &mut Document, before: &str) {
+        let after = doc.buffer.to_string();
+        assert_ne!(
+            after, before,
+            "precondition: the edit must change the buffer"
+        );
+        doc.undo();
+        assert_eq!(
+            doc.buffer.to_string(),
+            before,
+            "undo must restore the pre-edit buffer",
+        );
+        doc.redo();
+        assert_eq!(doc.buffer.to_string(), after, "redo must reapply the edit");
+    }
+
+    #[test]
+    fn insert_multi_is_undoable() {
+        let mut doc = doc_with("ab\ncd");
+        doc.cursor.position = Position::new(0, 1);
+        add_cursor(&mut doc, 1, 1);
+        doc.insert_text_multi("X");
+        assert_eq!(doc.buffer.to_string(), "aXb\ncXd");
+        assert_multi_edit_undoable(&mut doc, "ab\ncd");
+    }
+
+    #[test]
+    fn insert_multi_replacing_selections_is_undoable() {
+        // The multi-column selection case: several selections replaced at once.
+        let mut doc = doc_with("photo photo photo");
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(0, 5);
+        add_cursor_with_selection(&mut doc, 0, 6, 11);
+        add_cursor_with_selection(&mut doc, 0, 12, 17);
+        doc.insert_text_multi("video");
+        assert_eq!(doc.buffer.to_string(), "video video video");
+        assert_multi_edit_undoable(&mut doc, "photo photo photo");
+    }
+
+    #[test]
+    fn per_cursor_is_undoable() {
+        let mut doc = doc_with("aa\nbb");
+        doc.cursor.position = Position::new(0, 2);
+        add_cursor(&mut doc, 1, 2);
+        doc.insert_text_per_cursor(&["11", "22"]);
+        assert_eq!(doc.buffer.to_string(), "aa11\nbb22");
+        assert_multi_edit_undoable(&mut doc, "aa\nbb");
+    }
+
+    #[test]
+    fn newline_multi_is_undoable() {
+        let mut doc = doc_with("aa\nbb");
+        doc.cursor.position = Position::new(0, 2);
+        add_cursor(&mut doc, 1, 2);
+        doc.insert_newline_multi();
+        assert_eq!(doc.buffer.to_string(), "aa\n\nbb\n");
+        assert_multi_edit_undoable(&mut doc, "aa\nbb");
+    }
+
+    #[test]
+    fn backspace_multi_is_undoable() {
+        let mut doc = doc_with("Xhello\nXworld");
+        doc.cursor.position = Position::new(0, 1);
+        add_cursor(&mut doc, 1, 1);
+        doc.backspace_multi();
+        assert_eq!(doc.buffer.to_string(), "hello\nworld");
+        assert_multi_edit_undoable(&mut doc, "Xhello\nXworld");
+    }
+
+    #[test]
+    fn delete_forward_multi_is_undoable() {
+        let mut doc = doc_with("Xhello\nXworld");
+        doc.cursor.position = Position::new(0, 0);
+        add_cursor(&mut doc, 1, 0);
+        doc.delete_forward_multi();
+        assert_eq!(doc.buffer.to_string(), "hello\nworld");
+        assert_multi_edit_undoable(&mut doc, "Xhello\nXworld");
+    }
+
+    #[test]
+    fn delete_selection_multi_is_undoable() {
+        let mut doc = doc_with("aabbcc");
+        doc.cursor.position = Position::new(0, 2);
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        let mut sc = Cursor::new();
+        sc.position = Position::new(0, 6);
+        sc.selection_anchor = Some(Position::new(0, 4));
+        doc.secondary_cursors.push(sc);
+        doc.delete_selection_multi_public();
+        assert_eq!(doc.buffer.to_string(), "bb");
+        assert_multi_edit_undoable(&mut doc, "aabbcc");
+    }
+
+    #[test]
+    fn undo_restores_stacked_cursors() {
+        let mut doc = doc_with("ab\ncd");
+        doc.cursor.position = Position::new(0, 1);
+        add_cursor(&mut doc, 1, 1);
+        doc.insert_text_multi("X");
+        assert_eq!(doc.buffer.to_string(), "aXb\ncXd");
+
+        doc.undo();
+
+        assert_eq!(doc.buffer.to_string(), "ab\ncd");
+        assert_eq!(
+            doc.secondary_cursors.len(),
+            1,
+            "undo must keep the extra cursor, not collapse to one",
+        );
+        assert_eq!(doc.cursor.position, Position::new(0, 1));
+        assert_eq!(doc.secondary_cursors[0].position, Position::new(1, 1));
+    }
+
+    #[test]
+    fn undo_restores_multi_cursor_selection() {
+        // A column selection: "aa" selected on each of two lines.
+        let mut doc = doc_with("aaXX\naaYY");
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(0, 2);
+        add_cursor_with_selection(&mut doc, 1, 0, 2);
+        doc.insert_text_multi("Z");
+        assert_eq!(doc.buffer.to_string(), "ZXX\nZYY");
+
+        doc.undo();
+
+        assert_eq!(doc.buffer.to_string(), "aaXX\naaYY");
+        assert_eq!(
+            doc.secondary_cursors.len(),
+            1,
+            "undo must restore the column selection, not collapse to one cursor",
+        );
+        assert_eq!(doc.cursor.selection_anchor, Some(Position::new(0, 0)));
+        assert_eq!(doc.cursor.position, Position::new(0, 2));
+        assert_eq!(
+            doc.secondary_cursors[0].selection_anchor,
+            Some(Position::new(1, 0)),
+        );
+        assert_eq!(doc.secondary_cursors[0].position, Position::new(1, 2));
+    }
+
+    #[test]
+    fn redo_restores_multi_cursor_after_edit() {
+        let mut doc = doc_with("aaXX\naaYY");
+        doc.cursor.selection_anchor = Some(Position::new(0, 0));
+        doc.cursor.position = Position::new(0, 2);
+        add_cursor_with_selection(&mut doc, 1, 0, 2);
+        doc.insert_text_multi("Z");
+        doc.undo();
+        doc.redo();
+
+        assert_eq!(doc.buffer.to_string(), "ZXX\nZYY");
+        assert_eq!(
+            doc.secondary_cursors.len(),
+            1,
+            "redo must keep the multi-cursor state",
+        );
+        assert_eq!(doc.cursor.position, Position::new(0, 1));
+        assert_eq!(doc.secondary_cursors[0].position, Position::new(1, 1));
     }
 }

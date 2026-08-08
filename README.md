@@ -192,6 +192,8 @@ simple, stable, and fast as possible.
 | Alt+Shift+Period | Select next occurrence       |
 | Escape           | Clear secondary cursors      |
 
+Edits made with multiple cursors undo and redo as a single step (Ctrl+Z / Ctrl+Y).
+
 ### Line Movement
 
 | Shortcut | Action         |
@@ -310,7 +312,7 @@ The value must be one of the theme names bundled with [syntect](https://github.c
 | `"base16-ocean.dark"`    | Cool blue-tinted dark palette                                            |
 | `"base16-ocean.light"`   | Cool blue-tinted light palette                                           |
 
-You can also load custom `.tmTheme` files (TextMate/Sublime Text theme format) by placing them alongside the executable. See the [syntect documentation](https://docs.rs/syntect/latest/syntect/highlighting/struct.ThemeSet.html) for details on loading additional themes.
+Only the bundled themes listed above are available. Loading custom `.tmTheme` files is not currently supported.
 
 #### Theme Colors
 

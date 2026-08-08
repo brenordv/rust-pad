@@ -377,6 +377,7 @@ mod tests {
                 deleted: String::new(),
                 cursor_before: CursorSnapshot::default(),
                 cursor_after: CursorSnapshot::default(),
+                multi_cursor: None,
             }],
             seq,
         }

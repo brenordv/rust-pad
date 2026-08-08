@@ -376,6 +376,7 @@ mod tests {
             deleted: deleted.to_string(),
             cursor_before: CursorSnapshot::default(),
             cursor_after: CursorSnapshot::default(),
+            multi_cursor: None,
         }
     }
 
