@@ -105,6 +105,7 @@ impl Document {
         };
 
         Ok(Self {
+            id: super::next_document_id(),
             buffer,
             cursor: crate::cursor::Cursor::new(),
             secondary_cursors: Vec::new(),

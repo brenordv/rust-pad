@@ -11,6 +11,7 @@ mod multi_cursor;
 pub use io::validate_file_size;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::buffer::TextBuffer;
@@ -91,8 +92,24 @@ pub enum ScrollOrigin {
     Programmatic,
 }
 
+/// Process-wide counter minting a unique identity for every `Document`.
+static DOCUMENT_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Returns a process-unique document identity.
+///
+/// Distinguishes documents that happen to share a `content_version` (every
+/// document starts at 0), so caches keyed only by version cannot mistake one
+/// document for another. Mirrors the session-id counter in `rust-pad-config`.
+fn next_document_id() -> u64 {
+    DOCUMENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 /// A single document with its buffer, cursor, history, and metadata.
 pub struct Document {
+    /// Process-unique identity, distinct from `content_version` (which is not
+    /// unique across documents). Used to key per-document caches such as the
+    /// search engine's match cache.
+    pub id: u64,
     /// The text buffer.
     pub buffer: TextBuffer,
     /// The cursor state.
@@ -219,6 +236,7 @@ impl Document {
             None => UndoManager::in_memory(),
         };
         Self {
+            id: next_document_id(),
             buffer: TextBuffer::new(),
             cursor: Cursor::new(),
             secondary_cursors: Vec::new(),
@@ -764,6 +782,16 @@ mod tests {
     fn test_content_version_starts_at_zero() {
         let doc = Document::new();
         assert_eq!(doc.content_version, 0);
+    }
+
+    #[test]
+    fn each_document_gets_a_distinct_id() {
+        let a = Document::new();
+        let b = Document::new();
+        assert_ne!(
+            a.id, b.id,
+            "every document must have a unique identity, unlike content_version"
+        );
     }
 
     #[test]

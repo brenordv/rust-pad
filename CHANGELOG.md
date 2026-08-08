@@ -1,5 +1,27 @@
 # Changelog
 
+## [3.2.0]
+
+### Added
+- **`F3` and `Shift+F3` repeat the last search without the Find & Replace window open.** Once you have
+  searched for something, `F3` jumps to the next match of that term and `Shift+F3` to the previous one,
+  even after you close the dialog, so you can step through matches straight from the editor.
+
+### Fixed
+- **The left pane in a vertical split shows its vertical scrollbar again.** When the left pane was made
+  narrow enough (narrower than a single tab), the editor was sized to the tab strip's minimum width instead
+  of the pane, so its scrollbar was drawn past the divider and clipped out of view. The editor is now kept
+  within the pane at any width, so an overflowing document always shows its scrollbar.
+- **Search highlight no longer lands on the wrong place after switching tabs.** Searching the same word in
+  a second tab could highlight unrelated positions: the match cache was keyed by content version alone, and
+  two tabs can share one, so the second tab reused the first tab's match offsets. Matches are now keyed per
+  document, so each tab searches its own text.
+- **The editor's scroll position and cursor survive a crash or forced quit.** Each file's scroll position
+  and cursor were already restored when you reopened it, but they were written only when the app closed
+  cleanly. An app that was killed, force-quit, or taken down by an OS shutdown reopened the files scrolled
+  back to the top. Both are now saved on the same periodic interval as the list of open tabs, so a hard stop
+  loses at most the last few seconds of scrolling instead of the whole position.
+
 ## [3.1.1]
 
 ### Added

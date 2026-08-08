@@ -217,6 +217,10 @@ pub struct App {
     /// autosave tick skips writing while the live tabs still hash to this,
     /// so unchanged sessions don't rewrite redb every interval.
     last_snapshot_sig: Option<u64>,
+    /// Fingerprint of the last persisted per-file view-state. The flush tick
+    /// skips writing while every open file-backed tab still hashes to this, so
+    /// idle sessions don't rewrite the view-state store every interval.
+    last_view_state_sig: Option<u64>,
     /// Consecutive session-snapshot failures, used to surface a persistent
     /// failure to the user once (not every interval) and announce recovery.
     consecutive_snapshot_failures: u32,
@@ -633,6 +637,7 @@ impl App {
             session_store,
             session_content_max_kb: app_config.session_content_max_kb,
             last_snapshot_sig: None,
+            last_view_state_sig: None,
             consecutive_snapshot_failures: 0,
             session_over_limit_warned: std::collections::HashSet::new(),
             max_file_size_bytes,
@@ -697,6 +702,10 @@ impl App {
         // tab restored from the session. Runtime opens go through
         // try_open_file_from_bytes which has its own restore hook.
         app.restore_view_states_for_open_files();
+
+        // Seed the view-state fingerprint with the just-restored values so the
+        // first flush tick doesn't re-persist an unchanged view.
+        app.last_view_state_sig = Some(app.view_state_sig());
 
         app
     }
@@ -1924,6 +1933,7 @@ impl eframe::App for App {
         if self.last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
             self.tabs.flush_all_history();
             self.maybe_autosave_session();
+            self.maybe_persist_view_states();
             self.last_flush = Instant::now();
         }
 
@@ -1964,9 +1974,7 @@ impl eframe::App for App {
 
         // Persist per-file view-state for every file-backed open tab so
         // re-opening the file in a future session restores cursor + scroll.
-        for doc in &self.tabs.documents {
-            self.persist_view_state(doc);
-        }
+        self.persist_open_view_states();
 
         // Persist the session (tab list + bounded unsaved content) as one
         // atomic snapshot, flagged as a clean shutdown. Shares the exact path
@@ -2250,6 +2258,7 @@ mod tests {
             session_store: None,
             session_content_max_kb: 10_240,
             last_snapshot_sig: None,
+            last_view_state_sig: None,
             consecutive_snapshot_failures: 0,
             session_over_limit_warned: std::collections::HashSet::new(),
             max_file_size_bytes: Some(512 * 1024 * 1024),
@@ -3464,16 +3473,34 @@ mod tests {
     }
 
     #[test]
-    fn find_nav_shortcut_gated_on_dialog_visible() {
+    fn find_nav_shortcut_repeats_last_search_with_dialog_closed() {
+        let mut app = test_app();
+        app.tabs.active_doc_mut().insert_text("foo foo foo");
+
+        // Nothing searched yet: F3 is a no-op and is not consumed.
+        assert!(!app.find_replace.visible);
+        assert!(!app.handle_find_nav_shortcut(egui::Key::F3, false));
+
+        // Remember a term the way a prior search leaves it, WITHOUT priming
+        // options.query, so this exercises the closed-dialog sync path.
+        app.find_replace.find_text = "foo".to_string();
+        assert!(app.find_replace.options.query.is_empty());
+
+        // F3 now repeats the last search on the active tab with the dialog shut.
+        assert!(app.handle_find_nav_shortcut(egui::Key::F3, false));
+        assert_eq!(app.find_replace.options.query, "foo");
+        assert!(app.find_replace.status.contains("matches"));
+        assert!(app.handle_find_nav_shortcut(egui::Key::F3, true));
+        assert!(app.find_replace.status.contains("matches"));
+    }
+
+    #[test]
+    fn find_nav_shortcut_works_with_dialog_open() {
         let mut app = test_app();
         app.tabs.active_doc_mut().insert_text("foo foo foo");
         set_find_text(&mut app, "foo");
-
-        // Dialog closed: F3 is not consumed and does not search.
-        assert!(!app.handle_find_nav_shortcut(egui::Key::F3, false));
-
-        // Dialog open: F3 runs Find Next, Shift+F3 runs Find Prev.
         app.find_replace.visible = true;
+
         assert!(app.handle_find_nav_shortcut(egui::Key::F3, false));
         assert!(app.find_replace.status.contains("matches"));
         assert!(app.handle_find_nav_shortcut(egui::Key::F3, true));
