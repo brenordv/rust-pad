@@ -15,6 +15,21 @@ pub struct SearchMatch {
     pub line: usize,
 }
 
+/// Identity of the document a search targets, used to invalidate the match
+/// cache across documents.
+///
+/// `version` alone is not a safe cache key: every document's `content_version`
+/// starts at 0, so two different documents can share a version. Pairing it with
+/// the document's process-unique `id` makes the cache correctly miss when the
+/// engine is pointed at a different document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DocRevision {
+    /// The document's process-unique id (`Document::id`).
+    pub id: u64,
+    /// The document's `content_version` at search time.
+    pub version: u64,
+}
+
 /// Search configuration options.
 #[derive(Debug, Clone, Default)]
 pub struct SearchOptions {
@@ -39,8 +54,9 @@ pub struct SearchEngine {
     pub matches: Vec<SearchMatch>,
     /// Index of the current/active match.
     pub current_match: Option<usize>,
-    /// Content version when matches were last computed (for cache invalidation).
-    last_search_version: Option<u64>,
+    /// Document identity + content version when matches were last computed
+    /// (for cache invalidation across documents and edits).
+    last_revision: Option<DocRevision>,
     /// Cache key combining query + options for the last search.
     last_search_key: Option<String>,
 }
@@ -59,7 +75,7 @@ impl SearchEngine {
             compiled_for: None,
             matches: Vec::new(),
             current_match: None,
-            last_search_version: None,
+            last_revision: None,
             last_search_key: None,
         }
     }
@@ -94,10 +110,12 @@ impl SearchEngine {
         self.find_all_versioned(buffer, options, None)
     }
 
-    /// Finds all matches in the buffer, with optional version-based caching.
+    /// Finds all matches in the buffer, with optional revision-based caching.
     ///
-    /// When `content_version` is provided, skips re-searching if the version
-    /// and query options haven't changed since the last call.
+    /// When `revision` is provided, skips re-searching if the document identity,
+    /// content version, and query options all match the last call. Passing the
+    /// document id (not just the version) is what keeps a shared engine from
+    /// reusing one document's matches on another that happens to share a version.
     ///
     /// # Errors
     ///
@@ -106,12 +124,12 @@ impl SearchEngine {
         &mut self,
         buffer: &TextBuffer,
         options: &SearchOptions,
-        content_version: Option<u64>,
+        revision: Option<DocRevision>,
     ) -> Result<()> {
         if options.query.is_empty() {
             self.matches.clear();
             self.current_match = None;
-            self.last_search_version = None;
+            self.last_revision = None;
             self.last_search_key = None;
             return Ok(());
         }
@@ -121,8 +139,8 @@ impl SearchEngine {
             options.query, options.use_regex, options.case_sensitive, options.whole_word
         );
 
-        if let Some(version) = content_version {
-            if self.last_search_version == Some(version)
+        if let Some(revision) = revision {
+            if self.last_revision == Some(revision)
                 && self.last_search_key.as_deref() == Some(&cache_key)
             {
                 return Ok(());
@@ -165,7 +183,7 @@ impl SearchEngine {
             self.current_match = Some(0);
         }
 
-        self.last_search_version = content_version;
+        self.last_revision = revision;
         self.last_search_key = Some(cache_key);
 
         Ok(())
@@ -293,7 +311,7 @@ impl SearchEngine {
         self.current_match = None;
         self.compiled = None;
         self.compiled_for = None;
-        self.last_search_version = None;
+        self.last_revision = None;
         self.last_search_key = None;
     }
 }
@@ -543,5 +561,120 @@ mod tests {
         // After last match, should wrap to 0
         let idx_wrap = engine.find_next(engine.matches[idx2].end).unwrap();
         assert_eq!(idx_wrap, 0);
+    }
+
+    /// The version cache reuses matches only for the same `(id, version)` +
+    /// query. Searching a different buffer under the same revision returns the
+    /// cached matches (the optimization that repeated Find Next relies on).
+    #[test]
+    fn versioned_cache_reuses_matches_for_same_revision() {
+        let mut engine = SearchEngine::new();
+        let opts = SearchOptions {
+            query: "x".to_string(),
+            ..Default::default()
+        };
+        let rev = DocRevision { id: 1, version: 0 };
+
+        engine
+            .find_all_versioned(&TextBuffer::from("x...."), &opts, Some(rev))
+            .unwrap();
+        assert_eq!(engine.matches[0].start, 0);
+
+        // Same revision + query on a different buffer: cache hit, no re-scan.
+        engine
+            .find_all_versioned(&TextBuffer::from("....x"), &opts, Some(rev))
+            .unwrap();
+        assert_eq!(
+            engine.matches[0].start, 0,
+            "same revision must reuse the cached match set"
+        );
+    }
+
+    /// Two documents that share a `content_version` must not collide: a
+    /// different document id forces a re-scan.
+    #[test]
+    fn versioned_cache_misses_on_different_document_id() {
+        let mut engine = SearchEngine::new();
+        let opts = SearchOptions {
+            query: "x".to_string(),
+            ..Default::default()
+        };
+
+        engine
+            .find_all_versioned(
+                &TextBuffer::from("x...."),
+                &opts,
+                Some(DocRevision { id: 1, version: 0 }),
+            )
+            .unwrap();
+        engine
+            .find_all_versioned(
+                &TextBuffer::from("....x"),
+                &opts,
+                Some(DocRevision { id: 2, version: 0 }),
+            )
+            .unwrap();
+        assert_eq!(
+            engine.matches[0].start, 4,
+            "a different document id must force a re-scan"
+        );
+    }
+
+    /// Editing the same document (higher `content_version`) forces a re-scan.
+    #[test]
+    fn versioned_cache_misses_on_changed_content_version() {
+        let mut engine = SearchEngine::new();
+        let opts = SearchOptions {
+            query: "x".to_string(),
+            ..Default::default()
+        };
+
+        engine
+            .find_all_versioned(
+                &TextBuffer::from("x...."),
+                &opts,
+                Some(DocRevision { id: 1, version: 0 }),
+            )
+            .unwrap();
+        engine
+            .find_all_versioned(
+                &TextBuffer::from("....x"),
+                &opts,
+                Some(DocRevision { id: 1, version: 1 }),
+            )
+            .unwrap();
+        assert_eq!(
+            engine.matches[0].start, 4,
+            "a changed content version must force a re-scan"
+        );
+    }
+
+    /// Toggling a search option under the same revision still re-scans: the
+    /// query/options key gates alongside the revision.
+    #[test]
+    fn versioned_cache_misses_on_toggled_option() {
+        let mut engine = SearchEngine::new();
+        let rev = DocRevision { id: 1, version: 0 };
+        let buf = TextBuffer::from("X x");
+
+        let ci = SearchOptions {
+            query: "x".to_string(),
+            case_sensitive: false,
+            ..Default::default()
+        };
+        engine.find_all_versioned(&buf, &ci, Some(rev)).unwrap();
+        assert_eq!(engine.match_count(), 2);
+
+        let cs = SearchOptions {
+            query: "x".to_string(),
+            case_sensitive: true,
+            ..Default::default()
+        };
+        engine.find_all_versioned(&buf, &cs, Some(rev)).unwrap();
+        assert_eq!(
+            engine.match_count(),
+            1,
+            "toggling case sensitivity must re-scan even at the same revision"
+        );
     }
 }

@@ -70,6 +70,70 @@ impl App {
             tracing::warn!("Failed to save view-state for '{}': {e}", path.display());
         }
     }
+
+    /// Persists cursor + scroll for every file-backed open tab.
+    ///
+    /// [`Self::persist_view_state`] no-ops for untitled tabs and for a missing
+    /// store, so this is safe to call unconditionally. Called from the periodic
+    /// flush and from `on_exit`, so an open file's scroll and cursor are captured
+    /// during the session as well as at exit.
+    pub(crate) fn persist_open_view_states(&self) {
+        for doc in &self.tabs.documents {
+            self.persist_view_state(doc);
+        }
+    }
+
+    /// Fingerprint of the persisted view-state across all file-backed tabs.
+    ///
+    /// Hashes each file-backed document's path, scroll offsets, and cursor
+    /// position so the flush tick can skip a redb write when nothing moved.
+    /// The `f32` offsets are hashed by bit pattern (they are non-negative and
+    /// never `NaN`; scroll math clamps against `0.0`). Untitled tabs carry no
+    /// persisted view-state and are excluded.
+    pub(crate) fn view_state_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for doc in &self.tabs.documents {
+            let Some(path) = doc.file_path.as_ref() else {
+                continue;
+            };
+            path.hash(&mut h);
+            doc.scroll_y.to_bits().hash(&mut h);
+            doc.scroll_x.to_bits().hash(&mut h);
+            doc.cursor.position.line.hash(&mut h);
+            doc.cursor.position.col.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Periodic entry point: persists view-state for open file-backed tabs, but
+    /// only when it changed since the last persist. No-op when the view-state
+    /// store is unavailable.
+    ///
+    /// Mirrors `maybe_autosave_session`, giving scroll + cursor the same
+    /// crash-safe cadence as the session's tab list: both are written on the
+    /// flush tick, so an unexpected termination keeps the on-screen position.
+    pub(crate) fn maybe_persist_view_states(&mut self) {
+        if self.view_state_store.is_none() {
+            return;
+        }
+        let sig = self.view_state_sig();
+        if self.last_view_state_sig == Some(sig) {
+            tracing::trace!("view-state autosave skipped: unchanged");
+            return;
+        }
+        self.persist_open_view_states();
+        self.last_view_state_sig = Some(sig);
+        tracing::debug!(
+            count = self
+                .tabs
+                .documents
+                .iter()
+                .filter(|d| d.file_path.is_some())
+                .count(),
+            "view-state autosave persisted"
+        );
+    }
 }
 
 /// Looks up the saved view-state for `path` and applies it to `doc`.
@@ -246,5 +310,200 @@ mod tests {
 
         // Untitled doc preserved as-is.
         assert_eq!(app.tabs.documents[active].scroll_y, 10.0);
+    }
+
+    /// Writes a file with `n` short lines into `dir` and returns its path.
+    fn file_with_lines(dir: &TempDir, name: &str, n: usize) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        let body: String = (0..n).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, body).expect("write file");
+        path
+    }
+
+    #[test]
+    fn maybe_persist_writes_view_state_without_on_exit() {
+        // Simulates a crash: the periodic flush persisted view-state, but
+        // on_exit never ran. The record must still be on disk.
+        let (store, _sdir) = store_in_tempdir();
+        let mut app = test_app();
+        app.view_state_store = Some(store);
+
+        let file_dir = TempDir::new().expect("file dir");
+        let file = file_with_lines(&file_dir, "crash.txt", 20);
+        app.tabs.open_file(&file).expect("open");
+        let active = app.tabs.active;
+        app.tabs.documents[active].scroll_y = 7.0;
+
+        app.maybe_persist_view_states();
+
+        let key = paths::canonical_path_key(&file);
+        let loaded = app
+            .view_state_store
+            .as_ref()
+            .unwrap()
+            .load(&key)
+            .expect("load")
+            .expect("record present after periodic persist");
+        assert_eq!(loaded.scroll_y, 7.0);
+    }
+
+    #[test]
+    fn maybe_persist_full_crash_roundtrip_restores_scroll() {
+        use rust_pad_config::session::SessionStore;
+
+        // Explicit shared store paths so a second App can reopen them after the
+        // first is dropped (redb holds an exclusive file lock).
+        let store_dir = TempDir::new().expect("store dir");
+        let session_path = store_dir.path().join("session.redb");
+        let vs_path = store_dir.path().join("view-state.redb");
+
+        let file_dir = TempDir::new().expect("file dir");
+        let file = file_with_lines(&file_dir, "roundtrip.txt", 40);
+
+        // Session 1: open, scroll, persist session + view-state, then drop
+        // WITHOUT on_exit (as if the process was killed).
+        {
+            let mut app = test_app();
+            app.session_store = Some(SessionStore::open(&session_path).expect("session store"));
+            app.view_state_store = Some(ViewStateStore::open(&vs_path).expect("vs store"));
+            app.tabs.open_file(&file).expect("open");
+            let active = app.tabs.active;
+            app.tabs.documents[active].scroll_y = 12.0;
+            app.tabs.documents[active].cursor.position = rust_pad_core::cursor::Position::new(5, 2);
+
+            app.run_session_snapshot(false);
+            app.maybe_persist_view_states();
+        }
+
+        // Session 2: reopen the same stores and restore.
+        let mut app2 = test_app();
+        app2.session_store = Some(SessionStore::open(&session_path).expect("session store 2"));
+        app2.view_state_store = Some(ViewStateStore::open(&vs_path).expect("vs store 2"));
+        App::restore_session(
+            &mut app2.tabs,
+            &app2.session_store,
+            app2.session_content_max_kb,
+        );
+        app2.restore_view_states_for_open_files();
+
+        let restored = app2
+            .tabs
+            .documents
+            .iter()
+            .find(|d| d.file_path.is_some())
+            .expect("file tab restored");
+        assert_eq!(restored.scroll_y, 12.0);
+        assert_eq!(restored.cursor.position.line, 5);
+        assert_eq!(restored.cursor.position.col, 2);
+    }
+
+    #[test]
+    fn maybe_persist_skips_redundant_write_when_unchanged() {
+        let (store, _sdir) = store_in_tempdir();
+        let mut app = test_app();
+        app.view_state_store = Some(store);
+
+        let file_dir = TempDir::new().expect("file dir");
+        let file = file_with_lines(&file_dir, "gate.txt", 20);
+        app.tabs.open_file(&file).expect("open");
+        app.tabs.active_doc_mut().scroll_y = 3.0;
+
+        app.maybe_persist_view_states();
+
+        // Overwrite the record out-of-band with a sentinel value.
+        let key = paths::canonical_path_key(&file);
+        let sentinel = ViewState {
+            scroll_y: 99.0,
+            scroll_x: 0.0,
+            cursor_line: 0,
+            cursor_col: 0,
+            last_used_unix_ms: 0,
+        };
+        app.view_state_store
+            .as_ref()
+            .unwrap()
+            .save(&key, &sentinel)
+            .expect("save sentinel");
+
+        // The view didn't move, so the gate must skip and leave the sentinel.
+        app.maybe_persist_view_states();
+
+        let loaded = app
+            .view_state_store
+            .as_ref()
+            .unwrap()
+            .load(&key)
+            .expect("load")
+            .expect("some");
+        assert_eq!(
+            loaded.scroll_y, 99.0,
+            "unchanged view must not trigger a redb write"
+        );
+    }
+
+    #[test]
+    fn maybe_persist_rewrites_after_scroll_change() {
+        let (store, _sdir) = store_in_tempdir();
+        let mut app = test_app();
+        app.view_state_store = Some(store);
+
+        let file_dir = TempDir::new().expect("file dir");
+        let file = file_with_lines(&file_dir, "move.txt", 20);
+        app.tabs.open_file(&file).expect("open");
+        app.tabs.active_doc_mut().scroll_y = 1.0;
+
+        let sig1 = app.view_state_sig();
+        app.maybe_persist_view_states();
+
+        app.tabs.active_doc_mut().scroll_y = 6.0;
+        let sig2 = app.view_state_sig();
+        assert_ne!(sig1, sig2, "moving the scroll must change the fingerprint");
+
+        app.maybe_persist_view_states();
+        let key = paths::canonical_path_key(&file);
+        let loaded = app
+            .view_state_store
+            .as_ref()
+            .unwrap()
+            .load(&key)
+            .expect("load")
+            .expect("some");
+        assert_eq!(loaded.scroll_y, 6.0);
+    }
+
+    #[test]
+    fn maybe_persist_noop_without_store() {
+        let mut app = test_app();
+        assert!(app.view_state_store.is_none());
+        app.maybe_persist_view_states();
+        assert!(app.last_view_state_sig.is_none());
+    }
+
+    #[test]
+    fn on_exit_persists_view_state() {
+        use eframe::App as _;
+
+        let (store, _sdir) = store_in_tempdir();
+        let mut app = test_app();
+        app.view_state_store = Some(store);
+        let cfg_dir = TempDir::new().expect("cfg dir");
+        app.config_path = cfg_dir.path().join("rust-pad.json");
+
+        let file_dir = TempDir::new().expect("file dir");
+        let file = file_with_lines(&file_dir, "exit.txt", 20);
+        app.tabs.open_file(&file).expect("open");
+        app.tabs.active_doc_mut().scroll_y = 9.0;
+
+        app.on_exit();
+
+        let key = paths::canonical_path_key(&file);
+        let loaded = app
+            .view_state_store
+            .as_ref()
+            .unwrap()
+            .load(&key)
+            .expect("load")
+            .expect("some");
+        assert_eq!(loaded.scroll_y, 9.0);
     }
 }

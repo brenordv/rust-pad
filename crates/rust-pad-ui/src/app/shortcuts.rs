@@ -206,22 +206,33 @@ impl App {
         true
     }
 
-    /// Find-navigation shortcuts (F3 = next match, Shift+F3 = previous) while
-    /// the Find & Replace window is open. This handles the case where the main
-    /// window (editor) is focused; when the separate dialog window is focused,
-    /// its own closure handles F3. Returns `true` if the key was consumed.
+    /// Find-navigation shortcuts (F3 = next match, Shift+F3 = previous) from the
+    /// main window. Works while the Find & Replace window is open, and also when
+    /// it is closed as long as a search term is remembered, so the last search
+    /// repeats without reopening the dialog. When the separate dialog window is
+    /// focused, its own closure handles F3 instead. Returns `true` if the key
+    /// was consumed.
     pub(crate) fn handle_find_nav_shortcut(&mut self, key: egui::Key, shift: bool) -> bool {
-        if !self.find_replace.visible {
+        let Some(action) = crate::dialogs::find_hotkey_action(key, shift) else {
             return false;
-        }
-        match crate::dialogs::find_hotkey_action(key, shift) {
-            Some(action) => {
-                tracing::debug!(?action, handler = "global", "find nav");
-                self.handle_search_action(action);
-                true
+        };
+        if !self.find_replace.visible {
+            // Nothing to repeat until the user has entered a query.
+            if self.find_replace.find_text.trim().is_empty() {
+                return false;
             }
-            None => false,
+            // `show()` mirrors the find field into `options.query` only while the
+            // dialog is open, so refresh it here for the closed-dialog case.
+            self.find_replace.options.query = self.find_replace.find_text.clone();
         }
+        tracing::debug!(
+            ?action,
+            visible = self.find_replace.visible,
+            handler = "global",
+            "find nav"
+        );
+        self.handle_search_action(action);
+        true
     }
 
     /// Zoom shortcuts (Ctrl+Plus, Ctrl+Minus, Ctrl+0).

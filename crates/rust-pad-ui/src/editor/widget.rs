@@ -166,7 +166,19 @@ impl<'a> EditorWidget<'a> {
 
     /// Shows the editor widget and returns a response.
     pub fn show(&mut self, ui: &mut Ui) -> Response {
-        let available = ui.available_size();
+        // Clamp the editor to the clip bounds. In split view a pane's tab strip
+        // has a minimum width that can push this child UI wider than the pane,
+        // so `available_size()` would overshoot; the whole rect (text area,
+        // gutter, scrollbar track, click mapping) derives from this size, so an
+        // overshoot pushes the vertical scrollbar past the pane edge where the
+        // pane clip hides it. Intersecting with the clip keeps every derived
+        // metric inside the pane. In single-pane mode the clip already equals
+        // the available area, so this is a no-op there.
+        let available = ui
+            .available_rect_before_wrap()
+            .intersect(ui.clip_rect())
+            .size()
+            .max(Vec2::ZERO);
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let rect = response.rect;
         let version_before_input = self.doc.content_version;

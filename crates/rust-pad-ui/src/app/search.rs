@@ -9,7 +9,7 @@ use rust_pad_core::buffer::TextBuffer;
 use rust_pad_core::cursor::{char_to_pos, pos_to_char};
 use rust_pad_core::document::Document;
 use rust_pad_core::search::{
-    FolderSearchLimits, FolderSearchOutcome, SearchEngine, SearchMatch, SearchOptions,
+    DocRevision, FolderSearchLimits, FolderSearchOutcome, SearchEngine, SearchMatch, SearchOptions,
 };
 
 use crate::dialogs::{FindReplaceAction, SearchScope};
@@ -410,7 +410,10 @@ impl App {
                 if let Err(e) = self.find_replace.engine.find_all_versioned(
                     &doc.buffer,
                     &self.find_replace.options,
-                    Some(doc.content_version),
+                    Some(DocRevision {
+                        id: doc.id,
+                        version: doc.content_version,
+                    }),
                 ) {
                     self.find_replace.status = format!("Error: {e}");
                 } else {
@@ -427,7 +430,10 @@ impl App {
                 let _ = self.find_replace.engine.find_all_versioned(
                     &doc.buffer,
                     &self.find_replace.options,
-                    Some(doc.content_version),
+                    Some(DocRevision {
+                        id: doc.id,
+                        version: doc.content_version,
+                    }),
                 );
 
                 let cursor_char = pos_to_char(&doc.buffer, doc.cursor.position).unwrap_or(0);
@@ -444,7 +450,10 @@ impl App {
                 let _ = self.find_replace.engine.find_all_versioned(
                     &doc.buffer,
                     &self.find_replace.options,
-                    Some(doc.content_version),
+                    Some(DocRevision {
+                        id: doc.id,
+                        version: doc.content_version,
+                    }),
                 );
 
                 // Use the selection start (not cursor/end) so FindPrev moves
@@ -722,6 +731,36 @@ mod tests {
     use super::*;
     use rust_pad_core::document::Document;
     use rust_pad_core::search::SearchMatch;
+
+    /// A search in one tab must not reuse another tab's match offsets. The two
+    /// tabs share a `content_version`, so the engine's match cache has to
+    /// distinguish them by document identity, not version alone.
+    #[test]
+    fn current_tab_search_rescans_after_switching_tabs() {
+        use rust_pad_core::buffer::TextBuffer;
+        let mut app = super::super::tests::test_app();
+
+        // Tab A: "text" at char 0. Tab B: "text" at char 10.
+        app.tabs.documents[0].buffer = TextBuffer::from("text here");
+        app.tabs.documents[0].content_version = 5;
+        app.tabs.new_tab();
+        app.tabs.documents[1].buffer = TextBuffer::from("zzzz zzzz text");
+        app.tabs.documents[1].content_version = 5;
+
+        app.find_replace.find_text = "text".to_string();
+        app.find_replace.options.query = "text".to_string();
+
+        app.tabs.active = 0;
+        app.handle_search_action(FindReplaceAction::Search);
+        assert_eq!(app.find_replace.engine.matches[0].start, 0);
+
+        app.tabs.active = 1;
+        app.handle_search_action(FindReplaceAction::Search);
+        assert_eq!(
+            app.find_replace.engine.matches[0].start, 10,
+            "Tab B must be re-searched, not reuse Tab A's stale match offsets"
+        );
+    }
 
     #[test]
     fn test_navigate_to_match_sets_scroll_to_cursor() {

@@ -694,6 +694,144 @@ mod tests {
         );
     }
 
+    /// The left split pane must show a vertical scrollbar for an overflowing
+    /// document at every pane width, including panes narrower than the tab
+    /// strip's minimum width (where the editor would otherwise overshoot the
+    /// pane and its scrollbar get clipped away).
+    #[test]
+    fn left_pane_shows_vscroll_at_every_width() {
+        use rust_pad_core::buffer::TextBuffer;
+
+        let tall = "let some_variable = compute_something(a, b, c); // a reasonably long line\n"
+            .repeat(600);
+
+        for &(screen_w, ratio) in &[
+            (1000.0_f32, 0.5_f32),
+            (1000.0, 0.2),
+            (600.0, 0.5),
+            (600.0, 0.2),
+            (400.0, 0.3),
+            (300.0, 0.25),
+            (240.0, 0.2),
+        ] {
+            let mut app = super::super::tests::test_app();
+            app.tabs.documents[0].buffer = TextBuffer::from(tall.as_str());
+            app.tabs.new_tab();
+            app.tabs.switch_to(1);
+            app.toggle_split_vertical();
+            if let Some(s) = app.split.as_mut() {
+                s.divider_ratio = ratio;
+            }
+
+            let ctx = egui::Context::default();
+            {
+                let mut fonts = egui::FontDefinitions::default();
+                let proportional = fonts
+                    .families
+                    .get(&egui::FontFamily::Proportional)
+                    .cloned()
+                    .unwrap_or_default();
+                fonts.families.insert(
+                    egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+                    proportional,
+                );
+                ctx.set_fonts(fonts);
+            }
+            for _ in 0..2 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(screen_w, 800.0),
+                    )),
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(raw, |ui| {
+                    app.render_split_panes(ui, false, false);
+                });
+            }
+
+            let (_, pane_rect, editor_rect, vscroll_track) = app
+                .test_pane_probe
+                .iter()
+                .find(|(p, _, _, _)| *p == PaneId::Left)
+                .copied()
+                .expect("left pane rendered");
+
+            assert!(
+                editor_rect.max.x <= pane_rect.max.x + 0.5,
+                "left editor overshoots its pane at screen_w={screen_w} ratio={ratio}: editor.max.x={} pane.max.x={}",
+                editor_rect.max.x,
+                pane_rect.max.x
+            );
+            assert!(
+                vscroll_track.is_some(),
+                "no vscroll at screen_w={screen_w} ratio={ratio}"
+            );
+            let track = vscroll_track.unwrap();
+            assert!(
+                track.max.x <= pane_rect.max.x + 0.5,
+                "track outside pane at screen_w={screen_w} ratio={ratio}: track={track:?} pane={pane_rect:?}"
+            );
+        }
+    }
+
+    /// A horizontal split whose panes are shorter than the tab strip must not
+    /// panic or produce a degenerate (negative or non-finite) editor rect; the
+    /// size clamp keeps it at worst zero.
+    #[test]
+    fn horizontal_split_shorter_than_tab_strip_stays_finite() {
+        use rust_pad_core::buffer::TextBuffer;
+
+        let mut app = super::super::tests::test_app();
+        app.tabs.documents[0].buffer = TextBuffer::from("line\n".repeat(200).as_str());
+        app.tabs.new_tab();
+        app.tabs.switch_to(1);
+        app.toggle_split_horizontal();
+
+        let ctx = egui::Context::default();
+        {
+            let mut fonts = egui::FontDefinitions::default();
+            let proportional = fonts
+                .families
+                .get(&egui::FontFamily::Proportional)
+                .cloned()
+                .unwrap_or_default();
+            fonts.families.insert(
+                egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+                proportional,
+            );
+            ctx.set_fonts(fonts);
+        }
+        // Total height 60px -> each pane ~27px, below the 38px tab strip.
+        for _ in 0..2 {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(600.0, 60.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                app.render_split_panes(ui, false, false);
+            });
+        }
+
+        assert!(
+            !app.test_pane_probe.is_empty(),
+            "panes should have rendered"
+        );
+        for (_, _pane_rect, editor_rect, _track) in &app.test_pane_probe {
+            assert!(
+                editor_rect.width() >= 0.0 && editor_rect.height() >= 0.0,
+                "editor rect went negative: {editor_rect:?}"
+            );
+            assert!(
+                editor_rect.width().is_finite() && editor_rect.height().is_finite(),
+                "editor rect not finite: {editor_rect:?}"
+            );
+        }
+    }
+
     #[test]
     fn apply_session_split_rejects_out_of_range_indices() {
         let mut app = super::super::tests::test_app();
