@@ -223,6 +223,22 @@ mod tests {
     }
 
     #[test]
+    fn shipped_syntax_themes_resolve() {
+        let hl = SyntaxHighlighter::new();
+        let themes = hl.available_themes();
+        for name in [
+            "base16-eighties.dark",
+            "InspiredGitHub",
+            "Solarized (light)",
+        ] {
+            assert!(
+                themes.contains(&name),
+                "bundled syntax theme '{name}' is missing from syntect's default set"
+            );
+        }
+    }
+
+    #[test]
     fn highlight_line_produces_non_empty_job() {
         let hl = SyntaxHighlighter::new();
         let syntax = hl.detect_syntax(Some(Path::new("test.rs")));

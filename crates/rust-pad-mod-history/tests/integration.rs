@@ -20,6 +20,7 @@ fn make_op(pos: usize, inserted: &str, deleted: &str) -> EditOperation {
         deleted: deleted.to_string(),
         cursor_before: cursor(0, pos),
         cursor_after: cursor(0, pos + inserted.len()),
+        multi_cursor: None,
     }
 }
 

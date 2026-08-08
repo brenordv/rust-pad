@@ -18,8 +18,8 @@ use crate::buffer::TextBuffer;
 use crate::cursor::{char_to_pos, pos_to_char, Cursor, Position};
 use crate::encoding::{LineEnding, TextEncoding};
 use crate::history::{
-    generate_unsaved_id, CursorSnapshot, EditOperation, HistoryConfig, PersistenceLayer,
-    UndoManager,
+    generate_unsaved_id, CursorSnapshot, EditOperation, HistoryConfig, MultiCursorTransition,
+    PersistenceLayer, SelectionSnapshot, UndoManager,
 };
 use crate::indent::IndentStyle;
 use crate::line_ops;
@@ -29,6 +29,14 @@ fn snap(pos: Position) -> CursorSnapshot {
     CursorSnapshot {
         line: pos.line,
         col: pos.col,
+    }
+}
+
+/// Captures a cursor's position and selection anchor for history recording.
+fn selection_snapshot(cursor: &Cursor) -> SelectionSnapshot {
+    SelectionSnapshot {
+        position: snap(cursor.position),
+        anchor: cursor.selection_anchor.map(snap),
     }
 }
 
@@ -47,6 +55,9 @@ fn clamp_cursor_col(pos: &mut Position, buffer: &TextBuffer) {
 pub struct UndoSnapshot {
     content: String,
     cursor: Position,
+    /// Full cursor set (primary first, then secondaries) before the edit, so a
+    /// multi-cursor edit can restore its column selection on undo.
+    cursors: Vec<SelectionSnapshot>,
 }
 
 /// Change tracking state for a line.
@@ -299,6 +310,7 @@ impl Document {
                 deleted: String::new(),
                 cursor_before: snap(cursor_before),
                 cursor_after: snap(self.cursor.position),
+                multi_cursor: None,
             });
 
             self.mark_lines_modified(cursor_before.line, self.cursor.position.line);
@@ -352,6 +364,7 @@ impl Document {
                     deleted: deleted_text,
                     cursor_before: snap(cursor_before),
                     cursor_after: snap(self.cursor.position),
+                    multi_cursor: None,
                 });
 
                 self.mark_lines_modified(start_pos.line, end_line);
@@ -389,6 +402,7 @@ impl Document {
                 deleted,
                 cursor_before: snap(cursor_before),
                 cursor_after: snap(self.cursor.position),
+                multi_cursor: None,
             });
 
             self.mark_lines_modified(self.cursor.position.line, cursor_before.line);
@@ -421,6 +435,7 @@ impl Document {
                 deleted,
                 cursor_before: snap(cursor_before),
                 cursor_after: snap(self.cursor.position),
+                multi_cursor: None,
             });
 
             self.mark_lines_modified(self.cursor.position.line, self.cursor.position.line);
@@ -445,10 +460,15 @@ impl Document {
                     let _ = self.buffer.insert(op.position, &op.deleted);
                 }
             }
-            if let Some(first_op) = ops.first() {
-                self.cursor.position = first_op.cursor_before.into();
-                self.cursor.clear_selection();
-                self.cursor.desired_col = None;
+            if let Some(transition) = ops.iter().find_map(|op| op.multi_cursor.as_ref()) {
+                self.restore_cursor_set(&transition.before);
+            } else {
+                if let Some(first_op) = ops.first() {
+                    self.cursor.position = first_op.cursor_before.into();
+                    self.cursor.clear_selection();
+                    self.cursor.desired_col = None;
+                }
+                self.secondary_cursors.clear();
             }
             self.history.resume_recording();
             self.sync_line_changes();
@@ -472,10 +492,15 @@ impl Document {
                     let _ = self.buffer.insert(op.position, &op.inserted);
                 }
             }
-            if let Some(last_op) = ops.last() {
-                self.cursor.position = last_op.cursor_after.into();
-                self.cursor.clear_selection();
-                self.cursor.desired_col = None;
+            if let Some(transition) = ops.iter().find_map(|op| op.multi_cursor.as_ref()) {
+                self.restore_cursor_set(&transition.after);
+            } else {
+                if let Some(last_op) = ops.last() {
+                    self.cursor.position = last_op.cursor_after.into();
+                    self.cursor.clear_selection();
+                    self.cursor.desired_col = None;
+                }
+                self.secondary_cursors.clear();
             }
             self.history.resume_recording();
             self.sync_line_changes();
@@ -582,6 +607,7 @@ impl Document {
                 deleted: deleted_text,
                 cursor_before: snap(cursor_before),
                 cursor_after: snap(self.cursor.position),
+                multi_cursor: None,
             });
 
             self.sync_line_changes();
@@ -611,7 +637,73 @@ impl Document {
         UndoSnapshot {
             content: self.buffer.to_string(),
             cursor: self.cursor.position,
+            cursors: self.capture_cursor_set(),
         }
+    }
+
+    /// Captures the full cursor set (primary first, then secondaries in order)
+    /// with each cursor's selection anchor.
+    fn capture_cursor_set(&self) -> Vec<SelectionSnapshot> {
+        let mut set = Vec::with_capacity(1 + self.secondary_cursors.len());
+        set.push(selection_snapshot(&self.cursor));
+        for sc in &self.secondary_cursors {
+            set.push(selection_snapshot(sc));
+        }
+        set
+    }
+
+    /// Restores the cursor set captured by [`capture_cursor_set`], replacing the
+    /// primary cursor and all secondary cursors. Does nothing for an empty set.
+    fn restore_cursor_set(&mut self, set: &[SelectionSnapshot]) {
+        let Some((primary, secondaries)) = set.split_first() else {
+            return;
+        };
+        self.cursor.position = primary.position.into();
+        self.cursor.selection_anchor = primary.anchor.map(Into::into);
+        self.cursor.desired_col = None;
+        self.secondary_cursors.clear();
+        for snap in secondaries {
+            let mut sc = Cursor::new();
+            sc.position = snap.position.into();
+            sc.selection_anchor = snap.anchor.map(Into::into);
+            self.secondary_cursors.push(sc);
+        }
+    }
+
+    /// Records the buffer's delta from `snapshot` as one isolated undo group.
+    ///
+    /// Brackets the recorded operation with group breaks so it undoes and
+    /// redoes as a single step, independent of any adjacent edits. Records
+    /// nothing and returns `false` when the buffer is unchanged from the
+    /// snapshot; returns `true` when a delta was recorded.
+    fn record_snapshot_delta(&mut self, snapshot: UndoSnapshot) -> bool {
+        let new_content = self.buffer.to_string();
+        if new_content == snapshot.content {
+            return false;
+        }
+        let cursors_before = snapshot.cursors;
+        let cursors_after = self.capture_cursor_set();
+        // Carry the multi-cursor selection only when more than one cursor is
+        // involved; single-cursor edits restore from cursor_before/cursor_after.
+        let multi_cursor = if cursors_before.len() > 1 || cursors_after.len() > 1 {
+            Some(MultiCursorTransition {
+                before: cursors_before,
+                after: cursors_after,
+            })
+        } else {
+            None
+        };
+        self.history.force_group_break();
+        self.history.record(EditOperation {
+            position: 0,
+            deleted: snapshot.content,
+            inserted: new_content,
+            cursor_before: snap(snapshot.cursor),
+            cursor_after: snap(self.cursor.position),
+            multi_cursor,
+        });
+        self.history.force_group_break();
+        true
     }
 
     /// Records a single undo entry from a pre-operation snapshot.
@@ -620,19 +712,9 @@ impl Document {
     /// as one operation that replaces the entire content. Does nothing if the
     /// buffer is unchanged.
     pub fn record_undo_from_snapshot(&mut self, snapshot: UndoSnapshot) {
-        let new_content = self.buffer.to_string();
-        if new_content == snapshot.content {
+        if !self.record_snapshot_delta(snapshot) {
             return;
         }
-        self.history.force_group_break();
-        self.history.record(EditOperation {
-            position: 0,
-            deleted: snapshot.content,
-            inserted: new_content,
-            cursor_before: snap(snapshot.cursor),
-            cursor_after: snap(self.cursor.position),
-        });
-        self.history.force_group_break();
         self.sync_line_changes();
         self.modified = true;
         self.scroll_to_cursor = true;

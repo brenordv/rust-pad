@@ -10,5 +10,7 @@ pub mod persistence;
 
 pub use config::HistoryConfig;
 pub use manager::UndoManager;
-pub use operation::{CursorSnapshot, EditGroup, EditOperation};
+pub use operation::{
+    CursorSnapshot, EditGroup, EditOperation, MultiCursorTransition, SelectionSnapshot,
+};
 pub use persistence::PersistenceLayer;

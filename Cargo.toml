@@ -45,16 +45,10 @@ rfd = "0.17.2"
 ropey = "1.6.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 tempfile = "3.27.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 trash = "5.2.6"
 ttf-parser = "0.25.1"
 uuid = { version = "1.24.0", features = ["v4"] }
-# Added explicitly to fix:
-# https://github.com/brenordv/rust-pad/security/code-scanning/10
-# https://github.com/brenordv/rust-pad/security/code-scanning/11
-# https://github.com/brenordv/rust-pad/security/code-scanning/12
-# quick-xml is used by plist, which is used by syntect.
-quick-xml = "0.41.0"

@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.2.1]
+
+### Fixed
+- **Undo and redo work after multi-cursor edits.** Typing, deleting, or pasting with more than one cursor
+  (a multi-column selection) recorded nothing on the undo stack, so pressing `Ctrl+Z` afterward did nothing
+  or scrambled the text. Each multi-cursor change is now a single undo step: `Ctrl+Z` reverts the whole edit
+  and `Ctrl+Y` reapplies it, and your multi-cursor selection is restored so you can keep editing.
+
+### Dependencies
+- **Dropped the `yaml-rust` and `plist` crates from the build.** `syntect` now compiles with only its
+  bundled-highlighting features (`default-syntaxes`, `default-themes`, `regex-fancy`) instead of the full
+  `default-fancy` set. The app only loads syntect's precompiled language and theme bundles, never raw
+  `.sublime-syntax` or `.tmTheme` files, so the `yaml-load` and `plist-load` features only added unused
+  parsers: the unmaintained `yaml-rust` (RUSTSEC-2024-0320) and `plist` (which pulls in `quick-xml`).
+  Syntax highlighting is unchanged. On Windows and macOS this also removes `quick-xml`; on Linux
+  `quick-xml` stays because the windowing and clipboard libraries depend on it, and bumping those is
+  tracked separately. Removed the `quick-xml = "0.41.0"` workspace entry added in 3.1.0, which no crate
+  referenced and so never affected dependency resolution.
+
 ## [3.2.0]
 
 ### Added
