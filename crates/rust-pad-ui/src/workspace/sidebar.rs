@@ -679,7 +679,10 @@ impl WorkspaceSidebar {
             // A row click hands keyboard ownership to the sidebar so arrow
             // navigation works regardless of pointer position until the user
             // clicks another panel (click-to-focus).
-            self.kbd_active = true;
+            if !self.kbd_active {
+                self.kbd_active = true;
+                tracing::debug!("Workspace tree gained keyboard focus on row click");
+            }
         }
     }
 

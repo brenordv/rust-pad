@@ -84,7 +84,7 @@ simple, stable, and fast as possible.
 - **Named workspaces** (`Ctrl+B` to toggle the sidebar): group project folders into named workspaces that persist across restarts in a dedicated database (`rust-pad-workspaces.redb`). Create, rename, switch, and delete workspaces
 - **Folder management**: add folders via the menu or the sidebar; exact duplicates are rejected, while overlapping (parent/child) folders are allowed. Remove folders without deleting them from disk
 - **Hide Sidebar** (in the sidebar header's overflow menu) collapses the panel without closing the workspace (reopen with `Ctrl+B` or the Workspace menu)
-- **Selection and keyboard navigation**: single click selects a row, double click opens it; with the tree engaged, arrow keys move/expand/collapse, `Enter` opens, and `F2` renames
+- **Selection and keyboard navigation**: single click selects a row and hands the keyboard to the tree (the editor caret hides, so `Enter` and arrows drive the tree, not the file), double click opens it; with the tree engaged, arrow keys move/expand/collapse, `Enter` opens, and `F2` renames. Click back into the editor to resume typing
 - **Context-menu utilities**: Copy Path (Name / Full Path / Relative Path), Copy Contents for files, Open in File Explorer and Reload from Disk for folders
 - **File tree**: collapsible, lazy-loaded folder tree (directories before files, sorted case-insensitively, large directories capped at 10,000 entries). Optionally include hidden folders
 - **File operations from the sidebar**: double-click to open; right-click for New File, New Folder, Rename, and Delete (send to trash), with inline naming fields

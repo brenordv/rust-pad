@@ -325,6 +325,8 @@ impl App {
     ) {
         let focused = self.tabs.focused_pane() == pane;
         let accent = self.theme_ctrl.accent_color;
+        // Read keyboard ownership before the mutable `self.tabs` borrow below.
+        let sidebar_kbd_active = self.workspace_sidebar.kbd_active;
 
         parent.scope_builder(
             UiBuilder::new()
@@ -350,7 +352,7 @@ impl App {
                     editor.show_line_numbers = self.show_line_numbers;
                     editor.dialog_open = dialog_open;
                     editor.modal_dialog_open = modal_dialog_open;
-                    editor.auto_focus = focused;
+                    editor.auto_focus = focused && !sidebar_kbd_active;
                     editor.max_zoom_level = self.theme_ctrl.max_zoom_level;
                     editor.bookmarks = Some(&self.bookmarks);
                     response = editor.show(ui);
@@ -365,6 +367,7 @@ impl App {
                         .push((pane, pane_rect, response.rect, vscroll_track));
                 }
                 self.editor_kbd_focus |= response.has_focus();
+                self.reclaim_kbd_on_editor_click(&response);
                 response.context_menu(|ui| {
                     self.show_editor_context_menu(ui);
                 });
@@ -830,6 +833,91 @@ mod tests {
                 "editor rect not finite: {editor_rect:?}"
             );
         }
+    }
+
+    /// Clicking into a split pane returns keyboard ownership to the editor, so
+    /// the workspace tree cannot keep the keyboard after the user clicks back
+    /// to edit. Without the reclaim, a split pane would be a keyboard dead-end
+    /// whenever the sidebar held ownership.
+    #[test]
+    fn clicking_a_split_pane_reclaims_keyboard_from_the_sidebar() {
+        use rust_pad_core::buffer::TextBuffer;
+
+        let mut app = super::super::tests::test_app();
+        app.tabs.documents[0].buffer = TextBuffer::from("hello\nworld\n");
+        app.tabs.new_tab();
+        app.tabs.switch_to(1);
+        app.toggle_split_vertical();
+        assert!(app.is_split());
+
+        let ctx = egui::Context::default();
+        {
+            let mut fonts = egui::FontDefinitions::default();
+            let proportional = fonts
+                .families
+                .get(&egui::FontFamily::Proportional)
+                .cloned()
+                .unwrap_or_default();
+            fonts.families.insert(
+                egui::FontFamily::Name(crate::app::FONT_FAMILY_SEMIBOLD.into()),
+                proportional,
+            );
+            ctx.set_fonts(fonts);
+        }
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    pos2(0.0, 0.0),
+                    egui::vec2(1000.0, 800.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                app.render_split_panes(ui, false, false);
+            });
+        };
+
+        // Settle, then read a pane's editor rect to aim the click.
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        let center = app
+            .test_pane_probe
+            .iter()
+            .map(|(_, _, editor_rect, _)| editor_rect.center())
+            .next()
+            .expect("a pane rendered");
+
+        // The sidebar owns the keyboard, as if a folder row was just clicked.
+        app.workspace_sidebar.kbd_active = true;
+
+        // Press then release inside the pane editor: egui reports the click on
+        // release, which is when the reclaim fires.
+        frame(&mut app, vec![egui::Event::PointerMoved(center)]);
+        frame(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: center,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: center,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+
+        assert!(
+            !app.workspace_sidebar.kbd_active,
+            "clicking a split pane must return keyboard ownership to the editor"
+        );
     }
 
     #[test]

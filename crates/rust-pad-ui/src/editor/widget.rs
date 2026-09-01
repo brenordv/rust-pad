@@ -587,6 +587,18 @@ impl<'a> EditorWidget<'a> {
         response: &Response,
         wrap_map: Option<&WrapMap>,
     ) {
+        // When this editor is not the auto-focus owner, the workspace tree (or
+        // another split pane) holds the keyboard. Release any egui focus this
+        // editor still carries so its caret can't linger and quietly swallow
+        // keys the tree should receive. A click this frame is the user
+        // reclaiming the editor, so keep the focus the mouse handler just
+        // requested and fall through to process keys the same frame.
+        if !self.auto_focus && !response.clicked() {
+            if response.has_focus() {
+                response.surrender_focus();
+            }
+            return;
+        }
         // Don't auto-grab focus when any dialog is open; focus transfers
         // to the editor via mouse click (handle_mouse_input calls
         // response.request_focus()). In split view, only the focused
@@ -2810,6 +2822,68 @@ mod tests {
             widget.word_wrap = word_wrap;
             let _ = widget.show(ui);
         });
+    }
+
+    /// The editor releases egui keyboard focus the moment it stops owning the
+    /// keyboard (`auto_focus == false` with no click that frame), so a folder
+    /// row that took the keyboard can't leave a live caret that swallows Enter.
+    #[test]
+    fn editor_surrenders_focus_when_not_auto_focus_owner() {
+        let ctx = egui::Context::default();
+        let theme = EditorTheme::default();
+        let mut doc = Document {
+            buffer: "ab".into(),
+            ..Default::default()
+        };
+
+        let enter = || egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // `focused: true` marks the window as keyboard-focused so `has_focus()`
+        // can report true; it is false by default in `RawInput`.
+        let run = |ctx: &egui::Context,
+                   doc: &mut Document,
+                   auto_focus: bool,
+                   events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                let mut widget = EditorWidget::new(doc, &theme, None);
+                widget.auto_focus = auto_focus;
+                let _ = widget.show(ui);
+            });
+        };
+
+        // Two auto-focus passes so the editor requests, then holds, egui focus.
+        run(&ctx, &mut doc, true, vec![]);
+        run(&ctx, &mut doc, true, vec![]);
+
+        // Control: with focus held, Enter inserts a newline.
+        let before = doc.buffer.len_lines();
+        run(&ctx, &mut doc, true, vec![enter()]);
+        assert!(
+            doc.buffer.len_lines() > before,
+            "a focused editor inserts a newline on Enter"
+        );
+
+        // The workspace tree takes the keyboard (auto_focus off, no click): the
+        // editor releases focus, so the following Enter must be ignored.
+        run(&ctx, &mut doc, false, vec![]);
+        let after_release = doc.buffer.len_lines();
+        run(&ctx, &mut doc, false, vec![enter()]);
+        assert_eq!(
+            doc.buffer.len_lines(),
+            after_release,
+            "an editor that surrendered keyboard focus must ignore Enter"
+        );
     }
 
     #[test]
