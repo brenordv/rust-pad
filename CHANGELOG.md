@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.2.3]
+
+### Fixed
+- **`Enter` no longer toggles a highlighted workspace folder while you are editing a file.** Clicking a folder
+  in the tree handed the keyboard to the sidebar, but the editor kept its caret, so `Enter` and the arrow keys
+  drove the tree while it still looked like you were typing in the file. Clicking a folder now moves keyboard
+  focus to the tree and hides the editor caret, so it is clear which pane has the keyboard. Click back into the
+  file to resume editing.
+
+### Updated
+- Bumped `dark-light` from `2.0.0` to `3.0.0`.
+- Bumped `redb` from `4.2.0` to `4.3.0`.
+
 ## [3.2.2]
 - Forgot to bump the version in the previous release. So this is literally just a version bump. Sorry about that.
 

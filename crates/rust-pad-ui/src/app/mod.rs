@@ -1703,6 +1703,15 @@ impl App {
         doc.insert_text(&recovered);
         doc.title = format!("[Recovered] {filename}");
     }
+
+    /// Returns keyboard ownership to the editor when the user clicks into it,
+    /// so workspace-tree keyboard navigation stops and typed keys land in the
+    /// editor. Shared by the single-pane and split-pane editor call sites.
+    fn reclaim_kbd_on_editor_click(&mut self, response: &egui::Response) {
+        if response.clicked() {
+            self.workspace_sidebar.kbd_active = false;
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -1891,9 +1900,7 @@ impl eframe::App for App {
 
                 // A click in the editor returns keyboard ownership to it, so
                 // sidebar arrow navigation stops and the editor receives keys.
-                if response.clicked() {
-                    self.workspace_sidebar.kbd_active = false;
-                }
+                self.reclaim_kbd_on_editor_click(&response);
 
                 response.context_menu(|ui| {
                     self.show_editor_context_menu(ui);
